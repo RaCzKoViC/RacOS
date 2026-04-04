@@ -1,0 +1,6 @@
+[package]
+name = "libc-lite"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

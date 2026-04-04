@@ -1,0 +1,6 @@
+[package]
+name = "rapt"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

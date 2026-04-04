@@ -1,0 +1,30 @@
+# Build artifacts
+/target/
+/build/
+/out/
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# QEMU
+*.qcow2
+*.raw
+*.iso
+!images/*.iso
+
+# Debug
+*.log
+core.*
+crash-*.dump
+
+# Toolchain downloads
+/toolchain/downloads/
+/toolchain/sysroot/

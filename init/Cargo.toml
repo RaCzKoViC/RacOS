@@ -1,0 +1,6 @@
+[package]
+name = "racinit"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

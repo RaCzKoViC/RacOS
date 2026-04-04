@@ -1,0 +1,6 @@
+[package]
+name = "libcore-user"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

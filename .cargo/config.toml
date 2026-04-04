@@ -1,0 +1,9 @@
+# Cargo configuration for RacOS workspace
+
+# When building for the bare-metal kernel target, provide core + compiler_builtins
+[unstable]
+build-std = ["core", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
+
+[build]
+target-dir = "C:\\Users\\Maciej\\RacOS-target"

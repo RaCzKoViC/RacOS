@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    "boot",
+    "init",
+    "libs/libc-lite",
+    "libs/libcore-user",
+    "shell",
+    "terminal",
+    "pkg/rpkg",
+    "pkg/rapt",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+repository = ""
+
+[profile.dev]
+panic = "abort"
+opt-level = 0
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
+strip = "symbols"

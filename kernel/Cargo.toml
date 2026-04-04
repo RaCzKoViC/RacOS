@@ -1,0 +1,10 @@
+[package]
+name = "racore"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+[features]
+default = []
+test_runner = []

@@ -1,0 +1,6 @@
+[package]
+name = "rpkg"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

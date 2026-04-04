@@ -1,0 +1,6 @@
+[package]
+name = "racos-boot"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
