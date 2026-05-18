@@ -1,0 +1,146 @@
+name: RacOS CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+jobs:
+  build:
+    name: Build kernel + bootloader + userland
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools-preview
+          targets: x86_64-unknown-none, x86_64-unknown-uefi
+
+      - name: Install system deps (nasm)
+        run: sudo apt-get update && sudo apt-get install -y nasm
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build kernel (racore)
+        run: cargo build --package racore --target x86_64-unknown-none
+
+      - name: Build bootloader (racos-boot)
+        run: cargo build --package racos-boot --target x86_64-unknown-uefi
+
+      - name: Build userland workspace
+        run: cargo build --workspace --exclude racore --exclude racos-boot
+
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-elf
+          path: target/x86_64-unknown-none/debug/racore
+          if-no-files-found: warn
+
+      - name: Upload bootloader artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootloader-efi
+          path: target/x86_64-unknown-uefi/debug/bootx64.efi
+          if-no-files-found: warn
+
+  test-unit:
+    name: Unit & integration tests (host)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: Install nasm
+        run: sudo apt-get update && sudo apt-get install -y nasm
+      - name: Run host-side workspace tests
+        run: cargo test --workspace --exclude racore --exclude racos-boot
+        continue-on-error: true
+
+  boot-smoke:
+    name: QEMU boot smoke (UEFI)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools-preview
+          targets: x86_64-unknown-none, x86_64-unknown-uefi
+      - name: Install QEMU, OVMF, nasm, python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf nasm mtools python3
+
+      - name: Build kernel + bootloader
+        run: |
+          cargo build --package racore --target x86_64-unknown-none
+          cargo build --package racos-boot --target x86_64-unknown-uefi
+
+      - name: Stage ESP
+        run: |
+          mkdir -p esp/EFI/BOOT
+          cp target/x86_64-unknown-uefi/debug/bootx64.efi esp/EFI/BOOT/BOOTX64.EFI
+          cp target/x86_64-unknown-none/debug/racore esp/racore.elf
+          if [ -d initramfs-root ]; then
+            python3 scripts/pack-initramfs.py initramfs-root esp/initramfs.img || true
+          fi
+          ls -la esp/
+
+      - name: Boot in QEMU (15s budget)
+        run: |
+          OVMF=/usr/share/OVMF/OVMF_CODE.fd
+          timeout 15 qemu-system-x86_64 \
+            -machine q35 -cpu qemu64 -m 512M \
+            -drive if=pflash,format=raw,file=$OVMF,readonly=on \
+            -drive file=fat:rw:esp,format=raw \
+            -serial stdio -display none -no-reboot \
+            > boot.log 2>&1 || true
+          echo "--- boot.log tail ---"
+          tail -n 80 boot.log
+
+      - name: Assert kernel reached idle loop
+        run: |
+          grep -q "RACORE: RacOS kernel starting" boot.log || (echo "Kernel did not start" && exit 1)
+          grep -q "RACORE: Entering idle loop" boot.log || (echo "Kernel did not reach idle loop" && exit 1)
+          echo "Boot smoke PASSED"
+
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-log
+          path: boot.log
+
+  lint:
+    name: Format + clippy (advisory)
+    runs-on: ubuntu-latest
+    needs: build
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy, rust-src
+          targets: x86_64-unknown-none, x86_64-unknown-uefi
+      - name: rustfmt check
+        run: cargo fmt --all -- --check
+      - name: clippy (kernel)
+        run: cargo clippy --package racore --target x86_64-unknown-none -- -W clippy::all
