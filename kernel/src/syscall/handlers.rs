@@ -1097,7 +1097,11 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> SyscallResult {
         core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf, cwd_len);
         *buf.add(cwd_len) = 0; // null terminator
     }
-    Ok(buf as i64)
+    // Return the length, not the buffer pointer. libc-lite's wrapper treats
+    // the syscall return value as a usize length; returning the pointer made
+    // user-space see e.g. `n = 0x7FFFFFFEFE00`, and `&buf[..n]` panicked
+    // out of bounds in racsh's builtin_pwd.
+    Ok(cwd_len as i64)
 }
 
 // ─────────────────────────────────────────────────
