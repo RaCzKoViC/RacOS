@@ -120,7 +120,9 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Initialize shell filesystem API after block devices are ready.
     shell_fs::init(KERNEL_SHELL_DEBUG);
 
-    // Initialize PIC (remap IRQs to vectors 32-47)
+    // Initialize PIC + PIT (interrupts::init handles both). Used to call
+    // pit::init() again here, which double-initialised the PIT and printed
+    // duplicate "PIT initialized" lines.
     interrupts::init();
 
     // Input defaults: IRQ mode enabled, polling disabled unless fail-safe selected.
@@ -130,9 +132,6 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     } else {
         drivers::ps2_keyboard::set_input_mode(drivers::ps2_keyboard::InputMode::Irq);
     }
-
-    // Initialize PIT timer (1000 Hz)
-    interrupts::pit::init();
 
     // Initialize scheduler with idle task (PID 0)
     // SAFETY: Called once, heap is ready, interrupts still disabled.
