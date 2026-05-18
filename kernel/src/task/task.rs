@@ -47,6 +47,14 @@ pub enum TaskState {
 
 /// Kernel stack size: 16 KiB (4 frames).
 pub const KERNEL_STACK_PAGES: usize = 16;
+/// One extra page allocated just below the usable kernel stack and filled
+/// with a sentinel pattern. Scheduler checks it on every context switch
+/// and panics if the pattern changed — that means the task's kernel stack
+/// overflowed.
+pub const KERNEL_STACK_GUARD_PAGES: usize = 1;
+/// Single byte we splat across the guard page. `0xCC` = x86 `int3`, easy
+/// to spot in memory dumps.
+pub const KERNEL_STACK_GUARD_BYTE: u8 = 0xCC;
 pub const KERNEL_STACK_SIZE: usize = KERNEL_STACK_PAGES * FRAME_SIZE;
 
 /// Per-task credentials (Phase C MVP).
@@ -119,14 +127,22 @@ impl Task {
     pub fn new_kernel(name: &str, entry_fn: fn() -> !) -> Result<Self, &'static str> {
         let pid = alloc_pid();
 
-        // Allocate kernel stack
-        let stack_frame = phys::alloc_contiguous(KERNEL_STACK_PAGES)
-            .map_err(|_| "Failed to allocate kernel stack")?;
-        let stack_base = stack_frame.addr();
+        // Allocate kernel stack + 1 guard page below it. The guard page lives at
+        // `alloc_base`; usable stack starts FRAME_SIZE bytes above so that an
+        // overflow walks straight into the guard.
+        let total_pages = KERNEL_STACK_PAGES + KERNEL_STACK_GUARD_PAGES;
+        let alloc_frame = phys::alloc_contiguous(total_pages)
+            .map_err(|_| "Failed to allocate kernel stack + guard")?;
+        let alloc_base = alloc_frame.addr();
+        let stack_base = alloc_base + (KERNEL_STACK_GUARD_PAGES * phys::FRAME_SIZE) as u64;
         let stack_top = stack_base + KERNEL_STACK_SIZE as u64;
 
-        // Zero the stack
         unsafe {
+            // Guard page: fill with sentinel byte so scheduler.check_kernel_stack_guard
+            // can detect an overflow at the next context switch.
+            core::ptr::write_bytes(alloc_base as *mut u8, KERNEL_STACK_GUARD_BYTE,
+                                   KERNEL_STACK_GUARD_PAGES * phys::FRAME_SIZE);
+            // Usable stack: zeroed.
             core::ptr::write_bytes(stack_base as *mut u8, 0, KERNEL_STACK_SIZE);
         }
 

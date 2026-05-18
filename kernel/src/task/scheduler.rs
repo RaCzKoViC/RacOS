@@ -145,6 +145,12 @@ impl Scheduler {
 
     /// Select the next task and perform context switch.
     pub fn schedule(&mut self) {
+        // Defensive: validate every task's kernel-stack guard page before
+        // picking the next task. Catches kernel stack overflow that would
+        // otherwise silently corrupt adjacent allocations (this exact bug
+        // bit us with the 4-page kernel stack + sys_spawn).
+        self.check_kernel_stack_guards();
+
         let task_count = self.tasks.len();
         if task_count <= 1 {
             self.ticks_remaining = TIME_QUANTUM;
@@ -239,6 +245,41 @@ impl Scheduler {
         // with later schedule decisions and can corrupt RSP0/kernel-RSP state.
     }
 
+    /// Walk every task's kernel-stack guard page and verify it still holds
+    /// the sentinel pattern. If it doesn't, that task overflowed its kernel
+    /// stack — panic loudly with the task PID so we know what to blame.
+    ///
+    /// Cheap: 8 bytes read per task per schedule call. The guard page is
+    /// `super::task::KERNEL_STACK_GUARD_PAGES` × `FRAME_SIZE` bytes
+    /// immediately *below* `kernel_stack_base`.
+    fn check_kernel_stack_guards(&self) {
+        for slot in self.tasks.iter().flatten() {
+            if slot.kernel_stack_base == 0 {
+                continue; // idle task or similar — no allocated stack
+            }
+            let guard_addr = slot.kernel_stack_base
+                - (super::task::KERNEL_STACK_GUARD_PAGES * crate::mm::phys::FRAME_SIZE) as u64;
+            // Check the first 8 bytes of the guard page. If any of those is
+            // not the sentinel, overflow happened.
+            let first_qword = unsafe { core::ptr::read_volatile(guard_addr as *const u64) };
+            let expected_byte = super::task::KERNEL_STACK_GUARD_BYTE as u64;
+            let expected_qword = expected_byte
+                | (expected_byte << 8)
+                | (expected_byte << 16)
+                | (expected_byte << 24)
+                | (expected_byte << 32)
+                | (expected_byte << 40)
+                | (expected_byte << 48)
+                | (expected_byte << 56);
+            if first_qword != expected_qword {
+                panic!(
+                    "kernel stack overflow detected for PID {} (guard @ 0x{:X} = 0x{:X}, expected 0x{:X})",
+                    slot.pid, guard_addr, first_qword, expected_qword,
+                );
+            }
+        }
+    }
+
     /// Yield the current task voluntarily.
     pub fn yield_current(&mut self) {
         self.ticks_remaining = 0;
@@ -324,10 +365,15 @@ impl Scheduler {
                         unsafe { crate::mm::virt::free_page_table(page_table_phys, true); }
                     }
 
-                    // Free the kernel stack
+                    // Free the kernel stack PLUS the guard page that lives
+                    // immediately below it (same single contiguous alloc).
                     if kernel_stack_base != 0 {
-                        for i in 0..super::task::KERNEL_STACK_PAGES {
-                            let addr = kernel_stack_base + (i * crate::mm::phys::FRAME_SIZE) as u64;
+                        let alloc_base = kernel_stack_base
+                            - (super::task::KERNEL_STACK_GUARD_PAGES * crate::mm::phys::FRAME_SIZE) as u64;
+                        let total_pages = super::task::KERNEL_STACK_PAGES
+                            + super::task::KERNEL_STACK_GUARD_PAGES;
+                        for i in 0..total_pages {
+                            let addr = alloc_base + (i * crate::mm::phys::FRAME_SIZE) as u64;
                             let _ = crate::mm::phys::free_frame(
                                 crate::mm::phys::PhysFrame::containing(addr),
                             );
@@ -458,11 +504,14 @@ impl Scheduler {
                 // is no longer in use after we load the new CR3.
                 unsafe { crate::mm::virt::free_page_table(old_pt, true); }
             }
-            // Free old kernel stack if it exists
+            // Free old kernel stack (and its guard page) if it exists.
             if task.kernel_stack_base != 0 {
-                let pages = super::task::KERNEL_STACK_PAGES;
-                for i in 0..pages {
-                    let addr = task.kernel_stack_base + (i * crate::mm::phys::FRAME_SIZE) as u64;
+                let alloc_base = task.kernel_stack_base
+                    - (super::task::KERNEL_STACK_GUARD_PAGES * crate::mm::phys::FRAME_SIZE) as u64;
+                let total_pages = super::task::KERNEL_STACK_PAGES
+                    + super::task::KERNEL_STACK_GUARD_PAGES;
+                for i in 0..total_pages {
+                    let addr = alloc_base + (i * crate::mm::phys::FRAME_SIZE) as u64;
                     let _ = crate::mm::phys::free_frame(crate::mm::phys::PhysFrame::containing(addr));
                 }
             }

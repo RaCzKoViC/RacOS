@@ -64,17 +64,30 @@ impl UserProcess {
         let pid = alloc_user_pid();
         crate::serial::serial_println!("[ USERPROC ] from_elf('{}') pid={} start", name, pid);
 
-        // Allocate kernel stack for this process
-        let kernel_stack = phys::alloc_contiguous(KERNEL_STACK_PAGES)
-            .map_err(|_| "Failed to allocate kernel stack")?;
-        let kernel_stack_base = kernel_stack.addr();
+        // Allocate kernel stack + guard page (see KERNEL_STACK_GUARD_PAGES).
+        // Layout: [guard page] [usable stack ...]. Overflow off the bottom of
+        // the usable stack walks into the guard page and is caught by
+        // scheduler.check_kernel_stack_guard on the next context switch.
+        let total_pages = KERNEL_STACK_PAGES + super::task::KERNEL_STACK_GUARD_PAGES;
+        let alloc_frame = phys::alloc_contiguous(total_pages)
+            .map_err(|_| "Failed to allocate kernel stack + guard")?;
+        let alloc_base = alloc_frame.addr();
+        let kernel_stack_base = alloc_base
+            + (super::task::KERNEL_STACK_GUARD_PAGES * phys::FRAME_SIZE) as u64;
         let kernel_stack_top = kernel_stack_base + KERNEL_STACK_SIZE as u64;
 
-        // Zero kernel stack
         unsafe {
+            core::ptr::write_bytes(
+                alloc_base as *mut u8,
+                super::task::KERNEL_STACK_GUARD_BYTE,
+                super::task::KERNEL_STACK_GUARD_PAGES * phys::FRAME_SIZE,
+            );
             core::ptr::write_bytes(kernel_stack_base as *mut u8, 0, KERNEL_STACK_SIZE);
         }
-        crate::serial::serial_println!("[ USERPROC ] kernel stack allocated @ 0x{:X}", kernel_stack_base);
+        crate::serial::serial_println!(
+            "[ USERPROC ] kernel stack @ 0x{:X} (guard @ 0x{:X})",
+            kernel_stack_base, alloc_base
+        );
 
         // ── Push argv onto the user stack ─────────────────────────────────
         // System V AMD64 ABI: at the entry RSP must be 16-byte aligned and

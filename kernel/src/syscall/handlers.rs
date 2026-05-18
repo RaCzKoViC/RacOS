@@ -1486,10 +1486,11 @@ pub fn sys_fork() -> SyscallResult {
             }
         };
 
-        // Allocate child kernel stack.
-        let child_stack_frame = match crate::mm::phys::alloc_contiguous(
-            crate::task::task::KERNEL_STACK_PAGES,
-        ) {
+        // Allocate child kernel stack + guard page. See process::from_elf
+        // for the layout invariant the scheduler's guard check relies on.
+        let total_pages = crate::task::task::KERNEL_STACK_PAGES
+            + crate::task::task::KERNEL_STACK_GUARD_PAGES;
+        let child_alloc_frame = match crate::mm::phys::alloc_contiguous(total_pages) {
             Ok(f) => f,
             Err(_) => {
                 crate::mm::virt::free_page_table(child_pt, true);
@@ -1497,11 +1498,18 @@ pub fn sys_fork() -> SyscallResult {
                 return Err(SyscallError::ENOMEM);
             }
         };
-        let child_stack_base = child_stack_frame.addr();
+        let child_alloc_base = child_alloc_frame.addr();
+        let child_stack_base = child_alloc_base
+            + (crate::task::task::KERNEL_STACK_GUARD_PAGES * crate::mm::phys::FRAME_SIZE) as u64;
         let child_stack_top =
             child_stack_base + crate::task::task::KERNEL_STACK_SIZE as u64;
 
-        // Zero the child's kernel stack.
+        // Guard page sentinel + zero usable stack.
+        core::ptr::write_bytes(
+            child_alloc_base as *mut u8,
+            crate::task::task::KERNEL_STACK_GUARD_BYTE,
+            crate::task::task::KERNEL_STACK_GUARD_PAGES * crate::mm::phys::FRAME_SIZE,
+        );
         core::ptr::write_bytes(
             child_stack_base as *mut u8,
             0,
@@ -1570,10 +1578,12 @@ pub fn sys_fork() -> SyscallResult {
                 Ok(pid as i64)
             }
             Err(_) => {
-                // Cleanup on failure.
+                // Cleanup on failure: free the entire (guard + stack) alloc.
                 crate::mm::virt::free_page_table(child_pt, true);
-                for i in 0..crate::task::task::KERNEL_STACK_PAGES {
-                    let addr = child_stack_base
+                let total_pages = crate::task::task::KERNEL_STACK_PAGES
+                    + crate::task::task::KERNEL_STACK_GUARD_PAGES;
+                for i in 0..total_pages {
+                    let addr = child_alloc_base
                         + (i * crate::mm::phys::FRAME_SIZE) as u64;
                     let _ = crate::mm::phys::free_frame(
                         crate::mm::phys::PhysFrame::containing(addr),
@@ -1648,10 +1658,10 @@ pub fn sys_clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8)
             }
         };
 
-        // Allocate child kernel stack.
-        let child_stack_frame = match crate::mm::phys::alloc_contiguous(
-            crate::task::task::KERNEL_STACK_PAGES,
-        ) {
+        // Allocate child kernel stack + guard page.
+        let total_pages = crate::task::task::KERNEL_STACK_PAGES
+            + crate::task::task::KERNEL_STACK_GUARD_PAGES;
+        let child_alloc_frame = match crate::mm::phys::alloc_contiguous(total_pages) {
             Ok(f) => f,
             Err(_) => {
                 if flags & CLONE_VM == 0 {
@@ -1661,11 +1671,18 @@ pub fn sys_clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8)
                 return Err(SyscallError::ENOMEM);
             }
         };
-        let child_stack_base = child_stack_frame.addr();
+        let child_alloc_base = child_alloc_frame.addr();
+        let child_stack_base = child_alloc_base
+            + (crate::task::task::KERNEL_STACK_GUARD_PAGES * crate::mm::phys::FRAME_SIZE) as u64;
         let child_stack_top =
             child_stack_base + crate::task::task::KERNEL_STACK_SIZE as u64;
 
-        // Zero the child's kernel stack.
+        // Guard sentinel + zero usable stack.
+        core::ptr::write_bytes(
+            child_alloc_base as *mut u8,
+            crate::task::task::KERNEL_STACK_GUARD_BYTE,
+            crate::task::task::KERNEL_STACK_GUARD_PAGES * crate::mm::phys::FRAME_SIZE,
+        );
         core::ptr::write_bytes(
             child_stack_base as *mut u8,
             0,
@@ -1758,12 +1775,14 @@ pub fn sys_clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8)
                 Ok(pid as i64)
             }
             Err(_) => {
-                // Cleanup on failure.
+                // Cleanup on failure: free guard + stack pages.
                 if flags & CLONE_VM == 0 {
                     crate::mm::virt::free_page_table(child_pt, true);
                 }
-                for i in 0..crate::task::task::KERNEL_STACK_PAGES {
-                    let addr = child_stack_base
+                let total_pages = crate::task::task::KERNEL_STACK_PAGES
+                    + crate::task::task::KERNEL_STACK_GUARD_PAGES;
+                for i in 0..total_pages {
+                    let addr = child_alloc_base
                         + (i * crate::mm::phys::FRAME_SIZE) as u64;
                     let _ = crate::mm::phys::free_frame(
                         crate::mm::phys::PhysFrame::containing(addr),
