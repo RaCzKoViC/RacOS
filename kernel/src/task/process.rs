@@ -77,29 +77,35 @@ impl UserProcess {
         crate::serial::serial_println!("[ USERPROC ] kernel stack allocated @ 0x{:X}", kernel_stack_base);
 
         // ── Push argv onto the user stack ─────────────────────────────────
+        // System V AMD64 ABI: at the entry RSP must be 16-byte aligned and
+        // [rsp+0]=argc, [rsp+8..]=argv pointers ending in NULL, [rsp+8(N+2)..]=envp.
+        // (We skip envp/auxv for now.)
+        //
         // Layout (growing downward from stack_virt_top):
-        //   [argv string data]   ← null-terminated strings at top of stack
-        //   [alignment padding]
-        //   NULL (u64)           ← end of argv array
-        //   argv[N-1] ptr (u64)  ← virtual address of argv[N-1] string
+        //   [argv string data ...]       ← null-terminated strings (top of stack)
+        //   [padding to 16-byte align]
+        //   NULL                         ← argv terminator
+        //   argv[N-1] ptr
         //   ...
-        //   argv[0] ptr (u64)    ← virtual address of argv[0] string
-        //   argc (u64)           ← number of arguments
-        //   ← RSP points here
+        //   argv[0] ptr
+        //   argc                          ← user_rsp points here, 16-byte aligned
+        //
+        // The previous version aligned to 16 AFTER writing argc, which could
+        // shift sp downward by 8 — argc would end up at [user_rsp+8] instead
+        // of [user_rsp+0] and _start would read 0 (alignment pad) as argc.
 
         let stack_virt_base = loaded.stack_virt_top - loaded.stack_size as u64;
-        // Offset in physical memory that corresponds to a virtual address
         let virt_to_phys = |vaddr: u64| -> u64 {
             loaded.stack_phys_base + (vaddr - stack_virt_base)
         };
 
-        let mut sp = loaded.stack_virt_top; // current position (grows down)
+        let mut sp = loaded.stack_virt_top;
         let argc = argv.len();
 
-        // 1. Write string data at the top of the stack
+        // 1. Write string data at the top of the stack.
         let mut string_vaddrs = alloc::vec::Vec::with_capacity(argc);
         for arg in argv.iter().rev() {
-            sp -= 1; // null terminator
+            sp -= 1;
             unsafe { *(virt_to_phys(sp) as *mut u8) = 0; }
             sp -= arg.len() as u64;
             unsafe {
@@ -109,34 +115,40 @@ impl UserProcess {
                     arg.len(),
                 );
             }
-            string_vaddrs.push(sp); // virtual address of this string
+            string_vaddrs.push(sp);
         }
-        string_vaddrs.reverse(); // now in correct order (argv[0] first)
+        string_vaddrs.reverse(); // argv[0] first
 
-        // 2. Align SP to 8 bytes
-        sp &= !7u64;
-
-        // 3. Write NULL terminator for argv array
-        sp -= 8;
-        unsafe { *(virt_to_phys(sp) as *mut u64) = 0; }
-
-        // 4. Write argv pointers (in reverse so argv[0] is at lowest address)
-        for vaddr in string_vaddrs.iter().rev() {
-            sp -= 8;
-            unsafe { *(virt_to_phys(sp) as *mut u64) = *vaddr; }
-        }
-        let argv_ptr_vaddr = sp; // virtual address of argv[0] pointer
-
-        // 5. Write argc
-        sp -= 8;
-        unsafe { *(virt_to_phys(sp) as *mut u64) = argc as u64; }
-
-        // 6. Align SP to 16 bytes (System V ABI requires 16-byte aligned RSP at entry)
+        // 2. Drop sp to a 16-byte boundary so the pointer block stays aligned.
         sp &= !15u64;
 
-        let user_rsp = sp;
-        let _ = argv_ptr_vaddr; // used by _start to compute argv
-        crate::serial::serial_println!("[ USERPROC ] argv/user stack prepared rsp=0x{:X}", user_rsp);
+        // 3. Reserve the argc/argv block, rounded up to 16 bytes. Layout
+        //    inside the block (low → high addresses): argc, argv[0], ...,
+        //    argv[N-1], NULL, then optional padding.
+        let block_bytes = 8 + 8 * (argc as u64 + 1); // argc + N pointers + NULL
+        let block_bytes_aligned = (block_bytes + 15) & !15;
+        sp -= block_bytes_aligned;
+
+        let user_rsp = sp; // 16-byte aligned
+
+        // 4. Populate the block at fixed offsets from user_rsp.
+        unsafe {
+            // argc at [rsp+0]
+            *(virt_to_phys(user_rsp) as *mut u64) = argc as u64;
+            // argv[i] at [rsp + 8*(i+1)]
+            for (i, vaddr) in string_vaddrs.iter().enumerate() {
+                let slot = user_rsp + 8 + 8 * i as u64;
+                *(virt_to_phys(slot) as *mut u64) = *vaddr;
+            }
+            // NULL at [rsp + 8*(argc+1)]
+            let null_slot = user_rsp + 8 + 8 * argc as u64;
+            *(virt_to_phys(null_slot) as *mut u64) = 0;
+        }
+
+        crate::serial::serial_println!(
+            "[ USERPROC ] argv/user stack prepared rsp=0x{:X} argc={} block_bytes={}",
+            user_rsp, argc, block_bytes_aligned,
+        );
 
         // Set up the IRETQ frame at the top of the kernel stack.
         let iret_frame_size = 5 * 8; // 5 u64 values for IRETQ
@@ -288,9 +300,8 @@ unsafe extern "C" fn user_entry_trampoline() {
         "mov ax, 0x1B",       // USER_DS = 0x18 | 3
         "mov ds, ax",
         "mov es, ax",
-        // IRETQ pops: RIP, CS, RFLAGS, RSP, SS from current RSP, and the
-        // popped RFLAGS already has IF set so interrupts come back enabled
-        // in user mode.
+        // IRETQ pops: RIP, CS, RFLAGS, RSP, SS from current RSP. The popped
+        // RFLAGS already has IF set so interrupts are enabled in user mode.
         "iretq",
     );
 }

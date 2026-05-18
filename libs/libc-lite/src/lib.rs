@@ -804,42 +804,62 @@ pub fn eprintln(s: &str) {
 // ─────────────────────────────────────────────────
 
 /// Punkt wejścia procesu userland.
-/// Parsuje argc/argv ze stosu (umieszczone przez kernel) i wywołuje main().
 ///
-/// Układ stosu na wejściu:
-///   RSP → argc (u64)
-///   RSP+8 → argv[0] (pointer to string)
-///   RSP+16 → argv[1]
+/// Układ stosu na wejściu (System V AMD64 ABI):
+///   [RSP+0]  = argc (u64)
+///   [RSP+8]  = argv[0]
 ///   ...
-///   RSP+8*(argc) → argv[argc-1]
-///   RSP+8*(argc+1) → NULL
+///   [RSP+8*(argc+1)] = NULL
 ///
-/// Program użytkownika musi zdefiniować:
+/// Musi być **naked** — gdyby kompilator dodał normalny prologue (np.
+/// `sub rsp, 0x18` na lokalne), to RSP zostałby przesunięty zanim
+/// odczytamy argc, a wtedy `[rsp]` zwracałoby uninitialised local slot
+/// zamiast argc. Skutek: hipotetyczne wartości argc/argv → cichy hang
+/// lub crash w main().
+///
+/// Program użytkownika definiuje:
 /// ```
 /// #[no_mangle]
 /// pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 { ... }
 /// ```
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn _start() -> ! {
-    // Read argc and argv pointer from the stack.
-    // The kernel pushed: argc, argv[0], argv[1], ..., NULL
-    // RSP points to argc on entry.
-    let argc: u64;
-    let argv: *const *const u8;
-    core::arch::asm!(
-        "mov {}, [rsp]",      // argc
-        "lea {}, [rsp + 8]",  // argv = &argv[0]
-        out(reg) argc,
-        out(reg) argv,
-        options(nostack, nomem),
+#[unsafe(naked)]
+pub unsafe extern "C" fn _start() {
+    core::arch::naked_asm!(
+        // argc → RDI (1st arg per SysV), argv → RSI (2nd arg).
+        "mov rdi, [rsp]",
+        "lea rsi, [rsp + 8]",
+        // Align stack to 16 bytes before call (SysV ABI: RSP must be 16-byte
+        // aligned at the call site, i.e. 8 mod 16 after the implicit push of
+        // the return address). The kernel hands us a 16-aligned RSP so we
+        // push a dummy to satisfy the call.
+        "sub rsp, 8",
+        "call {main}",
+        "add rsp, 8",
+        // exit(main_status): rdi = status, rax = SYS_EXIT (0), syscall.
+        "mov edi, eax",
+        "xor eax, eax",         // SYS_EXIT = 0
+        "syscall",
+        // Should never return; if it does, halt loop.
+        "3:",
+        "hlt",
+        "jmp 3b",
+        main = sym _libc_lite_main_trampoline,
     );
+}
 
+/// Indirection so the naked `_start` can `call {main}` without needing
+/// `main` to be declared via `extern "C"` in libc-lite. The downstream
+/// crate's `main` resolves to a regular C-ABI function thanks to
+/// `#[no_mangle] pub extern "C" fn main(...)`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn _libc_lite_main_trampoline(argc: i32, argv: *const *const u8) -> i32 {
     extern "C" {
         fn main(argc: i32, argv: *const *const u8) -> i32;
     }
-    let code = main(argc as i32, argv);
-    exit(code);
+    main(argc, argv)
 }
 
 // ─────────────────────────────────────────────────

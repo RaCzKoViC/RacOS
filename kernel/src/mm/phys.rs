@@ -155,7 +155,26 @@ impl BitmapAllocator {
     }
 
     /// Allocate `count` contiguous physical frames.
-    /// Simple linear scan — acceptable for MVP.
+    ///
+    /// Two-phase scan:
+    ///   1. Find a candidate run of `count` consecutive free frames by reading
+    ///      the bitmap.
+    ///   2. Atomically set each bit. If any was already set (concurrent alloc
+    ///      on SMP — not possible on UP but cheap insurance), undo and search
+    ///      again starting past the conflict.
+    ///
+    /// The previous version interleaved scanning and claiming inside a single
+    /// loop. That worked for the happy path but tracked `run_start` and the
+    /// outer loop counter independently — after a CAS race-back-out the two
+    /// could end up describing overlapping regions, so the next CAS attempt
+    /// would silently corrupt a previously-allocated run (the back-out
+    /// `fetch_and` would clear bits that another allocation owned). On UP that
+    /// looked like: a 512-frame user-stack alloc returns successfully but a
+    /// later 16-frame alloc finds free frames *inside* the 512-frame range
+    /// because some bits had been cleared by the buggy back-out. Symptom: user
+    /// stack and kernel stack shared physical memory, child processes silently
+    /// hung after iretq because their kernel stack was being overwritten by
+    /// their own user stack writes (or vice versa).
     pub fn alloc_contiguous(&self, count: usize) -> Result<PhysFrame, FrameError> {
         if count == 0 {
             return Err(FrameError::OutOfMemory);
@@ -164,48 +183,74 @@ impl BitmapAllocator {
             return self.alloc();
         }
 
-        let limit = self.total_frames.saturating_sub(count - 1);
-        let mut run_start = 0usize;
-        let mut run_len = 0usize;
+        let total = self.total_frames;
+        if count > total {
+            return Err(FrameError::OutOfMemory);
+        }
 
-        for frame in 0..limit + count {
-            if frame >= self.total_frames {
-                break;
-            }
-            let idx = frame / 64;
-            let bit = frame % 64;
-            let allocated = self.bitmap[idx].load(Ordering::Relaxed) & (1u64 << bit) != 0;
+        let mut search_from = 0usize;
 
-            if allocated {
-                run_start = frame + 1;
-                run_len = 0;
-            } else {
-                run_len += 1;
-                if run_len == count {
-                    // Found a run — try to allocate all frames
-                    for f in run_start..run_start + count {
-                        let i = f / 64;
-                        let b = f % 64;
-                        let prev = self.bitmap[i].fetch_or(1u64 << b, Ordering::AcqRel);
-                        if prev & (1u64 << b) != 0 {
-                            // Race condition or corruption — free what we allocated and retry
-                            for f2 in run_start..f {
-                                let i2 = f2 / 64;
-                                let b2 = f2 % 64;
-                                self.bitmap[i2].fetch_and(!(1u64 << b2), Ordering::Release);
-                            }
-                            run_start = f + 1;
-                            run_len = 0;
-                            break;
-                        }
-                    }
+        'outer: loop {
+            // Phase 1: scan for a run of `count` free frames starting at or
+            // after `search_from`.
+            let mut run_start = search_from;
+            let mut run_len = 0usize;
+            let mut found_start = None;
+            let mut frame = search_from;
+            while frame < total {
+                let idx = frame / 64;
+                let bit = frame % 64;
+                let allocated = self.bitmap[idx].load(Ordering::Relaxed) & (1u64 << bit) != 0;
+                if allocated {
+                    run_start = frame + 1;
+                    run_len = 0;
+                } else {
+                    run_len += 1;
                     if run_len == count {
-                        return Ok(PhysFrame(run_start as u64));
+                        found_start = Some(run_start);
+                        break;
                     }
                 }
+                frame += 1;
             }
+            let start = match found_start {
+                Some(s) => s,
+                None => return Err(FrameError::OutOfMemory),
+            };
+
+            // Phase 2: atomically claim each bit. If any was already set by a
+            // racing allocator, undo our claims and resume scanning past the
+            // conflict.
+            let mut claimed_through = start;
+            let mut conflict_at: Option<usize> = None;
+            for f in start..start + count {
+                let i = f / 64;
+                let b = f % 64;
+                let prev = self.bitmap[i].fetch_or(1u64 << b, Ordering::AcqRel);
+                if prev & (1u64 << b) != 0 {
+                    conflict_at = Some(f);
+                    break;
+                }
+                claimed_through = f + 1;
+            }
+
+            if let Some(conflict) = conflict_at {
+                // Undo only the bits *we* set this round. Bits at and beyond
+                // `conflict` are owned by whoever beat us — never touch them.
+                for f2 in start..claimed_through {
+                    let i2 = f2 / 64;
+                    let b2 = f2 % 64;
+                    self.bitmap[i2].fetch_and(!(1u64 << b2), Ordering::Release);
+                }
+                search_from = conflict + 1;
+                if search_from + count > total {
+                    return Err(FrameError::OutOfMemory);
+                }
+                continue 'outer;
+            }
+
+            return Ok(PhysFrame(start as u64));
         }
-        Err(FrameError::OutOfMemory)
     }
 
     /// Free a previously allocated frame.
