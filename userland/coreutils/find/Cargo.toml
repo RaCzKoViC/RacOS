@@ -1,0 +1,11 @@
+[package]
+name = "racos-find"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "find"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

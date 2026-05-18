@@ -1,0 +1,11 @@
+[package]
+name = "racos-uptime"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "uptime"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

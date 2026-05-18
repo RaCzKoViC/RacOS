@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+# compiler_builtins is provided by build-std
+
+[profile.release]
+relocation-model = "static"
+
+[profile.dev]
+relocation-model = "static"
 
 [features]
 default = []

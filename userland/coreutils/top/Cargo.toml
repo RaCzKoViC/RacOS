@@ -1,0 +1,11 @@
+[package]
+name = "racos-top"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "top"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../../libs/libc-lite" }

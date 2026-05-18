@@ -1,0 +1,11 @@
+[package]
+name = "racos-sort"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "sort"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

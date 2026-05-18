@@ -109,7 +109,50 @@ exception_handler_with_error!(invalid_tss, 10, "Invalid TSS");
 exception_handler_with_error!(segment_not_present, 11, "Segment Not Present");
 exception_handler_with_error!(stack_segment_fault, 12, "Stack-Segment Fault");
 exception_handler_with_error!(general_protection, 13, "General Protection Fault");
-exception_handler_with_error!(page_fault, 14, "Page Fault");
+
+/// Page Fault handler — if user space, kill process; if kernel, halt.
+extern "x86-interrupt" fn page_fault(
+    stack_frame: &InterruptStackFrame,
+    error_code: u64,
+) {
+    let rip = stack_frame.instruction_pointer;
+    let cs = stack_frame.code_segment;
+    let cpl = cs & 0x3;
+    let current_pid = crate::task::scheduler::current_pid();
+    let current_is_user_task = current_pid >= 100
+        && crate::task::scheduler::current_page_table_phys() != 0;
+    let fault_addr: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr2", out(reg) fault_addr, options(nomem, nostack));
+    }
+
+    if cpl == 3 || current_is_user_task {
+        // Fault in user space — kill the process
+        crate::serial::serial_println!(
+            "!!! PAGE FAULT in user space: RIP=0x{:X}, CR2=0x{:X}, CS=0x{:X}, error=0x{:X}, PID={}",
+            rip,
+            fault_addr,
+            cs,
+            error_code,
+            current_pid,
+        );
+        // Signal handling is not complete yet; terminate immediately to avoid
+        // fault loops on the same instruction.
+        unsafe { crate::task::scheduler::exit_current(128 + 11); }
+    }
+
+    // Fault in kernel space — this is a kernel bug
+    crate::serial::serial_println!(
+        "!!! KERNEL PAGE FAULT: RIP=0x{:X}, CR2=0x{:X}, CS=0x{:X}, error=0x{:X}",
+        rip,
+        fault_addr,
+        cs,
+        error_code,
+    );
+    loop {
+        unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
+    }
+}
 exception_handler!(x87_floating_point, 16, "x87 Floating-Point");
 exception_handler_with_error!(alignment_check, 17, "Alignment Check");
 exception_handler!(machine_check, 18, "Machine Check");
@@ -119,6 +162,25 @@ exception_handler!(virtualization, 20, "Virtualization");
 /// Default handler for unregistered interrupts.
 extern "x86-interrupt" fn default_handler(_stack_frame: &InterruptStackFrame) {
     // Ignore unregistered interrupts
+}
+
+/// Timer IRQ handler (vector 32 = IRQ0).
+extern "x86-interrupt" fn timer_handler(_stack_frame: &InterruptStackFrame) {
+    crate::interrupts::pit::tick();
+    crate::task::scheduler::timer_tick();
+    crate::interrupts::pic::send_eoi(0);
+}
+
+/// Serial COM1 IRQ handler (vector 36 = IRQ4).
+extern "x86-interrupt" fn serial_handler(_stack_frame: &InterruptStackFrame) {
+    crate::serial::handle_irq();
+    crate::interrupts::pic::send_eoi(4);
+}
+
+/// Keyboard IRQ handler (vector 33 = IRQ1).
+extern "x86-interrupt" fn keyboard_handler(_stack_frame: &InterruptStackFrame) {
+    crate::drivers::ps2_keyboard::handle_irq_input();
+    crate::interrupts::pic::send_eoi(1);
 }
 
 /// Load the IDT with exception handlers.
@@ -154,6 +216,13 @@ pub fn init() {
                 IDT[i].set_handler(default_handler as u64, 0x08, 0, 0);
             }
         }
+
+        // IRQ handlers (PIC remapped: IRQ0 = vector 32)
+        IDT[32].set_handler(timer_handler as u64, 0x08, 0, 0);
+        // IRQ1 = vector 33 (keyboard)
+        IDT[33].set_handler(keyboard_handler as u64, 0x08, 0, 0);
+        // IRQ4 = vector 36 (COM1 serial)
+        IDT[36].set_handler(serial_handler as u64, 0x08, 0, 0);
 
         #[allow(static_mut_refs)]
         let idt_ptr = IdtPointer {

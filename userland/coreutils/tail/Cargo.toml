@@ -1,0 +1,11 @@
+[package]
+name = "racos-tail"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tail"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

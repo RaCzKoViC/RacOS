@@ -1,0 +1,11 @@
+[package]
+name = "racos-netloop"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "netloop"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

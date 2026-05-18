@@ -3,4 +3,8 @@ name = "libc-lite"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+alloc = []
+
 [dependencies]

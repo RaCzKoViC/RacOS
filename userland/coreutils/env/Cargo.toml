@@ -1,0 +1,11 @@
+[package]
+name = "racos-env"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "env"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

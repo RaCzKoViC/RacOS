@@ -1,0 +1,11 @@
+[package]
+name = "rpkg-bin"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rpkg"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

@@ -10,6 +10,75 @@ members = [
     "terminal",
     "pkg/rpkg",
     "pkg/rapt",
+    "userland/coreutils/hello",
+    "userland/coreutils/echo",
+    "userland/coreutils/cat",
+    "userland/coreutils/true",
+    "userland/coreutils/false",
+    "userland/coreutils/sh",
+    "userland/coreutils/init",
+    "userland/coreutils/test",
+    "userland/coreutils/ls",
+    "userland/coreutils/wc",
+    "userland/coreutils/uptime",
+    "userland/coreutils/mkdir",
+    "userland/coreutils/rm",
+    "userland/coreutils/sleep",
+    "userland/coreutils/head",
+    "userland/coreutils/tail",
+    "userland/coreutils/env",
+    "userland/coreutils/id",
+    "userland/coreutils/basename",
+    "userland/coreutils/dirname",
+    "userland/coreutils/grep",
+    "userland/coreutils/cp",
+    "userland/coreutils/mv",
+    "userland/coreutils/cut",
+    "userland/coreutils/uniq",
+    "userland/coreutils/find",
+    "userland/coreutils/od",
+    "userland/coreutils/tee",
+    "userland/coreutils/hexdump",
+    "userland/network/netloop",
+]
+default-members = [
+    "init",
+    "libs/libc-lite",
+    "libs/libcore-user",
+    "shell",
+    "terminal",
+    "pkg/rpkg",
+    "pkg/rapt",
+    "userland/coreutils/hello",
+    "userland/coreutils/echo",
+    "userland/coreutils/cat",
+    "userland/coreutils/true",
+    "userland/coreutils/false",
+    "userland/coreutils/sh",
+    "userland/coreutils/init",
+    "userland/coreutils/test",
+    "userland/coreutils/ls",
+    "userland/coreutils/wc",
+    "userland/coreutils/uptime",
+    "userland/coreutils/mkdir",
+    "userland/coreutils/rm",
+    "userland/coreutils/sleep",
+    "userland/coreutils/head",
+    "userland/coreutils/tail",
+    "userland/coreutils/env",
+    "userland/coreutils/id",
+    "userland/coreutils/basename",
+    "userland/coreutils/dirname",
+    "userland/coreutils/grep",
+    "userland/coreutils/cp",
+    "userland/coreutils/mv",
+    "userland/coreutils/cut",
+    "userland/coreutils/uniq",
+    "userland/coreutils/find",
+    "userland/coreutils/od",
+    "userland/coreutils/tee",
+    "userland/coreutils/hexdump",
+    "userland/network/netloop",
 ]
 
 [workspace.package]
@@ -21,9 +90,11 @@ repository = ""
 [profile.dev]
 panic = "abort"
 opt-level = 0
+relocation-model = "static"
 
 [profile.release]
 panic = "abort"
 opt-level = 2
-lto = true
+lto = false
 strip = "symbols"
+relocation-model = "static"

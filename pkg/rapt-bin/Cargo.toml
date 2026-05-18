@@ -1,0 +1,11 @@
+[package]
+name = "rapt-bin"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rapt"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

@@ -1,6 +1,14 @@
 [package]
-name = "racinit"
+name = "init"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "init"
+path = "src/main.rs"
+
+[lib]
+test = false
+
 [dependencies]
+libc-lite = { path = "../libs/libc-lite", features = ["alloc"] }

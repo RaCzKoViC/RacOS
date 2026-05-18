@@ -3,9 +3,10 @@
 /build/
 /out/
 
-# IDE
+# IDE / Local agent state
 .vscode/settings.json
 .idea/
+.claude/
 *.swp
 *.swo
 *~
@@ -24,7 +25,30 @@ Thumbs.db
 *.log
 core.*
 crash-*.dump
+build_error.txt
+runtime-validation-*.txt
+runtime-validation-*.log
+serial-input-debug.txt
+*.dump
 
 # Toolchain downloads
 /toolchain/downloads/
 /toolchain/sysroot/
+
+# macOS metadata / sandbox snapshots / stray project copies
+._*
+.DS_Store
+*.sb-*
+RacOS.sb-*/
+/RacOS/
+/RacOS1/
+RacOS1.zip
+RacOS1*.html.txt
+*.html.txt
+
+# Local boot image staging (built artifacts)
+/esp/
+*.efi
+
+# Conflict markers from sync tools
+*Edit conflict*

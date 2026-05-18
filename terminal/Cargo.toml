@@ -3,4 +3,9 @@ name = "racterm"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "racterm"
+path = "src/main.rs"
+
 [dependencies]
+libc-lite = { path = "../libs/libc-lite", features = ["alloc"] }

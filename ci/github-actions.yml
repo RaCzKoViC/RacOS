@@ -78,5 +78,35 @@ jobs:
     needs: [test-unit, test-boot]
     steps:
       - uses: actions/checkout@v4
-      - name: Build ISO image
-        run: echo "ISO build not yet implemented (Sprint 2)"
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-none, x86_64-unknown-uefi
+      - name: Install QEMU, OVMF, and nasm
+        run: sudo apt-get install -y qemu-system-x86 nasm ovmf mtools
+      - name: Build kernel
+        run: cargo build --package racore --target x86_64-unknown-none
+      - name: Build bootloader
+        run: cargo build --package racos-boot --target x86_64-unknown-uefi
+      - name: Create ESP directory
+        run: |
+          mkdir -p esp/EFI/BOOT
+          cp target/x86_64-unknown-uefi/debug/racos-boot.efi esp/EFI/BOOT/BOOTX64.EFI
+          cp target/x86_64-unknown-none/debug/racore esp/racore.elf
+      - name: Pack initramfs
+        run: |
+          python3 scripts/pack-initramfs.py initramfs-root esp/initramfs.img
+      - name: Boot UEFI image test
+        run: |
+          OVMF=/usr/share/OVMF/OVMF_CODE.fd
+          timeout 15 qemu-system-x86_64 \
+            -machine q35 -cpu qemu64 -m 512M \
+            -drive if=pflash,format=raw,file=$OVMF,readonly=on \
+            -drive file=fat:rw:esp,format=raw \
+            -serial stdio -display none -no-reboot \
+            2>&1 | tee uefi-boot.log || true
+          grep -q "RACORE: RacOS kernel starting" uefi-boot.log && echo "UEFI boot test PASSED"
+      - name: Upload ESP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: racos-esp
+          path: esp/

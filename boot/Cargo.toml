@@ -3,4 +3,10 @@ name = "racos-boot"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "bootx64"
+path = "src/main.rs"
+
 [dependencies]
+uefi = { version = "0.34", features = ["alloc", "global_allocator"] }
+log = "0.4"

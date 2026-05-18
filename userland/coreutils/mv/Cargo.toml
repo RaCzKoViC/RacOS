@@ -1,0 +1,11 @@
+[package]
+name = "racos-mv"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "mv"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

@@ -1,5 +1,5 @@
 # RacOS Build System
-# Requires: cargo, nasm, clang/lld, qemu-system-x86_64
+# Requires: cargo (nightly), qemu-system-x86_64
 
 set shell := ["powershell", "-NoProfile", "-Command"]
 
@@ -8,51 +8,48 @@ kernel    := "RaCore"
 arch      := "x86_64"
 qemu      := "qemu-system-x86_64"
 target    := "x86_64-unknown-none"
-build_dir := "build"
-image_dir := "images"
+uefi_target := "x86_64-unknown-uefi"
+target_dir := "C:\\Users\\Maciej\\RacOS-target"
 
 # Default recipe
 default: build
 
-# Full build: kernel + userland
-build: build-kernel build-userland
+# Full build: kernel + boot + userland
+build: build-kernel build-boot build-userland
     @Write-Host "Build complete."
 
 # Build kernel only
 build-kernel:
     cargo build --package racore --target {{target}}
 
-# Build userland (placeholder for C17 build)
+# Build UEFI bootloader
+build-boot:
+    cargo build --package racos-boot --target {{uefi_target}}
+
+# Build userland crates (default members)
 build-userland:
-    @Write-Host "Userland build: not yet implemented (Phase D+)"
+    cargo build
 
 # Run all tests
-test: test-unit test-kernel
+test: test-unit
     @Write-Host "All tests passed."
 
-# Unit tests (host-side)
+# Unit tests (host-side, default members only)
 test-unit:
-    cargo test --workspace
+    cargo test
 
-# Kernel-specific tests
-test-kernel:
-    @Write-Host "Kernel tests: not yet implemented (Phase B+)"
-
-# Boot tests in QEMU
-test-boot:
-    @Write-Host "Boot tests: not yet implemented (Phase B+)"
+# Boot tests in QEMU (direct kernel load, no UEFI)
+test-boot: build-kernel
+    {{qemu}} -machine q35 -cpu qemu64 -m 256M `
+        -serial stdio -display none -no-reboot `
+        -kernel "{{target_dir}}/{{target}}/debug/racore" `
+        2>&1 | Select-Object -First 30
 
 # Run in QEMU
-run: build
-    {{qemu}} -machine q35 -cpu qemu64 -m 256M \
-        -drive if=pflash,format=raw,file=toolchain/OVMF_CODE.fd,readonly=on \
-        -drive if=pflash,format=raw,file=toolchain/OVMF_VARS.fd \
-        -kernel {{build_dir}}/racore.elf \
-        -serial stdio -display none -no-reboot
-
-# Build bootable ISO
-image: build
-    @Write-Host "ISO image build: not yet implemented (Phase B)"
+run: build-kernel
+    {{qemu}} -machine q35 -cpu qemu64 -m 256M `
+        -serial stdio -display none -no-reboot `
+        -kernel "{{target_dir}}/{{target}}/debug/racore"
 
 # Lint
 lint:
@@ -62,7 +59,43 @@ lint:
 fmt:
     cargo fmt --all -- --check
 
+# Build UEFI disk image (ESP directory)
+image:
+    powershell -NoProfile -File scripts/make-image.ps1
+
+# Build full image: kernel + coreutils + initramfs
+build-image:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-image.ps1
+
+# Build full image (release)
+build-image-release:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-image.ps1 -Release
+
+# Build bootable ISO
+iso:
+    powershell -NoProfile -File scripts/make-iso.ps1
+
+# Build bootable ISO (release)
+iso-release:
+    powershell -NoProfile -File scripts/make-iso.ps1 -Release
+
+# Run in QEMU with UEFI bootloader (requires OVMF at tools\OVMF_CODE.fd)
+run-uefi: image
+    {{qemu}} -machine q35 -cpu qemu64 -m 512M `
+        -drive if=pflash,format=raw,file=tools\OVMF_CODE.fd,readonly=on `
+        -drive file=fat:rw:esp,format=raw `
+        -serial stdio -display none -no-reboot
+
+# Test UEFI boot (non-interactive, validates serial output)
+test-uefi: image
+    {{qemu}} -machine q35 -cpu qemu64 -m 512M `
+        -drive if=pflash,format=raw,file=tools\OVMF_CODE.fd,readonly=on `
+        -drive file=fat:rw:esp,format=raw `
+        -serial stdio -display none -no-reboot `
+        2>&1 | Select-Object -First 60
+
 # Clean build artifacts
 clean:
     cargo clean
-    @if (Test-Path {{build_dir}}) { Remove-Item -Recurse -Force {{build_dir}} }
+    Remove-Item -Recurse -Force esp -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force initramfs-root -ErrorAction SilentlyContinue

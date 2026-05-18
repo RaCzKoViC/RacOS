@@ -3,4 +3,9 @@ name = "rpkg"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["std"]
+std = []
+
 [dependencies]
+libc-lite = { path = "c:/Users/Maciej/OneDrive/Pulpit/RacOS/libs/libc-lite" }

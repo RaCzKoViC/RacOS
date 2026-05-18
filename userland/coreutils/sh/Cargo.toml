@@ -1,0 +1,12 @@
+[package]
+name = "racos-sh"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "sh"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite", features = ["alloc"] }
+racsh = { path = "../../../shell" }

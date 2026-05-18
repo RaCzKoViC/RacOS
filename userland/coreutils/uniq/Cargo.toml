@@ -1,0 +1,11 @@
+[package]
+name = "racos-uniq"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "uniq"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }
