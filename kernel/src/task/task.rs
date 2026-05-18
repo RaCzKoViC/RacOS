@@ -46,7 +46,7 @@ pub enum TaskState {
 }
 
 /// Kernel stack size: 16 KiB (4 frames).
-pub const KERNEL_STACK_PAGES: usize = 4;
+pub const KERNEL_STACK_PAGES: usize = 16;
 pub const KERNEL_STACK_SIZE: usize = KERNEL_STACK_PAGES * FRAME_SIZE;
 
 /// Per-task credentials (Phase C MVP).

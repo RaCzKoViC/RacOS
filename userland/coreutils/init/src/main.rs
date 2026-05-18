@@ -1,63 +1,72 @@
-// racinit — RacOS Init Process (PID 1)
+// racinit — RacOS init process (PID 1) — minimal bring-up version.
 //
-// Boots the system by loading unit files from /etc/racinit/,
-// resolving dependencies, starting services, and supervising them.
-// Falls back to spawning /bin/sh if no unit files are found.
+// Responsibility:
+//  1. Become session leader.
+//  2. Spawn /bin/sh from initramfs (racsh) wired to console.
+//  3. Wait for it. If it exits, respawn after a short backoff so PID 1
+//     never returns (kernel treats PID 1 exit as fatal).
+//  4. Drain orphan zombies non-blockingly between supervises.
+//
+// Unit-file driven service supervision lives in the `init` library crate
+// (engine.rs) and will replace this once enough syscalls are stable.
+// During Sprint 2 bring-up we keep this path deliberately small so any
+// failure on the "kernel → user mode → racsh" boundary is easy to isolate.
 
 #![no_std]
 #![no_main]
 
-extern crate alloc;
 extern crate libc_lite;
 
-use alloc::string::String;
-use init::{Unit, UnitType, ServiceType, RestartPolicy};
-use init::engine::Engine;
+const SHELL_PATH: &[u8] = b"/bin/sh\0";
 
-fn fallback_terminal_command() -> &'static str {
-    // Keep fallback path robust during PTY/terminal bring-up.
-    // A direct shell on /dev/console guarantees interactivity.
-    "/bin/sh"
-}
-
-#[allow(unreachable_code)]
 #[no_mangle]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    libc_lite::println("racinit: starting...");
+    let _ = libc_lite::write(1, b"[init] RacInit starting (PID 1)\n");
 
-    // Create a new session (PID 1 should be session leader)
+    // PID 1 is the session leader. Ignore errors during bring-up.
     let _ = libc_lite::setsid();
 
-    let mut engine = Engine::new();
-
-    // Try to load unit files from /etc/racinit/
-    engine.load_units_from("/etc/racinit");
-
-    if engine.unit_count() == 0 {
-        // No unit files found — create fallback units
-        libc_lite::println("racinit: no unit files found, using fallback config");
-
-        // base.target — the default target
-        let base = Unit::new("base.target", UnitType::Target);
-        engine.add_unit(base);
-
-        // shell.service — spawn an interactive shell
-        let mut shell = Unit::new("shell.service", UnitType::Service);
-        shell.exec_start = String::from(fallback_terminal_command());
-        shell.service_type = ServiceType::Simple;
-        shell.restart = RestartPolicy::Always;
-        shell.after.push(String::from("base.target"));
-        shell.wanted_by.push(String::from("base.target"));
-        engine.add_unit(shell);
+    loop {
+        match spawn_shell() {
+            Ok(pid) => {
+                let _ = libc_lite::write(1, b"[init] spawned /bin/sh, waiting...\n");
+                wait_for(pid);
+                let _ = libc_lite::write(1, b"[init] /bin/sh exited, respawning in 1s\n");
+                let _ = libc_lite::nanosleep(1, 0);
+            }
+            Err(_) => {
+                let _ = libc_lite::write(2, b"[init] cannot spawn /bin/sh, retrying in 5s\n");
+                let _ = libc_lite::nanosleep(5, 0);
+            }
+        }
+        reap_zombies();
     }
+}
 
-    // Start all units in dependency order
-    libc_lite::println("racinit: starting services...");
-    engine.start_all();
+fn spawn_shell() -> Result<i32, i64> {
+    let argv: [*const u8; 2] = [SHELL_PATH.as_ptr(), core::ptr::null()];
+    libc_lite::spawn_args(SHELL_PATH, &argv)
+}
 
-    // Enter supervisor loop (never returns)
-    libc_lite::println("racinit: supervision active");
-    engine.supervise();
+fn wait_for(target_pid: i32) {
+    // Wait specifically for the shell. Reap any other reparented children
+    // in passing and keep waiting for the target.
+    loop {
+        let mut status: i32 = 0;
+        match libc_lite::waitpid(-1, &mut status, 0) {
+            Ok(pid) if pid == target_pid => return,
+            Ok(_) => continue,
+            Err(_) => return,
+        }
+    }
+}
 
-    0
+fn reap_zombies() {
+    loop {
+        let mut status: i32 = 0;
+        match libc_lite::waitpid(-1, &mut status, libc_lite::WNOHANG) {
+            Ok(pid) if pid > 0 => continue,
+            _ => return,
+        }
+    }
 }

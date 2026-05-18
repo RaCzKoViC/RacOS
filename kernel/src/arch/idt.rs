@@ -159,6 +159,20 @@ exception_handler!(machine_check, 18, "Machine Check");
 exception_handler!(simd_floating_point, 19, "SIMD Floating-Point");
 exception_handler!(virtualization, 20, "Virtualization");
 
+/// Poll-write a single byte to COM1 (0x3F8). Bypasses the rest of the
+/// serial subsystem so it can be used safely from very early diagnostics
+/// in interrupt handlers and naked asm trampolines.
+#[allow(dead_code)]
+#[inline(always)]
+pub unsafe fn com1_poke(byte: u8) {
+    loop {
+        let status: u8;
+        core::arch::asm!("in al, dx", in("dx") 0x3FDu16, out("al") status, options(nomem, nostack, preserves_flags));
+        if status & 0x20 != 0 { break; }
+    }
+    core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") byte, options(nomem, nostack, preserves_flags));
+}
+
 /// Default handler for unregistered interrupts.
 extern "x86-interrupt" fn default_handler(_stack_frame: &InterruptStackFrame) {
     // Ignore unregistered interrupts

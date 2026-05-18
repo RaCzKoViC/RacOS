@@ -8,5 +8,4 @@ name = "init"
 path = "src/main.rs"
 
 [dependencies]
-libc-lite = { path = "../../../libs/libc-lite", features = ["alloc"] }
-init = { path = "../../../init" }
+libc-lite = { path = "../../../libs/libc-lite" }

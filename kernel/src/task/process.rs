@@ -284,16 +284,13 @@ impl UserProcess {
 #[unsafe(naked)]
 unsafe extern "C" fn user_entry_trampoline() {
     core::arch::naked_asm!(
-        // Update TSS.RSP0 so syscalls/interrupts from user mode
-        // switch to this task's kernel stack
-        // (RBX = kernel_stack_top, set above)
-
-        // Set user data segment selectors (except CS/SS which IRETQ handles)
+        // Set user data segment selectors (CS/SS come from the IRETQ frame).
         "mov ax, 0x1B",       // USER_DS = 0x18 | 3
         "mov ds, ax",
         "mov es, ax",
-
-        // IRETQ will pop: RIP, CS, RFLAGS, RSP, SS from current RSP
+        // IRETQ pops: RIP, CS, RFLAGS, RSP, SS from current RSP, and the
+        // popped RFLAGS already has IF set so interrupts come back enabled
+        // in user mode.
         "iretq",
     );
 }

@@ -129,17 +129,26 @@ unsafe extern "C" fn syscall_entry() {
         "pop rbx",
         "pop rbp",
 
+        // Disable interrupts before swapping back to the user stack. Otherwise
+        // a timer (or any device) IRQ that fires between `pop rsp` and
+        // `sysretq` would push its IRET frame onto whatever address we just
+        // loaded into RSP — and that's the user RSP. Result: silent corruption
+        // of user-space memory and a bogus RCX (user RIP) when sysret runs,
+        // which manifests as a #PF at RIP=0 right after heavy syscalls (spawn,
+        // fork) that leave interrupts re-enabled. SYSRETQ will restore the
+        // user RFLAGS (with IF set) from R11, so this only blocks IRQs for the
+        // ~5 instructions until we leave ring 0.
+        "cli",
+
         // Restore user state
         "pop rcx",                          // User RIP
         "pop r11",                          // User RFLAGS
-        "pop rsp",                          // User RSP (but we need to go via gs first)
+        "pop rsp",                          // User RSP
 
-        // Actually — we popped user RSP directly, but need to swapgs before sysret
-        "swapgs",                           // Switch back to user GS base
-
-        // Return to user space
-        // SYSRETQ loads CS from STAR[63:48]+16, SS from STAR[63:48]+8
-        // RCX → RIP, R11 → RFLAGS
+        // Swap back to user GS base, then SYSRETQ:
+        // - loads CS from STAR[63:48]+16, SS from STAR[63:48]+8
+        // - RCX → RIP, R11 → RFLAGS (re-enables IF in user mode)
+        "swapgs",
         "sysretq",
 
         dispatch = sym crate::syscall::dispatch::syscall_dispatch,

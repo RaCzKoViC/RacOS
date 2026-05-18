@@ -193,7 +193,6 @@ dependencies = [
 name = "racos-init"
 version = "0.1.0"
 dependencies = [
- "init",
  "libc-lite",
 ]
 

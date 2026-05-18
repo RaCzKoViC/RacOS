@@ -8,4 +8,4 @@ default = ["std"]
 std = []
 
 [dependencies]
-libc-lite = { path = "c:/Users/Maciej/OneDrive/Pulpit/RacOS/libs/libc-lite" }
+libc-lite = { path = "../../libs/libc-lite" }

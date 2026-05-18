@@ -142,6 +142,11 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // SAFETY: Called once, GDT/TSS are initialized, interrupts disabled.
     unsafe { syscall::entry::init(); }
 
+    // Snapshot the boot-time kernel CR3. All future user page tables inherit
+    // their kernel mappings from this snapshot (see virt::create_user_page_table).
+    // Must happen before any user process is constructed.
+    unsafe { mm::virt::capture_kernel_cr3(); }
+
     // Initialize VFS
     unsafe { vfs::mount::init(); }
 
@@ -240,7 +245,12 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         spawn_kernel_shell_once();
     } else {
         match try_spawn_init() {
-            Some(init_pid) => arm_init_watchdog(init_pid),
+            Some(_init_pid) => {
+                // Watchdog temporarily disabled during user-mode bring-up — it
+                // races with the supervisor loop and was masking a scheduler
+                // round-robin issue. Re-enable once spawn/wait paths settle.
+                serial::serial_println!("[  0.000360] RACORE: init watchdog skipped (bring-up)");
+            }
             None => {
                 serial::serial_println!("[  0.000360] RACORE: init start failed, entering emergency shell");
                 spawn_kernel_shell_once();

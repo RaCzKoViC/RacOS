@@ -363,25 +363,55 @@ pub fn alloc_page_table() -> Result<u64, &'static str> {
     Ok(frame.addr())
 }
 
-/// Create a new user-process page table derived from the current kernel CR3.
+/// Physical address of the kernel's original (boot-time) PML4. Captured the
+/// first time a user page table is created and used as the authoritative
+/// source for kernel mappings ever after.
 ///
-/// Copies only present PML4 entries that are kernel-only (non-USER).
-/// Kernel pages remain protected because their leaf PTEs don't have the USER bit.
-/// User segments are mapped separately by `from_elf` with USER flags, and
-/// `map_page` propagates USER to intermediate entries as needed.
+/// We can't keep using the *current* CR3 as the source, because once a
+/// process maps user code at e.g. 0x1_0000_0000 (which falls in PML4[0]
+/// alongside the kernel's low identity map), `ensure_table` clones the
+/// kernel PDPT and ORs in the USER bit on PML4[0]. The next time we try
+/// to inherit "kernel-only" entries from such a process's CR3, PML4[0]
+/// looks user-tainted and gets skipped — leaving the child with no
+/// mapping for kernel code, which triple-faults on the first CR3 load.
+static mut KERNEL_PML4_PHYS: u64 = 0;
+
+/// Initialise the cached kernel CR3 from the currently active page table.
+/// Called once during user-mode bring-up before the first user process is
+/// constructed.
+///
+/// # Safety
+/// Must be called from the boot path while the kernel's original PML4 is
+/// still loaded in CR3 (no user process has switched it out yet).
+pub unsafe fn capture_kernel_cr3() {
+    let cr3 = read_cr3() & !0xFFF_u64;
+    KERNEL_PML4_PHYS = cr3;
+}
+
+/// Create a new user-process page table derived from the kernel's original
+/// boot-time CR3.
+///
+/// Copies only present PML4 entries that are kernel-only (non-USER) in the
+/// pristine kernel mapping. Kernel pages remain protected because their leaf
+/// PTEs don't have the USER bit. User segments are mapped separately by
+/// `from_elf` with USER flags, and `map_page` propagates USER to intermediate
+/// entries as needed.
 ///
 /// Returns the physical address of the new PML4.
 pub fn create_user_page_table() -> Result<u64, &'static str> {
     let new_pml4_phys = alloc_page_table()?;
-    let kernel_pml4_phys = read_cr3() & !0xFFF_u64; // Strip PCID/flags from CR3
+    let kernel_pml4_phys = unsafe {
+        let cached = KERNEL_PML4_PHYS;
+        if cached != 0 { cached } else { read_cr3() & !0xFFF_u64 }
+    };
 
-    // SAFETY: CR3 points to the current active PML4. The new PML4 was just allocated.
+    // SAFETY: kernel_pml4_phys points to either the cached boot-time PML4 or
+    // the current PML4 (fallback for the very first call). new_pml4_phys
+    // was just allocated and zeroed.
     unsafe {
         let src = &*(kernel_pml4_phys as *const PageTable);
         let dst = &mut *(new_pml4_phys as *mut PageTable);
-        // Copy only present non-USER entries. This avoids inheriting the
-        // caller's user-space mappings when sys_spawn is invoked from ring 3,
-        // which would otherwise alias parent and child address spaces.
+        // Copy only present non-USER entries from the pristine kernel PML4.
         for i in 0..512 {
             if src.entries[i].is_present() && (src.entries[i].flags() & flags::USER == 0) {
                 dst.entries[i] = src.entries[i];

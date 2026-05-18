@@ -216,6 +216,19 @@ pub const USER_DS: u16 = 0x18 | 3;
 pub const USER_CS: u16 = 0x20 | 3;
 
 /// STAR MSR value for SYSCALL/SYSRET.
-/// Bits [47:32] = SYSCALL CS/SS base (kernel code = 0x08, kernel data = 0x08+8 = 0x10)
-/// Bits [63:48] = SYSRET CS/SS base (0x18; SYSRET loads SS=0x18+0=user_data, CS=0x18+16=user_code)
-pub const STAR_VALUE: u64 = (0x0018_u64 << 48) | (0x0008_u64 << 32);
+///
+/// Bits [47:32] = SYSCALL CS/SS base. CPU loads CS = base, SS = base+8.
+///   We want kernel CS = 0x08, kernel SS = 0x10, so base = 0x08.
+///
+/// Bits [63:48] = SYSRET CS/SS base. In 64-bit mode the CPU loads
+///   SS = (base + 8) | 3 and CS = (base + 16) | 3 (RPL forced to 3).
+///   We want SS = USER_DS = 0x1B and CS = USER_CS = 0x23.
+///   That requires base = 0x10:
+///     SS = (0x10 + 8) | 3 = 0x18 | 3 = 0x1B ✓
+///     CS = (0x10 + 16) | 3 = 0x20 | 3 = 0x23 ✓
+///
+/// Setting base to 0x18 (the address of the user-data selector itself) is
+/// the natural-looking but incorrect choice — it makes SYSRET produce
+/// CS = 0x28 (TSS) and SS = 0x20 (user code), which silently corrupts
+/// segment-register descriptor caches.
+pub const STAR_VALUE: u64 = (0x0010_u64 << 48) | (0x0008_u64 << 32);

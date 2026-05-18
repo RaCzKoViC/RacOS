@@ -203,9 +203,8 @@ impl Scheduler {
             // (kernel code) remains reachable after the CR3 write.
             unsafe { virt::write_cr3(new_pt); }
         } else if new_pt == 0 && old_pt != 0 {
-            // Switching back to a kernel task — restore the kernel's own CR3.
-            // For now the kernel tasks run on whatever CR3 is current; since
-            // kernel code is in every page table this is always safe.
+            // Switching back to a kernel task — keep current CR3. Kernel
+            // mappings are shared in every process page table so this is safe.
         }
 
         // SAFETY: Both contexts are valid, interrupts are disabled (called from IRQ handler).
