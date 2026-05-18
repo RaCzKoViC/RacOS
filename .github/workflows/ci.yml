@@ -116,11 +116,21 @@ jobs:
           echo "--- boot.log tail ---"
           tail -n 80 boot.log
 
-      - name: Assert kernel reached idle loop
+      - name: Assert kernel reached idle loop + racsh prompt
         run: |
-          grep -q "RACORE: RacOS kernel starting" boot.log || (echo "Kernel did not start" && exit 1)
-          grep -q "RACORE: Entering idle loop" boot.log || (echo "Kernel did not reach idle loop" && exit 1)
-          echo "Boot smoke PASSED"
+          grep -q "RACORE: RacOS kernel starting" boot.log \
+            || (echo "FAIL: kernel did not start" && exit 1)
+          grep -q "RACORE: Entering idle loop" boot.log \
+            || (echo "FAIL: kernel did not reach idle loop" && exit 1)
+          # Stronger assertion: PID 1 (init) ran AND spawned racsh AND racsh
+          # printed its banner. Catches regressions in spawn/wait/sysret path.
+          grep -q "\[init\] RacInit starting" boot.log \
+            || (echo "FAIL: /sbin/init did not start" && exit 1)
+          grep -q "\[init\] spawned /bin/sh" boot.log \
+            || (echo "FAIL: init did not spawn racsh" && exit 1)
+          grep -q "racsh 0.1.0" boot.log \
+            || (echo "FAIL: racsh did not print banner" && exit 1)
+          echo "Boot smoke PASSED — kernel + init + racsh all alive"
 
       - name: Upload boot log
         if: always()
@@ -128,6 +138,77 @@ jobs:
         with:
           name: boot-log
           path: boot.log
+
+  interactive-smoke:
+    name: QEMU interactive shell (TCP serial)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools-preview
+          targets: x86_64-unknown-none, x86_64-unknown-uefi
+      - name: Install QEMU, OVMF, nasm, python, ncat
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf nasm mtools python3 ncat
+
+      - name: Build kernel + bootloader, stage ESP
+        run: |
+          cargo build --package racore --target x86_64-unknown-none
+          cargo build --package racos-boot --target x86_64-unknown-uefi
+          mkdir -p esp/EFI/BOOT
+          cp target/x86_64-unknown-uefi/debug/bootx64.efi esp/EFI/BOOT/BOOTX64.EFI
+          cp target/x86_64-unknown-none/debug/racore esp/racore.elf
+          if [ -d initramfs-root ]; then
+            python3 scripts/pack-initramfs.py initramfs-root esp/initramfs.img
+          fi
+
+      - name: Boot + drive racsh over TCP-serial
+        run: |
+          OVMF=/usr/share/OVMF/OVMF_CODE.fd
+          qemu-system-x86_64 \
+            -machine q35 -cpu qemu64 -m 512M \
+            -drive if=pflash,format=raw,file=$OVMF,readonly=on \
+            -drive file=fat:rw:esp,format=raw \
+            -chardev socket,id=ser,host=127.0.0.1,port=4444,server=on,wait=off \
+            -serial chardev:ser \
+            -display none -no-reboot \
+            > qemu-host.log 2>&1 &
+          QEMU_PID=$!
+          # Give QEMU/UEFI time to boot to the racsh prompt
+          sleep 5
+          # Drive racsh: send a few commands, capture serial replies for 6s
+          (
+            sleep 1; printf 'pwd\n'
+            sleep 1; printf 'echo ci-smoke-ok\n'
+            sleep 1; printf 'cat /proc/version\n'
+            sleep 2
+          ) | timeout 8 ncat 127.0.0.1 4444 > shell.log || true
+          kill $QEMU_PID 2>/dev/null || true
+          wait $QEMU_PID 2>/dev/null || true
+          echo "--- shell.log ---"
+          cat shell.log
+
+      - name: Assert shell responded
+        run: |
+          grep -q "racsh\\$" shell.log \
+            || (echo "FAIL: racsh prompt not seen" && exit 1)
+          grep -q "^/\s*$" shell.log \
+            || (echo "FAIL: pwd did not return /" && exit 1)
+          grep -q "ci-smoke-ok" shell.log \
+            || (echo "FAIL: echo did not roundtrip" && exit 1)
+          grep -q "RacOS version" shell.log \
+            || (echo "FAIL: cat /proc/version did not return content" && exit 1)
+          echo "Interactive shell PASSED"
+
+      - name: Upload shell log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shell-log
+          path: shell.log
 
   lint:
     name: Format + clippy (advisory)
