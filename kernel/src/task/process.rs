@@ -300,8 +300,42 @@ unsafe extern "C" fn user_entry_trampoline() {
         "mov ax, 0x1B",       // USER_DS = 0x18 | 3
         "mov ds, ax",
         "mov es, ax",
+
+        // Unconditionally normalise the GS/KERNEL_GS_BASE pair before
+        // entering ring 3. The trampoline can be reached from two very
+        // different kernel-mode contexts:
+        //   (A) directly from the boot/idle path, where GS_BASE is the
+        //       initial 0 and KERNEL_GS_BASE is the per-CPU pointer
+        //       (already set during syscall::entry::init).
+        //   (B) mid-syscall, after some other task hit swapgs in
+        //       syscall_entry and block_and_reschedule'd into us — here
+        //       GS_BASE points at PER_CPU and KERNEL_GS_BASE is the
+        //       previous task's user GS (typically 0).
+        // A blanket `swapgs` fixes (B) but breaks (A); avoiding swapgs
+        // does the opposite. Setting both MSRs explicitly works for both:
+        // user gets GS_BASE = 0, the next syscall's swapgs cleanly flips
+        // it to the per-CPU pointer.
+        //
+        // wrmsr clobbers ECX/EAX/EDX; nothing in this trampoline cares
+        // about their values at IRETQ time (the IRET frame restores
+        // user-visible registers).
+
+        // GS_BASE = 0
+        "xor eax, eax",
+        "xor edx, edx",
+        "mov ecx, 0xC0000100",      // MSR_GS_BASE
+        "wrmsr",
+
+        // KERNEL_GS_BASE = &PER_CPU
+        "lea rax, [rip + {per_cpu}]",
+        "mov rdx, rax",
+        "shr rdx, 32",
+        "mov ecx, 0xC0000102",      // MSR_KERNEL_GS_BASE
+        "wrmsr",
+
         // IRETQ pops: RIP, CS, RFLAGS, RSP, SS from current RSP. The popped
         // RFLAGS already has IF set so interrupts are enabled in user mode.
         "iretq",
+        per_cpu = sym crate::syscall::entry::PER_CPU,
     );
 }

@@ -158,12 +158,12 @@ unsafe extern "C" fn syscall_entry() {
 /// Per-CPU data structure (minimal, UP only for MVP).
 /// At GS:0x00 = kernel RSP, GS:0x08 = user RSP (scratch).
 #[repr(C, align(16))]
-struct PerCpuData {
+pub(crate) struct PerCpuData {
     kernel_rsp: u64,
     user_rsp: u64,
 }
 
-static mut PER_CPU: PerCpuData = PerCpuData {
+pub(crate) static mut PER_CPU: PerCpuData = PerCpuData {
     kernel_rsp: 0,
     user_rsp: 0,
 };
