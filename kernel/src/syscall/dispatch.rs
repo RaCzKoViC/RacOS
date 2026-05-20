@@ -104,6 +104,21 @@ pub extern "C" fn syscall_dispatch(
     arg5: u64,
     arg6: u64,
 ) -> i64 {
+    // Latch the on-kernel-stack `SyscallFrame` pointer (which the entry
+    // asm just wrote to PER_CPU.current_syscall_frame) into the current
+    // task struct *before* any handler can re-enable interrupts and
+    // potentially trigger a context switch. After this, any code path
+    // (signal delivery, exception recovery) can find the frame via
+    // `scheduler::with_current_syscall_frame_mut(...)` without racing
+    // a concurrent syscall on the same CPU.
+    //
+    // SAFETY: interrupts are disabled on entry to syscall_dispatch
+    // (SFMASK clears IF on `syscall`), so PER_CPU is stable here.
+    unsafe {
+        let frame_ptr = super::entry::current_syscall_frame_ptr();
+        crate::task::scheduler::set_current_syscall_frame_ptr(frame_ptr);
+    }
+
     let result: SyscallResult = match nr {
         SYS_EXIT => {
             handlers::sys_exit(arg1 as i32);
@@ -194,6 +209,20 @@ pub extern "C" fn syscall_dispatch(
 
     // Deliver any pending signals before returning to user space.
     handlers::deliver_pending_signals();
+
+    // Drop the frame pointer from the task struct now that we're about
+    // to leave kernel mode. Defensive: PER_CPU is cleared by the entry
+    // asm immediately after we return, but the task field would persist
+    // until the next syscall otherwise.
+    //
+    // SAFETY: returning into the entry asm which keeps interrupts
+    // disabled until SYSRETQ — but we may still be running with IF=1
+    // here, so wrap in cli/sti to keep the clear race-free.
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+        crate::task::scheduler::clear_current_syscall_frame_ptr();
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
 
     result_to_raw(result)
 }

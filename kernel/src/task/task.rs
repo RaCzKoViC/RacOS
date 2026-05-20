@@ -116,6 +116,19 @@ pub struct Task {
     /// Current working directory (absolute path, no trailing slash except root).
     pub cwd: [u8; 256],
     pub cwd_len: usize,
+    /// True between the moment a signal handler is invoked and the moment
+    /// `sys_sigreturn` runs. Used by sigreturn to validate state.
+    pub in_signal_handler: bool,
+    /// User-space pointer to the SignalFrame written for the currently
+    /// active handler. Zero when no handler is running.
+    pub saved_signal_frame_ptr: u64,
+    /// Kernel-space pointer to this task's currently-active `SyscallFrame`
+    /// on its kernel stack (the frame the syscall entry trampoline will
+    /// pop into user registers/RIP/RSP/RFLAGS on `sysretq`). Set by the
+    /// syscall entry path and cleared on the way out. Zero when the task
+    /// is not currently executing inside a syscall. Signal delivery code
+    /// dereferences this to redirect the return to a user handler.
+    pub current_syscall_frame_ptr: u64,
 }
 
 impl Task {
@@ -187,6 +200,9 @@ impl Task {
             name_len: len,
             cwd: cwd_buf,
             cwd_len: 1,
+            in_signal_handler: false,
+            saved_signal_frame_ptr: 0,
+            current_syscall_frame_ptr: 0,
         })
     }
 
@@ -216,6 +232,9 @@ impl Task {
             name_len: 4,
             cwd: cwd_buf,
             cwd_len: 1,
+            in_signal_handler: false,
+            saved_signal_frame_ptr: 0,
+            current_syscall_frame_ptr: 0,
         }
     }
 }

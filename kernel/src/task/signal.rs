@@ -151,3 +151,115 @@ pub enum SignalAction {
     Stop,
     Continue,
 }
+
+/// Frame written to the user stack when delivering a signal with a user
+/// handler. `sys_sigreturn` consumes it to restore the interrupted context.
+///
+/// Layout is `#[repr(C)]` because user-space VDSO code may read it.
+///
+/// Field order intentionally mirrors the order syscall/interrupt entry
+/// pushes general-purpose registers, then the interrupted instruction
+/// state, then signal bookkeeping. Sizes (with `#[repr(C)]`):
+///   - 15 × u64 GPRs                              = 120 bytes  (offsets   0..120)
+///   - rip, rsp, rflags  (3 × u64)                =  24 bytes  (offsets 120..144)
+///   - saved_sigmask     (u64)                    =   8 bytes  (offsets 144..152)
+///   - signal_number     (u32)                    =   4 bytes  (offsets 152..156)
+///   - _pad              (u32)                    =   4 bytes  (offsets 156..160)
+/// Total: 160 bytes, already 16-byte aligned.
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct SignalFrame {
+    // Saved GPRs in the order pushed by the syscall entry path
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub r8:  u64,
+    pub r9:  u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    // Interrupted instruction state
+    pub rip: u64,
+    pub rsp: u64,
+    pub rflags: u64,
+    // Signal bookkeeping
+    pub saved_sigmask: u64,
+    pub signal_number: u32,
+    pub _pad: u32,
+}
+
+impl SignalFrame {
+    /// Total bytes a `SignalFrame` occupies on the user stack, rounded up
+    /// to 16 bytes so the C ABI's pre-`call` stack alignment guarantee is
+    /// satisfied when the kernel hands control to the user handler.
+    pub const fn aligned_size() -> usize {
+        (core::mem::size_of::<SignalFrame>() + 15) / 16 * 16
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_frame_size_is_160() {
+        // 18 × u64 (GPRs + rip/rsp/rflags) + 1 × u64 (saved_sigmask)
+        //   + 1 × u32 (signal_number) + 1 × u32 (_pad) = 160 bytes.
+        assert_eq!(core::mem::size_of::<SignalFrame>(), 160);
+    }
+
+    #[test]
+    fn signal_frame_aligned_size_is_160() {
+        // 160 is already a multiple of 16, so aligned_size == size_of.
+        assert_eq!(SignalFrame::aligned_size(), 160);
+    }
+
+    #[test]
+    fn signal_frame_alignment_is_at_least_8() {
+        // `#[repr(C)]` on a struct whose largest field is u64 yields 8-byte
+        // alignment. The 16-byte runtime alignment is achieved by stack
+        // adjustment (see `aligned_size`), not by the struct itself.
+        assert_eq!(core::mem::align_of::<SignalFrame>(), 8);
+    }
+
+    #[test]
+    fn signal_frame_field_offsets() {
+        let f = SignalFrame::default();
+        let base = &f as *const SignalFrame as usize;
+        let off = |addr: usize| addr - base;
+
+        // GPR block: rax..r15 are 15 consecutive u64s starting at 0.
+        assert_eq!(off(&f.rax as *const u64 as usize), 0);
+        assert_eq!(off(&f.rbx as *const u64 as usize), 8);
+        assert_eq!(off(&f.r15 as *const u64 as usize), 14 * 8);
+
+        // Interrupted instruction state.
+        assert_eq!(off(&f.rip    as *const u64 as usize), 15 * 8); // 120
+        assert_eq!(off(&f.rsp    as *const u64 as usize), 16 * 8); // 128
+        assert_eq!(off(&f.rflags as *const u64 as usize), 17 * 8); // 136
+
+        // Signal bookkeeping.
+        assert_eq!(off(&f.saved_sigmask as *const u64 as usize), 18 * 8); // 144
+        assert_eq!(off(&f.signal_number as *const u32 as usize), 152);
+        assert_eq!(off(&f._pad          as *const u32 as usize), 156);
+    }
+
+    #[test]
+    fn signal_frame_default_is_zeroed() {
+        let f = SignalFrame::default();
+        assert_eq!(f.rax, 0);
+        assert_eq!(f.rip, 0);
+        assert_eq!(f.rsp, 0);
+        assert_eq!(f.rflags, 0);
+        assert_eq!(f.saved_sigmask, 0);
+        assert_eq!(f.signal_number, 0);
+        assert_eq!(f._pad, 0);
+    }
+}

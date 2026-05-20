@@ -132,6 +132,14 @@ impl FdTable {
         Ok(())
     }
 
+    /// Close every open descriptor. Each `OpenFile` Arc is dropped; pipes and
+    /// inodes see their refcount drop, so consumers observe EOF promptly.
+    pub fn close_all(&mut self) {
+        for slot in self.entries.iter_mut() {
+            *slot = None;
+        }
+    }
+
     /// Duplicate a fd.
     pub fn dup(&mut self, oldfd: i32) -> VfsResult<i32> {
         let file = self.get(oldfd)?;

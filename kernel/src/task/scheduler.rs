@@ -286,12 +286,17 @@ impl Scheduler {
         self.schedule();
     }
 
-    /// Terminate the current task, setting it to Zombie, then wake its parent.
+    /// Terminate the current task, setting it to Zombie, then wake its parent
+    /// and post SIGCHLD. Closes user-visible file descriptors early so pipes
+    /// and inodes see their refcount drop before the parent reaps.
     pub fn exit_current(&mut self, status: i32) {
         let idx = self.current;
         let (my_pid, parent_pid) = if let Some(ref mut task) = self.tasks[idx] {
             task.state = TaskState::Zombie;
             task.exit_status = status;
+            // Drop every file descriptor right now. The Arc<OpenFile> refs
+            // are released, which makes pipes/inodes observe the close.
+            task.fd_table.close_all();
             (task.pid, task.parent_pid)
         } else { (0, 0) };
 
@@ -305,19 +310,21 @@ impl Scheduler {
             }
         }
 
-        // Wake the parent if it is blocked waiting for a child.
+        // Notify the parent: post SIGCHLD and wake it if it was blocked.
         if parent_pid != 0 {
             for slot in self.tasks.iter_mut().flatten() {
-                if slot.pid == parent_pid && matches!(slot.state, TaskState::Blocked) {
-                    slot.state = TaskState::Ready;
+                if slot.pid == parent_pid {
+                    slot.signals.send(super::signal::Signal::SIGCHLD);
+                    if matches!(slot.state, TaskState::Blocked) {
+                        slot.state = TaskState::Ready;
+                    }
                     break;
                 }
             }
         }
 
-        // Schedule another task immediately
+        // Schedule another task immediately.
         self.schedule();
-        // If we get here (no other tasks), halt
     }
 
     fn child_matches_wait_filter(
@@ -521,6 +528,11 @@ impl Scheduler {
             task.kernel_stack_base = new_task.kernel_stack_base;
             task.page_table_phys = new_task.page_table_phys;
             task.signals = super::signal::SignalState::new();
+            // Drop signal-handler bookkeeping — the new image has none of the
+            // old image's user-space sigframes or in-flight handlers.
+            task.in_signal_handler = false;
+            task.saved_signal_frame_ptr = 0;
+            task.current_syscall_frame_ptr = 0;
             task.name = new_task.name;
             task.name_len = new_task.name_len;
         }
@@ -894,6 +906,67 @@ where
     (*core::ptr::addr_of_mut!(SCHEDULER)).as_mut().and_then(|s| {
         let idx = s.current;
         s.tasks[idx].as_mut().map(|t| f(t))
+    })
+}
+
+/// Stash the kernel-stack pointer to the in-progress `SyscallFrame` in
+/// the current task. Called from `syscall_dispatch` immediately after
+/// entry so that signal delivery (and other late-in-syscall code) can
+/// reach the frame via [`with_current_syscall_frame_mut`].
+///
+/// Safe to call with `ptr == 0` (e.g. from a non-syscall execution
+/// context that wants to clear the slot defensively).
+///
+/// # Safety
+/// Must be called with interrupts disabled. The caller is responsible
+/// for ensuring `ptr` points to a valid `SyscallFrame` on the current
+/// task's kernel stack that remains alive for the duration of any
+/// matching [`with_current_syscall_frame_mut`] call.
+pub unsafe fn set_current_syscall_frame_ptr(ptr: u64) {
+    if let Some(ref mut sched) = *core::ptr::addr_of_mut!(SCHEDULER) {
+        let idx = sched.current;
+        if let Some(ref mut t) = sched.tasks[idx] {
+            t.current_syscall_frame_ptr = ptr;
+        }
+    }
+}
+
+/// Drop the current task's syscall-frame pointer. Companion to
+/// [`set_current_syscall_frame_ptr`].
+///
+/// # Safety
+/// Must be called with interrupts disabled.
+pub unsafe fn clear_current_syscall_frame_ptr() {
+    set_current_syscall_frame_ptr(0);
+}
+
+/// Run a closure with mutable access to the current task's in-progress
+/// `SyscallFrame`. Returns `None` when no syscall is in flight on the
+/// current task (i.e. the pointer is null).
+///
+/// Used by signal delivery to overwrite `user_rip`/`user_rsp`/`user_rflags`
+/// so the syscall trampoline's `sysretq` lands in a user signal handler
+/// instead of the original interrupted instruction.
+///
+/// # Safety
+/// Must be called with interrupts disabled. The closure must not
+/// trigger a context switch on the current task — otherwise the
+/// reference it holds would dangle (the underlying memory lives on the
+/// current task's kernel stack, which is left unchanged by a switch but
+/// the `&mut` reference would alias once the task is rescheduled).
+pub unsafe fn with_current_syscall_frame_mut<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut super::task::Task, &mut crate::syscall::entry::SyscallFrame) -> R,
+{
+    (*core::ptr::addr_of_mut!(SCHEDULER)).as_mut().and_then(|s| {
+        let idx = s.current;
+        let task = s.tasks[idx].as_mut()?;
+        let ptr = task.current_syscall_frame_ptr;
+        if ptr == 0 {
+            return None;
+        }
+        let frame = &mut *(ptr as *mut crate::syscall::entry::SyscallFrame);
+        Some(f(task, frame))
     })
 }
 
