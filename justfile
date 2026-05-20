@@ -1,7 +1,8 @@
 # RacOS Build System
 # Requires: cargo (nightly), qemu-system-x86_64
-
-set shell := ["powershell", "-NoProfile", "-Command"]
+#
+# Runs on Linux and Windows. Override the target dir with the env var
+# RACOS_TARGET_DIR; otherwise defaults to `target/` in the repo.
 
 project   := "RacOS"
 kernel    := "RaCore"
@@ -9,7 +10,7 @@ arch      := "x86_64"
 qemu      := "qemu-system-x86_64"
 target    := "x86_64-unknown-none"
 uefi_target := "x86_64-unknown-uefi"
-target_dir := "C:\\Users\\Maciej\\RacOS-target"
+target_dir := env_var_or_default("RACOS_TARGET_DIR", "target")
 
 # Default recipe
 default: build
