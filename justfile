@@ -12,6 +12,10 @@ target    := "x86_64-unknown-none"
 uefi_target := "x86_64-unknown-uefi"
 target_dir := env_var_or_default("RACOS_TARGET_DIR", "target")
 
+# Pin cargo's output dir to target_dir so RACOS_TARGET_DIR flows into the
+# actual build, not just the artefact lookup paths in run/test-uefi.
+export CARGO_TARGET_DIR := target_dir
+
 # Default recipe
 default: build
 

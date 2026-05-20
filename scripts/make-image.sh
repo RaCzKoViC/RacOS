@@ -40,6 +40,10 @@ fi
 
 echo "=== RacOS Image Builder ==="
 
+# Pin cargo's output dir to TARGET_DIR so RACOS_TARGET_DIR overrides flow all
+# the way through to the actual build, not just the post-build lookup.
+export CARGO_TARGET_DIR="$TARGET_DIR"
+
 # ── Step 1: Build kernel ──────────────────────────────────────────────────────
 echo "[1/5] Building kernel (x86_64-unknown-none)..."
 cargo build --package racore --target x86_64-unknown-none "${CARGO_PROFILE_FLAGS[@]}"
@@ -53,7 +57,7 @@ echo "[3/5] Creating ESP directory structure..."
 EFI_BOOT_DIR="$ESP_DIR/EFI/BOOT"
 mkdir -p "$EFI_BOOT_DIR"
 
-BOOTLOADER_SRC="$TARGET_DIR/x86_64-unknown-uefi/$PROFILE/racos-boot.efi"
+BOOTLOADER_SRC="$TARGET_DIR/x86_64-unknown-uefi/$PROFILE/bootx64.efi"
 BOOTLOADER_DST="$EFI_BOOT_DIR/BOOTX64.EFI"
 if [[ ! -f "$BOOTLOADER_SRC" ]]; then
     echo "ERROR: Bootloader not found: $BOOTLOADER_SRC" >&2

@@ -49,6 +49,8 @@ else
     TARGET_DIR="$(cargo metadata --format-version 1 --no-deps --quiet \
         | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')"
 fi
+# Pin cargo's output dir so subsequent `cargo build` calls write to TARGET_DIR.
+export CARGO_TARGET_DIR="$TARGET_DIR"
 BIN_DIR="$TARGET_DIR/x86_64-unknown-none/$PROFILE_DIR"
 
 # Keep caller RUSTFLAGS and use kernel-specific flags only for kernel build.
