@@ -122,6 +122,13 @@ pub struct Task {
     /// User-space pointer to the SignalFrame written for the currently
     /// active handler. Zero when no handler is running.
     pub saved_signal_frame_ptr: u64,
+    /// Kernel-space pointer to this task's currently-active `SyscallFrame`
+    /// on its kernel stack (the frame the syscall entry trampoline will
+    /// pop into user registers/RIP/RSP/RFLAGS on `sysretq`). Set by the
+    /// syscall entry path and cleared on the way out. Zero when the task
+    /// is not currently executing inside a syscall. Signal delivery code
+    /// dereferences this to redirect the return to a user handler.
+    pub current_syscall_frame_ptr: u64,
 }
 
 impl Task {
@@ -195,6 +202,7 @@ impl Task {
             cwd_len: 1,
             in_signal_handler: false,
             saved_signal_frame_ptr: 0,
+            current_syscall_frame_ptr: 0,
         })
     }
 
@@ -226,6 +234,7 @@ impl Task {
             cwd_len: 1,
             in_signal_handler: false,
             saved_signal_frame_ptr: 0,
+            current_syscall_frame_ptr: 0,
         }
     }
 }

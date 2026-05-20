@@ -1573,6 +1573,7 @@ pub fn sys_fork() -> SyscallResult {
             cwd_len,
             in_signal_handler: false,
             saved_signal_frame_ptr: 0,
+            current_syscall_frame_ptr: 0,
         };
 
         match crate::task::scheduler::spawn_forked(child_task) {
@@ -1772,6 +1773,7 @@ pub fn sys_clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8)
             cwd_len,
             in_signal_handler: false,
             saved_signal_frame_ptr: 0,
+            current_syscall_frame_ptr: 0,
         };
 
         match crate::task::scheduler::spawn_forked(child_task) {

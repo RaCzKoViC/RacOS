@@ -289,6 +289,7 @@ impl UserProcess {
                 cwd_len: 1,
                 in_signal_handler: false,
                 saved_signal_frame_ptr: 0,
+                current_syscall_frame_ptr: 0,
             },
             user_entry: loaded.entry_point,
             user_stack_top: loaded.stack_virt_top,
