@@ -418,6 +418,29 @@ pub fn create_user_page_table() -> Result<u64, &'static str> {
             }
         }
     }
+
+    // Map the VDSO page (user-readable, user-executable) so user-space signal
+    // handlers can `ret` into the kernel-provided trampoline. The VDSO frame
+    // is set up once at boot by `mm::vdso::init()`.
+    let vdso_phys = crate::mm::vdso::page_phys();
+    if vdso_phys != 0 {
+        // USER_CODE = PRESENT | USER (no NO_EXECUTE): the trampoline must be
+        // executable from ring 3. Not WRITABLE — the page is RX-only.
+        let vdso_flags = flags::USER_CODE;
+        // SAFETY: `vdso_phys` was allocated and initialised by `vdso::init()`
+        // at boot; `new_pml4_phys` was just allocated by `alloc_page_table`
+        // and currently contains only kernel-shared entries.
+        unsafe {
+            map_range(
+                new_pml4_phys,
+                crate::mm::vdso::VDSO_VADDR,
+                vdso_phys,
+                FRAME_SIZE as u64,
+                vdso_flags,
+            )?;
+        }
+    }
+
     Ok(new_pml4_phys)
 }
 
