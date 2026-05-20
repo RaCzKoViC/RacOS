@@ -411,11 +411,12 @@ pub fn sys_exit(status: i32) -> ! {
         crate::task::scheduler::current_pid()
     );
 
-    // Mark task as zombie and schedule away
-    // TODO: proper process cleanup (release address space, fds, signal parent)
+    // Address space + kernel stack are reclaimed by reap_zombie_child when
+    // the parent calls waitpid; FDs and parent SIGCHLD are handled in
+    // exit_current below.
     unsafe { crate::task::scheduler::exit_current(status); }
 
-    // Should not reach here — exit_current never returns
+    // exit_current never returns. Halt as a safety net.
     loop {
         unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
     }

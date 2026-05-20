@@ -286,12 +286,17 @@ impl Scheduler {
         self.schedule();
     }
 
-    /// Terminate the current task, setting it to Zombie, then wake its parent.
+    /// Terminate the current task, setting it to Zombie, then wake its parent
+    /// and post SIGCHLD. Closes user-visible file descriptors early so pipes
+    /// and inodes see their refcount drop before the parent reaps.
     pub fn exit_current(&mut self, status: i32) {
         let idx = self.current;
         let (my_pid, parent_pid) = if let Some(ref mut task) = self.tasks[idx] {
             task.state = TaskState::Zombie;
             task.exit_status = status;
+            // Drop every file descriptor right now. The Arc<OpenFile> refs
+            // are released, which makes pipes/inodes observe the close.
+            task.fd_table.close_all();
             (task.pid, task.parent_pid)
         } else { (0, 0) };
 
@@ -305,19 +310,21 @@ impl Scheduler {
             }
         }
 
-        // Wake the parent if it is blocked waiting for a child.
+        // Notify the parent: post SIGCHLD and wake it if it was blocked.
         if parent_pid != 0 {
             for slot in self.tasks.iter_mut().flatten() {
-                if slot.pid == parent_pid && matches!(slot.state, TaskState::Blocked) {
-                    slot.state = TaskState::Ready;
+                if slot.pid == parent_pid {
+                    slot.signals.send(super::signal::Signal::SIGCHLD);
+                    if matches!(slot.state, TaskState::Blocked) {
+                        slot.state = TaskState::Ready;
+                    }
                     break;
                 }
             }
         }
 
-        // Schedule another task immediately
+        // Schedule another task immediately.
         self.schedule();
-        // If we get here (no other tasks), halt
     }
 
     fn child_matches_wait_filter(
