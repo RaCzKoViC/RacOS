@@ -114,6 +114,12 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         tty::vt::init();
     }
 
+    // Initialize VDSO trampoline page (used by signal sigreturn).
+    // SAFETY: heap and phys allocator are initialised.
+    unsafe {
+        crate::mm::vdso::init().expect("Failed to initialise VDSO");
+    }
+
     // Initialize drivers (subsystem, block, PCI).
     drivers::init();
 
