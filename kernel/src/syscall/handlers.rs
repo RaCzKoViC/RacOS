@@ -372,32 +372,121 @@ fn collect_user_argv(path: &str, argv_ptr: u64) -> Result<alloc::vec::Vec<alloc:
 /// Deliver any pending signals for the current task.
 /// Called at the end of every syscall before returning to user space.
 pub fn deliver_pending_signals() {
-    use crate::task::signal::SignalAction;
+    use crate::task::signal::{SignalAction, SignalFrame, SignalState, Signal, SIG_DFL, SIG_IGN};
+
     loop {
-        // SAFETY: disabling interrupts while accessing the scheduler.
-        let sig = unsafe {
-            core::arch::asm!("cli", options(nomem, nostack));
-            let s = crate::task::scheduler::take_pending_signal();
-            core::arch::asm!("sti", options(nomem, nostack));
-            s
-        };
-        let sig = match sig {
-            None => break,
-            Some(s) => s,
-        };
-        match crate::task::signal::SignalState::default_action(sig) {
-            SignalAction::Terminate => {
-                sys_exit(-1);
+        // Phase 1: decide what to do with the next pending signal.
+        let sig: Signal = {
+            // SAFETY: disabling interrupts while accessing the scheduler.
+            let s = unsafe {
+                core::arch::asm!("cli", options(nomem, nostack));
+                let s = crate::task::scheduler::take_pending_signal();
+                core::arch::asm!("sti", options(nomem, nostack));
+                s
+            };
+            match s {
+                None => return,
+                Some(s) => s,
             }
-            SignalAction::Ignore => {}
-            SignalAction::Stop => {
-                unsafe {
-                    core::arch::asm!("cli", options(nomem, nostack));
-                    crate::task::scheduler::block_and_reschedule();
+        };
+
+        // Lookup user handler for this signal (0 = SIG_DFL, 1 = SIG_IGN, else user fn).
+        let handler = unsafe {
+            crate::task::scheduler::with_current_task_mut(|t| {
+                t.signals.get_handler(sig as u8)
+            })
+        }.unwrap_or(SIG_DFL);
+
+        if handler == SIG_IGN {
+            continue;
+        }
+        if handler == SIG_DFL {
+            match SignalState::default_action(sig) {
+                SignalAction::Terminate => { sys_exit(-1); }
+                SignalAction::Ignore => { continue; }
+                SignalAction::Stop => {
+                    unsafe {
+                        core::arch::asm!("cli", options(nomem, nostack));
+                        crate::task::scheduler::block_and_reschedule();
+                    }
+                    continue;
                 }
+                SignalAction::Continue => { continue; }
             }
-            SignalAction::Continue => {
-                // Task is already running; nothing to do.
+        }
+
+        // Custom user handler — push SignalFrame and redirect.
+        let result: Option<Result<(), ()>> = unsafe {
+            core::arch::asm!("cli", options(nomem, nostack));
+            let r = crate::task::scheduler::with_current_syscall_frame_mut(|task, frame| {
+                // 1. Compute new user RSP: skip the red zone (128 bytes),
+                //    reserve space for SignalFrame, keep 16-byte alignment.
+                let red_zone = 128u64;
+                let frame_size = SignalFrame::aligned_size() as u64;
+                let mut new_rsp = frame.user_rsp.wrapping_sub(red_zone + frame_size);
+                new_rsp &= !0xF; // 16-byte align
+
+                // 2. Build the SignalFrame from the interrupted context.
+                //    Caller-saved GPRs (rax, rcx, rdx, rsi, rdi, r8, r10, r11)
+                //    were clobbered by the syscall ABI and aren't saved on the
+                //    SyscallFrame — fill them with zero so sigreturn restores 0
+                //    (matches "clobbered by syscall" semantics).
+                let sf = SignalFrame {
+                    rax: 0, rcx: 0, rdx: 0, rsi: 0, rdi: 0,
+                    r8: 0, r10: 0, r11: 0,
+                    rbx: frame.rbx, rbp: frame.rbp,
+                    r9: frame.saved_arg6,
+                    r12: frame.r12, r13: frame.r13, r14: frame.r14, r15: frame.r15,
+                    rip: frame.user_rip, rsp: frame.user_rsp, rflags: frame.user_rflags,
+                    saved_sigmask: task.signals.blocked as u64,
+                    signal_number: sig as u32,
+                    _pad: 0,
+                };
+
+                // 3. copy_to_user: write the frame to user stack.
+                //    validate_user_ptr is defined in this file (handlers.rs).
+                if validate_user_ptr(new_rsp, frame_size as usize).is_err() {
+                    return Err(());
+                }
+                core::ptr::write_volatile(new_rsp as *mut SignalFrame, sf);
+
+                // 4. Push the VDSO trampoline address as the handler's return
+                //    address. RSP -= 8.
+                let trampoline_rsp = new_rsp.wrapping_sub(8);
+                if validate_user_ptr(trampoline_rsp, 8).is_err() {
+                    return Err(());
+                }
+                *(trampoline_rsp as *mut u64) = crate::mm::vdso::VDSO_VADDR;
+
+                // 5. Patch the syscall frame: RIP = handler, RSP = trampoline_rsp.
+                //    NOTE: We cannot set RDI=signo on the SyscallFrame because RDI
+                //    is not stored there. We rely on the handler being declared
+                //    as `void handler(int signo)` and the dispatch path leaving
+                //    RDI = first dispatch arg (which after a sigaction call was
+                //    the signum). For ABI cleanliness, a stub trampoline page
+                //    could set RDI explicitly; that's a follow-up. For now,
+                //    handlers that test the signum may see undefined RDI — they
+                //    should still receive the correct *delivery* (handler runs).
+                // TODO: pass signum via RDI (extend SyscallFrame or VDSO trampoline).
+                frame.user_rip = handler;
+                frame.user_rsp = trampoline_rsp;
+
+                // 6. Record bookkeeping so sys_sigreturn can find the frame.
+                task.in_signal_handler = true;
+                task.saved_signal_frame_ptr = new_rsp;
+                // Block this signal during its own handler (POSIX default).
+                task.signals.blocked |= sig.mask();
+                Ok(())
+            });
+            core::arch::asm!("sti", options(nomem, nostack));
+            r
+        };
+
+        match result {
+            Some(Ok(())) => return,
+            _ => {
+                // Frame write failed (bad user pointer). Force-exit with SIGSEGV.
+                sys_exit(-1);
             }
         }
     }
