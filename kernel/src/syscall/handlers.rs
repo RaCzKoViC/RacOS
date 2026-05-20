@@ -391,11 +391,16 @@ pub fn deliver_pending_signals() {
         };
 
         // Lookup user handler for this signal (0 = SIG_DFL, 1 = SIG_IGN, else user fn).
+        // SAFETY: with_current_task_mut requires IF=0 so a timer IRQ cannot
+        // re-enter the scheduler while we hold &mut Task.
         let handler = unsafe {
-            crate::task::scheduler::with_current_task_mut(|t| {
+            core::arch::asm!("cli", options(nomem, nostack));
+            let h = crate::task::scheduler::with_current_task_mut(|t| {
                 t.signals.get_handler(sig as u8)
-            })
-        }.unwrap_or(SIG_DFL);
+            }).unwrap_or(SIG_DFL);
+            core::arch::asm!("sti", options(nomem, nostack));
+            h
+        };
 
         if handler == SIG_IGN {
             continue;
@@ -1972,6 +1977,20 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SyscallRes
         // Set new action
         if !act.is_null() {
             let new_sa = &*(act as *const KSigAction);
+            // Reject non-canonical / kernel-range handler addresses. SYSRETQ to
+            // a non-canonical RIP raises #GP in kernel mode (Intel), so a
+            // malicious caller could otherwise crash the kernel via
+            // sigaction(sig, {handler = 0xDEAD_BEEF_DEAD_BEEF}) + kill(self, sig).
+            // SIG_DFL (0) and SIG_IGN (1) are allowed as special sentinels.
+            const USER_SPACE_TOP: u64 = 0x0000_8000_0000_0000;
+            let h = new_sa.handler;
+            if h != crate::task::signal::SIG_DFL
+                && h != crate::task::signal::SIG_IGN
+                && h >= USER_SPACE_TOP
+            {
+                core::arch::asm!("sti", options(nomem, nostack));
+                return Err(SyscallError::EINVAL);
+            }
             crate::task::scheduler::with_current_task_mut(|t| {
                 t.signals.set_handler(signum as u8, new_sa.handler);
             });
@@ -1999,10 +2018,19 @@ pub fn sys_sigreturn() -> SyscallResult {
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let r = crate::task::scheduler::with_current_syscall_frame_mut(|task, frame| {
-            if !task.in_signal_handler || task.saved_signal_frame_ptr == 0 {
-                return Err(SyscallError::EFAULT);
-            }
-            let frame_ptr = task.saved_signal_frame_ptr;
+            // Find the SignalFrame on the user stack. The handler's `ret`
+            // popped the VDSO trampoline address that delivery had pushed, so
+            // at sigreturn entry the user RSP points exactly at the base of
+            // the active SignalFrame. Read from there rather than from
+            // task.saved_signal_frame_ptr — that way nested handlers each
+            // restore their own caller's context (the outer SignalFrame is
+            // higher up the stack and untouched by the inner sigreturn).
+            //
+            // No `in_signal_handler` check: a user calling sys_sigreturn
+            // without an active handler can only mutate its own register
+            // state, which user code can already do via plain instructions.
+            // validate_user_ptr below is the kernel-safety guarantee.
+            let frame_ptr = frame.user_rsp;
             let size = core::mem::size_of::<SignalFrame>();
             if validate_user_ptr(frame_ptr, size).is_err() {
                 return Err(SyscallError::EFAULT);
@@ -2027,10 +2055,14 @@ pub fn sys_sigreturn() -> SyscallResult {
             frame.user_rsp = sf.rsp;
             frame.user_rflags = sf.rflags;
 
-            // Restore signal mask.
+            // Restore signal mask. (Each SignalFrame captures the blocked-set
+            // as it was just before its own delivery, so this correctly nests:
+            // inner sigreturn restores the outer-handler-running mask; outer
+            // sigreturn then restores the pre-outer-delivery mask.)
             task.signals.blocked = sf.saved_sigmask as u32;
-            task.in_signal_handler = false;
-            task.saved_signal_frame_ptr = 0;
+            // task.in_signal_handler / saved_signal_frame_ptr are now legacy
+            // informational fields; we deliberately don't clear them — clearing
+            // on inner sigreturn would break a subsequent outer sigreturn.
 
             Ok(())
         });

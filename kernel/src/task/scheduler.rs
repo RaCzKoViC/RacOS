@@ -528,6 +528,11 @@ impl Scheduler {
             task.kernel_stack_base = new_task.kernel_stack_base;
             task.page_table_phys = new_task.page_table_phys;
             task.signals = super::signal::SignalState::new();
+            // Drop signal-handler bookkeeping — the new image has none of the
+            // old image's user-space sigframes or in-flight handlers.
+            task.in_signal_handler = false;
+            task.saved_signal_frame_ptr = 0;
+            task.current_syscall_frame_ptr = 0;
             task.name = new_task.name;
             task.name_len = new_task.name_len;
         }
