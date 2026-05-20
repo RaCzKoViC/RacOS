@@ -1986,10 +1986,57 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SyscallRes
 // Syscall 28: sys_sigreturn
 // ─────────────────────────────────────────────────
 
-/// Return from a signal handler (restores pre-signal context).
-/// For now, this is a stub — signal delivery is default-action only.
+/// Return from a signal handler.
+///
+/// Invoked by the VDSO trampoline (`mov rax, 28; syscall`) after the user
+/// signal handler returns. Restores the pre-signal user context that was
+/// saved on the user stack by signal delivery (Task 9), clears the
+/// in-signal-handler bookkeeping, and returns. The normal syscall return
+/// path then sysrets into the restored user RIP/RSP/RFLAGS.
 pub fn sys_sigreturn() -> SyscallResult {
-    // TODO: restore saved user context from signal frame
+    use crate::task::signal::SignalFrame;
+
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+        let r = crate::task::scheduler::with_current_syscall_frame_mut(|task, frame| {
+            if !task.in_signal_handler || task.saved_signal_frame_ptr == 0 {
+                return Err(SyscallError::EFAULT);
+            }
+            let frame_ptr = task.saved_signal_frame_ptr;
+            let size = core::mem::size_of::<SignalFrame>();
+            if validate_user_ptr(frame_ptr, size).is_err() {
+                return Err(SyscallError::EFAULT);
+            }
+            // copy_from_user (kernel reads user memory).
+            let sf: SignalFrame = core::ptr::read_volatile(frame_ptr as *const SignalFrame);
+
+            // Restore the SyscallFrame fields we can. Caller-saved GPRs (rax,
+            // rcx, rdx, rsi, rdi, r8, r10, r11) are not stored on the
+            // SyscallFrame; they'll naturally come out of sysret as whatever
+            // the syscall-return path puts there (typically 0 / sigreturn's
+            // own return value).
+            frame.saved_arg6 = sf.r9;
+            frame.rbx = sf.rbx;
+            frame.rbp = sf.rbp;
+            frame.r12 = sf.r12;
+            frame.r13 = sf.r13;
+            frame.r14 = sf.r14;
+            frame.r15 = sf.r15;
+            // Restore interrupted context.
+            frame.user_rip = sf.rip;
+            frame.user_rsp = sf.rsp;
+            frame.user_rflags = sf.rflags;
+
+            // Restore signal mask.
+            task.signals.blocked = sf.saved_sigmask as u32;
+            task.in_signal_handler = false;
+            task.saved_signal_frame_ptr = 0;
+
+            Ok(())
+        });
+        core::arch::asm!("sti", options(nomem, nostack));
+        r.unwrap_or(Err(SyscallError::EFAULT))
+    }?;
     Ok(0)
 }
 
