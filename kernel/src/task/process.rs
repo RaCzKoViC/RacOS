@@ -287,6 +287,8 @@ impl UserProcess {
                 name_len: len,
                 cwd: cwd_buf,
                 cwd_len: 1,
+                in_signal_handler: false,
+                saved_signal_frame_ptr: 0,
             },
             user_entry: loaded.entry_point,
             user_stack_top: loaded.stack_virt_top,
