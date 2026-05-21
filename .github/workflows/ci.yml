@@ -109,8 +109,13 @@ jobs:
           sudo apt-get install -y qemu-system-x86 ovmf nasm mtools python3
 
       - name: Build kernel + bootloader
+        # Kernel MUST be linked with relocation-model=static + -no-pie or the
+        # bootloader (which doesn't apply relocations) loads a PIE image whose
+        # trait vtables point at garbage low memory → #UD on the first dyn
+        # dispatch and the guest never prints anything.
         run: |
-          cargo build --package racore --target x86_64-unknown-none
+          RUSTFLAGS="-C relocation-model=static -C link-arg=-no-pie" \
+            cargo build --package racore --target x86_64-unknown-none
           cargo build --package racos-boot --target x86_64-unknown-uefi
 
       - name: Stage ESP
@@ -122,6 +127,10 @@ jobs:
             python3 scripts/pack-initramfs.py initramfs-root esp/initramfs.img || true
           fi
           ls -la esp/
+          # Show what OVMF the runner actually has — paths vary between
+          # Ubuntu releases (OVMF_CODE.fd vs OVMF_CODE_4M.fd).
+          ls -la /usr/share/OVMF/ || true
+          qemu-system-x86_64 --version | head -n 1
 
       - name: Boot in QEMU (15s budget)
         run: |
@@ -190,15 +199,21 @@ jobs:
 
       - name: Boot QEMU with isa-debug-exit (60s budget)
         id: smoke
+        # Keep the QEMU args minimal — `-boot menu=on` / `-monitor null` are
+        # needed on the Windows dev host (different OVMF build, multiplexed
+        # stdio monitor) but break the Ubuntu CI runner where they cause
+        # QEMU to exit before serial is opened. The Linux OVMF + serial
+        # file: combo just works without them.
         run: |
           OVMF=/usr/share/OVMF/OVMF_CODE.fd
+          ls -la /usr/share/OVMF/ || true
+          qemu-system-x86_64 --version | head -n 1
           set +e
           timeout 60 qemu-system-x86_64 \
             -machine q35 -cpu qemu64 -m 512M \
             -drive if=pflash,format=raw,file=$OVMF,readonly=on \
-            -boot menu=on \
             -drive file=fat:rw:esp,format=raw \
-            -serial file:smoke.log -monitor null -display none \
+            -serial file:smoke.log -display none \
             -no-reboot \
             -device isa-debug-exit,iobase=0xf4,iosize=0x04
           EXIT=$?
@@ -206,7 +221,7 @@ jobs:
           echo "QEMU_EXIT=$EXIT" >> $GITHUB_OUTPUT
           echo "QEMU exit code: $EXIT (expect 33 for success)"
           echo "--- smoke.log tail ---"
-          tail -n 120 smoke.log
+          tail -n 120 smoke.log || echo "(smoke.log was never created — QEMU likely failed to launch)"
 
       - name: Assert isa-debug-exit success (exit == 33)
         run: |
@@ -248,8 +263,12 @@ jobs:
           sudo apt-get install -y qemu-system-x86 ovmf nasm mtools python3 ncat
 
       - name: Build kernel + bootloader, stage ESP
+        # Same static-relocation requirement as boot-smoke (kernel must not
+        # be PIE or the bootloader hands it off with unfixed RIP-relative
+        # GOT addresses).
         run: |
-          cargo build --package racore --target x86_64-unknown-none
+          RUSTFLAGS="-C relocation-model=static -C link-arg=-no-pie" \
+            cargo build --package racore --target x86_64-unknown-none
           cargo build --package racos-boot --target x86_64-unknown-uefi
           mkdir -p esp/EFI/BOOT
           cp target/x86_64-unknown-uefi/debug/bootx64.efi esp/EFI/BOOT/BOOTX64.EFI
