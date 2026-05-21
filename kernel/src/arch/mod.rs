@@ -45,11 +45,14 @@ _start:
 );
 
 /// Initialize architecture-specific structures.
+///
+/// Note: ACPI/MADT discovery is intentionally *not* invoked here — it needs
+/// the bootloader's RSDP address and the kernel heap (for parsed topology
+/// vectors). Call `acpi::init(rsdp_addr)` from `kernel_main` once the heap
+/// is up.
 pub fn init() {
     gdt::init();
     idt::init();
-    unsafe { acpi::init(); }
-    crate::serial::serial_println!("[  0.000650] RACORE: SMP init skipped (bring-up mode)");
     crate::serial::serial_println!("[  0.000660] RACORE: SMEP/SMAP skipped (bring-up mode)");
 }
 

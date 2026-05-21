@@ -10,7 +10,8 @@
 
 param(
     [switch]$Linux,
-    [int]$TimeoutSec = 60
+    [int]$TimeoutSec = 60,
+    [int]$Smp = 1
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,9 +31,24 @@ if ($Linux) {
 $LogPath = Join-Path $Root "smoke-stdout.log"
 if (Test-Path $LogPath) { Remove-Item $LogPath -Force }
 
-# Ensure esp/racore.elf reflects the freshly-built kernel. build-image.ps1
-# only stages it on Linux/CI paths; on the dev host the bootloader loads
-# from esp/racore.elf so we must copy explicitly before booting.
+# Rebuild the kernel with the ci-smoke feature AND the static relocation
+# model the bootloader requires. Without -C relocation-model=static the
+# kernel ELF is PIE with dynamic relocations the bootloader doesn't apply,
+# vtable calls go to garbage low memory, and the guest #UDs before
+# kernel_main ever prints a line. Setting RUSTFLAGS in this script keeps
+# the smoke self-contained.
+$oldRustflags = $env:RUSTFLAGS
+$env:RUSTFLAGS = "-C relocation-model=static -C link-arg=-no-pie"
+Write-Host "Building kernel (ci-smoke + static relocation)..."
+cargo build --package racore --target x86_64-unknown-none --features ci-smoke
+$buildExit = $LASTEXITCODE
+$env:RUSTFLAGS = $oldRustflags
+if ($buildExit -ne 0) {
+    Write-Host ("Kernel build failed with exit " + $buildExit)
+    exit $buildExit
+}
+
+# Stage the freshly-built kernel into esp/ so the bootloader picks it up.
 $TargetDir = & cargo metadata --format-version 1 --no-deps --quiet 2>$null |
     ConvertFrom-Json | Select-Object -ExpandProperty target_directory
 $KernelSrc = Join-Path $TargetDir "x86_64-unknown-none\debug\racore"
@@ -46,10 +62,13 @@ $QemuArgs = @(
     "-machine", "q35",
     "-accel",   "tcg",
     "-cpu",     "qemu64",
+    "-smp",     "$Smp",
     "-m",       "512M",
     "-drive",   "if=pflash,format=raw,readonly=on,file=$OvmfCode",
+    "-boot",    "menu=on",
     "-drive",   $EspArg,
     "-serial",  "file:$LogPath",
+    "-monitor", "null",
     "-display", "none",
     "-no-reboot",
     "-device",  "isa-debug-exit,iobase=0xf4,iosize=0x04"

@@ -117,6 +117,14 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         tty::vt::init();
     }
 
+    // ACPI/MADT discovery now that the heap can hold parsed topology
+    // (CPU + IOAPIC vectors). The arch layer intentionally leaves this for
+    // main so that the rsdp_address from BootInfo stays explicit.
+    unsafe {
+        arch::acpi::init(boot_info.rsdp_address);
+        arch::smp::init();
+    }
+
     // Initialize drivers (subsystem, block, PCI).
     drivers::init();
     // Phase F smoke test: verify AHCI persistence (write marker on first boot,
@@ -1186,6 +1194,14 @@ fn run_ci_smoke_and_exit() -> ! {
             }
         }};
     }
+
+    // 0. ACPI + SMP topology — must have parsed at least the BSP, BSP must
+    //    be marked started before any AP work begins.
+    let acpi = arch::acpi::get_info();
+    check!("acpi::parsed", acpi.is_some());
+    let cpu_count = arch::smp::cpu_count();
+    check!("smp::bsp_present", cpu_count >= 1);
+    check!("smp::bsp_started", arch::smp::started_count() >= 1);
 
     // 1. Block devices that drivers::init must have registered (ram0/ram1
     //    are unconditional; sda is only present when QEMU attached an AHCI

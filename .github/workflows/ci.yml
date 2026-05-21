@@ -177,8 +177,10 @@ jobs:
           timeout 60 qemu-system-x86_64 \
             -machine q35 -cpu qemu64 -m 512M \
             -drive if=pflash,format=raw,file=$OVMF,readonly=on \
+            -boot menu=on \
             -drive file=fat:rw:esp,format=raw \
-            -serial file:smoke.log -display none -no-reboot \
+            -serial file:smoke.log -monitor null -display none \
+            -no-reboot \
             -device isa-debug-exit,iobase=0xf4,iosize=0x04
           EXIT=$?
           set -e
