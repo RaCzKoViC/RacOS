@@ -4,6 +4,16 @@
 
 RacOS to w pełni autorski system operacyjny budowany od zera — bez kopiowania kodu Linux, Ubuntu, Debian ani GNU. Architektura wzoruje się na logicznym modelu warstwowym: boot → kernel → user space → init/usługi → pakietowanie → shell → terminal → narzędzia systemowe.
 
+## Demo
+
+![RacOS booting through racsh and exercising two filesystems](docs/screenshots/01-filesystems.png)
+
+*RacOS bootuje przez własny init do `racsh`, a następnie pokazuje swój userland w akcji: tablica mountów (initramfs + devfs + tmpfs + procfs + dwa writable FS), 36 binarek w `/bin`, oraz pełen round-trip create+write+read na obu writable filesystemach — `racfs` na ramdisku i `FAT32` na drugim ramdisku, włącznie z podkatalogami (`/fat/DEMO/HELLO.TXT`). Cała ścieżka VFS → mount table → fork+exec → pipe '`>`' to własna implementacja.*
+
+![RacOS network stack: DNS lookup + real HTTP/1.1 200 OK from Cloudflare](docs/screenshots/02-network.png)
+
+*Własny stack sieciowy end-to-end: `dig anthropic.com` rozwiązuje DNS (160.79.104.10), `wget example.com` rozkłada się na ARP do gateway, DNS query do 10.0.2.3, TCP three-way handshake do 104.20.23.154:80, HTTP/1.0 GET i parsing pełnej odpowiedzi z Cloudflare (status line + wszystkie headers + raw HTML body). Każdy bajt protokołów ARP / IPv4 / UDP / DNS / TCP / HTTP jest w tym repo — bez third-party crate'a do sieci.*
+
 ## Komponenty
 
 | Komponent | Nazwa | Opis |
