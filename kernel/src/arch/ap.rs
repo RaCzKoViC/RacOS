@@ -244,6 +244,10 @@ unsafe extern "C" fn ap_entry() -> ! {
     // exists for exactly that.
     enable_lapic_for_this_ap();
     let id = lapic::current_apic_id();
+    // G.4 foundation: bind GS to this CPU's PerCpu slot so any future
+    // per-CPU code (scheduler runqueue, IRQ tick counters, ...) just
+    // works via `percpu::current()`.
+    crate::arch::percpu::init_for_this_cpu(id);
     smp::mark_started(id);
 
     // Park the AP. Interrupts stay off — we have no per-CPU IDT/TSS yet,

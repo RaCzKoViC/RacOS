@@ -126,6 +126,9 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         // G.2: turn on the BSP's LAPIC so the IPI helpers are usable. G.3
         // will fire INIT-SIPI-SIPI through them to bring up the APs.
         arch::lapic::init_bsp();
+        // G.4 foundation: BSP claims its per-CPU slot before bringing up
+        // any AP. APs initialise their own slots from ap_entry.
+        arch::percpu::init_for_this_cpu(arch::lapic::current_apic_id());
         // G.3: walk every enabled MADT entry that isn't the BSP, fire
         // INIT-SIPI-SIPI, and wait for each AP to reach its Rust idle
         // halt. No-op on single-CPU guests.
@@ -1221,6 +1224,29 @@ fn run_ci_smoke_and_exit() -> ! {
         serial::serial_println!(
             "[ SMOKE ] FAIL smp::all_aps_started ({}/{})", started, cpu_count,
         );
+        all_pass = false;
+    }
+
+    // G.4 foundation: every CPU should have written its own apic_id into
+    // its own PerCpu slot via its own GS base. If two CPUs ended up with
+    // overlapping GS bases (slot_index_for collision or wrmsr no-op) the
+    // self_check values won't line up with apic_id.
+    let mut percpu_ok = true;
+    arch::smp::for_each_cpu::<(), _>(|cpu| {
+        let slot = arch::percpu::peek(cpu.apic_id).expect("PerCpu slot");
+        let sc = slot.self_check.load(core::sync::atomic::Ordering::SeqCst);
+        if sc != cpu.apic_id {
+            serial::serial_println!(
+                "[ SMOKE ] FAIL percpu::self_check apic_id={} expected={} got={}",
+                cpu.apic_id, cpu.apic_id, sc,
+            );
+            percpu_ok = false;
+        }
+        None
+    });
+    if percpu_ok {
+        serial::serial_println!("[ SMOKE ] PASS percpu::gs_base_coherent");
+    } else {
         all_pass = false;
     }
 

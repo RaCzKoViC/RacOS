@@ -9,6 +9,7 @@ pub mod acpi;
 pub mod smp;
 pub mod lapic;
 pub mod ap;
+pub mod percpu;
 
 // Kernel entry point — assembly stub that sets up the stack and calls kernel_main
 core::arch::global_asm!(
