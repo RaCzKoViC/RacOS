@@ -1,10 +1,20 @@
-// RaCore — Networking MVP (Phase D)
+// RaCore — Networking
 //
-// Minimal in-kernel loopback SOCK_STREAM sockets.
+// Phase D: loopback SOCK_STREAM sockets (defined below).
+// Phase E: real Ethernet/IPv4/ICMP stack — see the sub-modules.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
+
+pub mod eth;
+pub mod arp;
+pub mod ipv4;
+pub mod icmp;
+pub mod udp;
+pub mod dns;
+pub mod tcp;
+pub mod stack;
 
 pub const AF_INET: i32 = 2;
 pub const SOCK_STREAM: i32 = 1;
@@ -66,9 +76,17 @@ impl Socket {
     }
 }
 
+#[derive(Clone)]
+struct TcpFdBinding {
+    pid: u32,
+    fd: i32,
+    conn_id: tcp::ConnId,
+}
+
 struct NetState {
     sockets: Vec<Option<Socket>>,
     bindings: Vec<FdBinding>,
+    tcp_bindings: Vec<TcpFdBinding>,
     next_ephemeral_port: u16,
 }
 
@@ -77,6 +95,7 @@ impl NetState {
         NetState {
             sockets: Vec::new(),
             bindings: Vec::new(),
+            tcp_bindings: Vec::new(),
             next_ephemeral_port: 49152,
         }
     }
@@ -348,4 +367,32 @@ pub fn peername(pid: u32, fd: i32) -> NetResult<(u16, u32)> {
     let peer_sid = sock.peer.ok_or(NetError::NotConn)?;
     let peer = st.socket_ref(peer_sid)?;
     Ok((peer.local_port.unwrap_or(0), 0x7F00_0001))
+}
+
+// ─────────────────────────────────────────────────────────────
+// Phase E krok 5: TCP fd ↔ ConnId mapping
+//
+// A POSIX-style fd may be bound to a loopback socket (the FdBinding above)
+// OR to a real TCP connection. The two tables are independent: a fd starts
+// in `bindings` after sys_socket; sys_connect upgrades it to `tcp_bindings`
+// when the destination is not loopback.
+// ─────────────────────────────────────────────────────────────
+
+pub fn bind_fd_tcp(pid: u32, fd: i32, conn_id: tcp::ConnId) {
+    let st = state_mut();
+    st.tcp_bindings.retain(|b| !(b.pid == pid && b.fd == fd));
+    st.tcp_bindings.push(TcpFdBinding { pid, fd, conn_id });
+}
+
+pub fn tcp_id_by_fd(pid: u32, fd: i32) -> Option<tcp::ConnId> {
+    let st = state_mut();
+    st.tcp_bindings.iter().find(|b| b.pid == pid && b.fd == fd).map(|b| b.conn_id)
+}
+
+/// Remove a TCP binding (called from sys_close). Returns the conn id so the
+/// caller can issue tcp::close on it.
+pub fn close_fd_tcp(pid: u32, fd: i32) -> Option<tcp::ConnId> {
+    let st = state_mut();
+    let idx = st.tcp_bindings.iter().position(|b| b.pid == pid && b.fd == fd)?;
+    Some(st.tcp_bindings.swap_remove(idx).conn_id)
 }

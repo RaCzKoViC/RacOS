@@ -23,6 +23,7 @@ Thumbs.db
 
 # Debug
 *.log
+*.pcap
 core.*
 crash-*.dump
 build_error.txt

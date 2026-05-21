@@ -41,7 +41,7 @@ $env:RUSTFLAGS = $OldRustFlags
 
 # --- Step 2: Build coreutils ---
 Write-Host "`n[2/4] Building coreutils..." -ForegroundColor Yellow
-$Coreutils = @("racos-hello", "racos-echo", "racos-cat", "racos-true", "racos-false", "racos-sh", "racos-init", "racos-test", "racos-ls", "racos-wc", "racos-uptime", "racos-mkdir", "racos-rm", "racos-sleep", "racos-head", "racos-tail", "racos-env", "racos-basename", "racos-dirname", "racos-grep", "racos-cp", "racos-mv", "racos-cut", "racos-uniq", "racos-find", "racos-od", "racos-tee", "racos-hexdump", "racterm")
+$Coreutils = @("racos-hello", "racos-echo", "racos-cat", "racos-true", "racos-false", "racos-sh", "racos-init", "racos-test", "racos-ls", "racos-wc", "racos-uptime", "racos-mkdir", "racos-rm", "racos-sleep", "racos-head", "racos-tail", "racos-env", "racos-basename", "racos-dirname", "racos-grep", "racos-cp", "racos-mv", "racos-cut", "racos-uniq", "racos-find", "racos-od", "racos-tee", "racos-hexdump", "racterm", "racos-dig", "racos-wget")
 foreach ($pkg in $Coreutils) {
     cargo build --package $pkg @CargoFlags -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
     if ($LASTEXITCODE -ne 0) { throw "Build failed for $pkg" }
@@ -59,7 +59,7 @@ New-Item -ItemType Directory -Force "$InitramfsRoot\etc\racinit" | Out-Null
 New-Item -ItemType Directory -Force "$InitramfsRoot\etc" | Out-Null
 
 # Copy binaries — bin names match the [[bin]] name in Cargo.toml
-$BinList = @("hello", "echo", "cat", "true", "false", "sh", "racterm", "racos-test", "ls", "wc", "uptime", "mkdir", "rm", "sleep", "head", "tail", "env", "basename", "dirname", "grep", "cp", "mv", "cut", "uniq", "find", "od", "tee", "hexdump")
+$BinList = @("hello", "echo", "cat", "true", "false", "sh", "racterm", "racos-test", "ls", "wc", "uptime", "mkdir", "rm", "sleep", "head", "tail", "env", "basename", "dirname", "grep", "cp", "mv", "cut", "uniq", "find", "od", "tee", "hexdump", "dig", "wget")
 $SbinList = @("init")
 
 foreach ($bin in $BinList) {

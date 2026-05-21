@@ -37,7 +37,7 @@ Write-Host "[3/5] Creating ESP directory structure..."
 $EfiBootDir = Join-Path $EspDir "EFI\BOOT"
 New-Item -ItemType Directory -Force $EfiBootDir | Out-Null
 
-$BootloaderSrc = Join-Path $TargetDir "x86_64-unknown-uefi\$Profile\racos-boot.efi"
+$BootloaderSrc = Join-Path $TargetDir "x86_64-unknown-uefi\$Profile\bootx64.efi"
 $BootloaderDst = Join-Path $EfiBootDir "BOOTX64.EFI"
 if (-not (Test-Path $BootloaderSrc)) {
     throw "Bootloader not found: $BootloaderSrc"

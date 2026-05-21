@@ -120,6 +120,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-dig"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-dirname"
 version = "0.1.0"
 dependencies = [
@@ -297,6 +304,13 @@ dependencies = [
 
 [[package]]
 name = "racos-wc"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-wget"
 version = "0.1.0"
 dependencies = [
  "libc-lite",

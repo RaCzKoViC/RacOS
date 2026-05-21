@@ -92,6 +92,7 @@ pub const SYS_REBOOT: u64 = 74;
 pub const SYS_HOSTNAME: u64 = 75;
 pub const SYS_GETRANDOM: u64 = 76;
 pub const SYS_CLONE: u64 = 77;
+pub const SYS_GETHOSTBYNAME: u64 = 78;
 pub const SYS_PTHREAD_CREATE: u64 = 0x400;
 
 // ─────────────────────────────────────────────────
@@ -678,6 +679,19 @@ impl SockAddrIn {
         }
     }
 
+    /// Build a sockaddr_in from a host-order port and a 4-byte IP in
+    /// network-order (a[0].a[1].a[2].a[3]). The kernel reads sin_addr as
+    /// 4 raw bytes from memory and treats them as a network-order address,
+    /// so we use from_ne_bytes to keep the wire ordering intact through
+    /// the LE store.
+    pub const fn new(ip: [u8; 4], port: u16) -> Self {
+        SockAddrIn {
+            sin_family: AF_INET as u16,
+            sin_port: port.to_be(),
+            sin_addr: u32::from_ne_bytes(ip),
+        }
+    }
+
     pub fn port_host(&self) -> u16 {
         u16::from_be(self.sin_port)
     }
@@ -685,6 +699,22 @@ impl SockAddrIn {
     pub fn ip_host(&self) -> u32 {
         u32::from_be(self.sin_addr)
     }
+}
+
+/// Synchronous DNS A-record lookup. Blocks until the kernel resolver returns
+/// (typically <100 ms on QEMU user-mode) or until the kernel-side timeout
+/// of ~3 seconds elapses.
+pub fn gethostbyname(name: &[u8]) -> Result<[u8; 4], i64> {
+    let mut ip = [0u8; 4];
+    let ret = unsafe {
+        syscall3(
+            SYS_GETHOSTBYNAME,
+            name.as_ptr() as u64,
+            name.len() as u64,
+            ip.as_mut_ptr() as u64,
+        )
+    };
+    if ret < 0 { Err(ret) } else { Ok(ip) }
 }
 
 pub fn socket(domain: i32, stype: i32, protocol: i32) -> Result<i32, i64> {

@@ -561,6 +561,9 @@ pub fn sys_open(path: *const u8, flags: u32, _mode: u32) -> SyscallResult {
 pub fn sys_close(fd: i32) -> SyscallResult {
     let pid = crate::task::scheduler::current_pid();
     crate::net::close_fd(pid, fd);
+    if let Some(conn_id) = crate::net::close_fd_tcp(pid, fd) {
+        let _ = crate::net::tcp::close(conn_id);
+    }
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {
@@ -2434,11 +2437,42 @@ pub fn sys_accept(fd: i32, addr: *mut u8, len: *mut u32) -> SyscallResult {
 
 pub fn sys_connect(fd: i32, addr: *const u8, len: u32) -> SyscallResult {
     let (port, ip) = parse_sockaddr_in(addr, len)?;
-    if ip != 0x7F00_0001 {
-        return Err(SyscallError::ECONNREFUSED);
-    }
     let pid = crate::task::scheduler::current_pid();
-    crate::net::connect(pid, fd, port).map_err(map_net_error)?;
+
+    // Loopback path: existing in-kernel SOCK_STREAM emulation.
+    if ip == 0x7F00_0001 {
+        crate::net::connect(pid, fd, port).map_err(map_net_error)?;
+        return Ok(0);
+    }
+
+    // Real TCP. Resolve next-hop MAC (gateway for off-subnet).
+    let ip_bytes = [(ip >> 24) as u8, (ip >> 16) as u8, (ip >> 8) as u8, ip as u8];
+    let peer_mac = crate::net::stack::next_hop_mac(ip_bytes)
+        .ok_or(SyscallError::ECONNREFUSED)?;
+    let conn_id = crate::net::tcp::connect(ip_bytes, port, peer_mac)
+        .map_err(|_| SyscallError::ECONNREFUSED)?;
+
+    // Synchronous wait for the handshake to complete (timer IRQ drains RX
+    // and feeds the state machine in the meantime). Re-enable interrupts —
+    // SYSCALL entry zeroed IF, but we must let PIT fire to make progress.
+    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    let start = crate::interrupts::pit::ticks();
+    let outcome: Result<(), SyscallError> = loop {
+        match crate::net::tcp::state(conn_id) {
+            Some(crate::net::tcp::State::Established) => break Ok(()),
+            Some(crate::net::tcp::State::Closed) | None => break Err(SyscallError::ECONNREFUSED),
+            _ => {
+                if crate::interrupts::pit::ticks().saturating_sub(start) > 5000 {
+                    break Err(SyscallError::ETIMEDOUT);
+                }
+                crate::net::stack::poll();
+                core::hint::spin_loop();
+            }
+        }
+    };
+    unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
+    outcome?;
+    crate::net::bind_fd_tcp(pid, fd, conn_id);
     Ok(0)
 }
 
@@ -2446,6 +2480,10 @@ pub fn sys_send(fd: i32, buf: *const u8, len: usize, _flags: u32) -> SyscallResu
     validate_user_ptr(buf as u64, len)?;
     let pid = crate::task::scheduler::current_pid();
     let data = unsafe { core::slice::from_raw_parts(buf, len) };
+    if let Some(conn_id) = crate::net::tcp_id_by_fd(pid, fd) {
+        crate::net::tcp::send(conn_id, data).map_err(|_| SyscallError::EPIPE)?;
+        return Ok(len as i64);
+    }
     let n = crate::net::send(pid, fd, data).map_err(map_net_error)?;
     Ok(n as i64)
 }
@@ -2454,8 +2492,48 @@ pub fn sys_recv(fd: i32, buf: *mut u8, len: usize, _flags: u32) -> SyscallResult
     validate_user_ptr(buf as u64, len)?;
     let pid = crate::task::scheduler::current_pid();
     let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
+    if let Some(conn_id) = crate::net::tcp_id_by_fd(pid, fd) {
+        // Block until something arrives, EOF is observed, or 5 s elapse.
+        // PIT must be running so timer_handler drains the NIC RX queue.
+        unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+        let start = crate::interrupts::pit::ticks();
+        let result: SyscallResult = loop {
+            let n = crate::net::tcp::read(conn_id, out);
+            if n > 0 { break Ok(n as i64); }
+            match crate::net::tcp::state(conn_id) {
+                None
+                | Some(crate::net::tcp::State::Closed)
+                | Some(crate::net::tcp::State::TimeWait)
+                | Some(crate::net::tcp::State::CloseWait)
+                | Some(crate::net::tcp::State::LastAck) => break Ok(0),
+                _ => {}
+            }
+            if crate::interrupts::pit::ticks().saturating_sub(start) > 5000 {
+                break Err(SyscallError::EAGAIN);
+            }
+            crate::net::stack::poll();
+            core::hint::spin_loop();
+        };
+        unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
+        return result;
+    }
     let n = crate::net::recv(pid, fd, out).map_err(map_net_error)?;
     Ok(n as i64)
+}
+
+pub fn sys_gethostbyname(name_ptr: *const u8, name_len: usize, ip_out: *mut u8) -> SyscallResult {
+    if name_len == 0 || name_len > 253 { return Err(SyscallError::EINVAL); }
+    validate_user_ptr(name_ptr as u64, name_len)?;
+    validate_user_ptr(ip_out as u64, 4)?;
+    let bytes = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
+    let name = core::str::from_utf8(bytes).map_err(|_| SyscallError::EINVAL)?;
+    match crate::net::stack::resolve(name) {
+        Some(ip) => {
+            unsafe { core::ptr::copy_nonoverlapping(ip.as_ptr(), ip_out, 4); }
+            Ok(0)
+        }
+        None => Err(SyscallError::ETIMEDOUT),
+    }
 }
 
 pub fn sys_shutdown(fd: i32, how: i32) -> SyscallResult {

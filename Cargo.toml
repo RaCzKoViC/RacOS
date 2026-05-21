@@ -40,6 +40,8 @@ members = [
     "userland/coreutils/tee",
     "userland/coreutils/hexdump",
     "userland/network/netloop",
+    "userland/network/dig",
+    "userland/network/wget",
 ]
 default-members = [
     "init",
@@ -79,6 +81,8 @@ default-members = [
     "userland/coreutils/tee",
     "userland/coreutils/hexdump",
     "userland/network/netloop",
+    "userland/network/dig",
+    "userland/network/wget",
 ]
 
 [workspace.package]

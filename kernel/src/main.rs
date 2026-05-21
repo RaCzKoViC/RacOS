@@ -116,6 +116,11 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Initialize drivers (subsystem, block, PCI).
     drivers::init();
+    // Phase E smoke test: verify the NIC TX path before the rest of init runs.
+    drivers::nic_self_test();
+    // Phase E krok 2/3: bring up the IPv4 stack and run the ARP→ICMP→DNS demo.
+    net::stack::init();
+    net::stack::start_demo("example.com");
 
     // Initialize shell filesystem API after block devices are ready.
     shell_fs::init(KERNEL_SHELL_DEBUG);
@@ -271,9 +276,11 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     idle_loop()
 }
 
-/// Halts the CPU in a loop, waking only on interrupts.
+/// Halts the CPU in a loop, waking only on interrupts. Polls the network
+/// stack on each wakeup so RX frames are processed without IRQ-driven NIC.
 fn idle_loop() -> ! {
     loop {
+        net::stack::poll();
         arch::halt();
     }
 }

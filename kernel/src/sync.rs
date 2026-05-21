@@ -27,6 +27,17 @@ impl<T> SpinLock<T> {
         }
         SpinLockGuard { lock_ref: self }
     }
+
+    /// Non-blocking acquire. Returns None if the lock is held elsewhere.
+    /// Safe to call from interrupt handlers — they can skip work instead of
+    /// deadlocking against the interrupted code.
+    pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
+        if self.lock.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            Some(SpinLockGuard { lock_ref: self })
+        } else {
+            None
+        }
+    }
 }
 
 unsafe impl<T: Send> Sync for SpinLock<T> {}

@@ -1,0 +1,11 @@
+[package]
+name = "racos-wget"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "wget"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

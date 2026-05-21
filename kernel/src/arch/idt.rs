@@ -181,6 +181,12 @@ extern "x86-interrupt" fn default_handler(_stack_frame: &InterruptStackFrame) {
 /// Timer IRQ handler (vector 32 = IRQ0).
 extern "x86-interrupt" fn timer_handler(_stack_frame: &InterruptStackFrame) {
     crate::interrupts::pit::tick();
+    // NOTE: net::stack::poll() is intentionally NOT called here. It would
+    // need to acquire STACK.lock(), which user-mode wait loops (resolve,
+    // sys_connect, sys_recv) briefly hold. On single-core, the spin would
+    // deadlock. Polling is done explicitly from idle_loop and from user
+    // wait loops instead.
+    crate::net::tcp::tick();
     crate::task::scheduler::timer_tick();
     crate::interrupts::pic::send_eoi(0);
 }
