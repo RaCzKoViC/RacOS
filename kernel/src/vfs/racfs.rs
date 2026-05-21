@@ -326,6 +326,13 @@ impl Racfs {
         unsafe { &mut *self.sb.get() }
     }
 
+    /// Public stats snapshot (total_blocks, free_blocks, total_inodes, free_inodes).
+    /// Block size is SECTOR_SIZE (512 B). Used by /proc/diskstats.
+    pub fn stats(&self) -> (u32, u32, u32, u32) {
+        let sb = self.sb();
+        (sb.data_block_count, sb.free_blocks, sb.inode_count, sb.free_inodes)
+    }
+
     /// Flush the superblock to disk.
     fn flush_sb(&self) -> VfsResult<()> {
         let buf = superblock_to_sector(self.sb());

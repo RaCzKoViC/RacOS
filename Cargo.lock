@@ -120,6 +120,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-df"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-dig"
 version = "0.1.0"
 dependencies = [
@@ -212,6 +219,13 @@ dependencies = [
 
 [[package]]
 name = "racos-mkdir"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-mount"
 version = "0.1.0"
 dependencies = [
  "libc-lite",

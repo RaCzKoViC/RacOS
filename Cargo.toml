@@ -42,6 +42,8 @@ members = [
     "userland/network/netloop",
     "userland/network/dig",
     "userland/network/wget",
+    "userland/coreutils/mount",
+    "userland/coreutils/df",
 ]
 default-members = [
     "init",
@@ -83,6 +85,8 @@ default-members = [
     "userland/network/netloop",
     "userland/network/dig",
     "userland/network/wget",
+    "userland/coreutils/mount",
+    "userland/coreutils/df",
 ]
 
 [workspace.package]

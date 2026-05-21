@@ -92,6 +92,11 @@ impl MountTable {
         self.mounts.iter().any(|m| m.path == path)
     }
 
+    /// Snapshot of all active mount entries (for /proc/mounts).
+    pub fn entries(&self) -> &[MountEntry] {
+        &self.mounts
+    }
+
     /// Resolve a path to a filesystem and relative path.
     /// Returns the longest-prefix matching mount and the remainder of the path.
     pub fn resolve<'a, 'b>(&'a self, path: &'b str) -> Option<(&'a MountEntry, &'b str)> {
