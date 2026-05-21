@@ -129,12 +129,17 @@ pub fn find(name: &str) -> Option<Arc<dyn BlockDevice>> {
     devs.iter().find(|d| d.name() == name).cloned()
 }
 
-/// Create and register a default 8 MiB ramdisk.
+/// Create and register a default 8 MiB ramdisk (ram0) plus a smaller 4 MiB
+/// scratch ramdisk (ram1) used by the FAT32 mount at /fat.
 ///
 /// # Safety
 /// Must be called after `init`.
 pub unsafe fn init_default_ramdisk() {
-    let sectors = (8 * 1024 * 1024 / SECTOR_SIZE) as u64;
-    let dev = Arc::new(RamBlockDevice::new("ram0", sectors)) as Arc<dyn BlockDevice>;
-    register(dev);
+    let ram0_sectors = (8 * 1024 * 1024 / SECTOR_SIZE) as u64;
+    let ram0 = Arc::new(RamBlockDevice::new("ram0", ram0_sectors)) as Arc<dyn BlockDevice>;
+    register(ram0);
+
+    let ram1_sectors = (4 * 1024 * 1024 / SECTOR_SIZE) as u64;
+    let ram1 = Arc::new(RamBlockDevice::new("ram1", ram1_sectors)) as Arc<dyn BlockDevice>;
+    register(ram1);
 }

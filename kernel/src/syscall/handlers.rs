@@ -40,13 +40,17 @@ fn writable_store_from_mount(
     if let Some(tmpfs_fs) = any.downcast_ref::<crate::vfs::tmpfs::TmpfsFilesystem>() {
         return Some(WritableStore::Tmpfs(tmpfs_fs.inner()));
     }
+    if let Some(fat_fs) = any.downcast_ref::<crate::vfs::fat32::Fat32Filesystem>() {
+        return Some(WritableStore::Fat32(fat_fs.inner()));
+    }
     None
 }
 
-/// Abstraction over writable filesystem stores (tmpfs and racfs).
+/// Abstraction over writable filesystem stores (tmpfs, racfs, fat32).
 enum WritableStore {
     Tmpfs(alloc::sync::Arc<crate::vfs::tmpfs::Tmpfs>),
     Racfs(alloc::sync::Arc<crate::vfs::racfs::Racfs>),
+    Fat32(alloc::sync::Arc<crate::vfs::fat32::Fat32Fs>),
 }
 
 impl WritableStore {
@@ -57,6 +61,10 @@ impl WritableStore {
                 let (ino, leaf) = r.split_parent_leaf(path)?;
                 Ok((ino as u64, leaf))
             }
+            WritableStore::Fat32(f) => {
+                let (cluster, leaf) = f.split_parent_leaf(path)?;
+                Ok((cluster as u64, leaf))
+            }
         }
     }
 
@@ -64,6 +72,7 @@ impl WritableStore {
         match self {
             WritableStore::Tmpfs(t) => t.create_file(parent_ino, name),
             WritableStore::Racfs(r) => r.create_file(parent_ino as u32, name).map(|i| i as u64),
+            WritableStore::Fat32(f) => f.create_file(parent_ino as u32, name).map(|c| c as u64),
         }
     }
 
@@ -71,6 +80,7 @@ impl WritableStore {
         match self {
             WritableStore::Tmpfs(t) => t.create_dir(parent_ino, name),
             WritableStore::Racfs(r) => r.create_dir(parent_ino as u32, name).map(|i| i as u64),
+            WritableStore::Fat32(f) => f.create_dir(parent_ino as u32, name).map(|c| c as u64),
         }
     }
 
@@ -78,6 +88,7 @@ impl WritableStore {
         match self {
             WritableStore::Tmpfs(t) => t.unlink(parent_ino, name),
             WritableStore::Racfs(r) => r.unlink(parent_ino as u32, name),
+            WritableStore::Fat32(f) => f.unlink(parent_ino as u32, name),
         }
     }
 }

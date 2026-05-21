@@ -93,8 +93,11 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Reserve kernel memory region so allocator doesn't hand it out
     // SAFETY: kernel_physical_base is valid from bootloader.
     unsafe {
-        // Reserve first 2 MiB (kernel + boot structures)
-        mm::phys::reserve_range(0, 2 * 1024 * 1024);
+        // Reserve first 16 MiB. Kernel ELF is currently ~6 MiB loaded at 1 MiB,
+        // so it ends around 7 MiB; the previous 2 MiB reservation only just
+        // worked when usable memory happened to start above the kernel and
+        // broke as soon as the kernel image grew past that line.
+        mm::phys::reserve_range(0, 16 * 1024 * 1024);
         // Reserve framebuffer if present
         if boot_info.framebuffer.address != 0 {
             let fb_size = boot_info.framebuffer.pitch as u64 * boot_info.framebuffer.height as u64;
@@ -224,6 +227,29 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         let racfs_fs = vfs::racfs::RacfsFilesystem::new(racfs);
         unsafe {
             vfs::mount::mount_table().mount("/var", racfs_fs);
+        }
+    }
+
+    // Phase F.4: format ram1 as FAT32 and mount on /fat.
+    // Ramdisk content is volatile, so we format unconditionally each boot —
+    // the smoke test still verifies the full write/read path end-to-end.
+    if let Some(ram1) = drivers::block::find("ram1") {
+        match vfs::fat32::format_fat32(ram1, "RACOS-FAT") {
+            Ok(fat) => {
+                vfs::fat32::smoke_test(&fat);
+                let fat_fs = vfs::fat32::Fat32Filesystem::new(fat);
+                // Mount point: create /fat on the root initramfs first.
+                let mt = unsafe { vfs::mount::mount_table() };
+                if mt.lookup_path("/fat").is_err() {
+                    // initramfs doesn't expose mkdir; we mount on / and rely
+                    // on resolve()'s longest-prefix match to send /fat/... to
+                    // the FAT32 instance even without a directory entry on
+                    // the root FS.
+                }
+                unsafe { vfs::mount::mount_table().mount("/fat", fat_fs); }
+                serial::serial_println!("[  0.000365] RACORE: fat32 mounted on /fat (volatile, on ram1)");
+            }
+            Err(e) => serial::serial_println!("[  0.000365] RACORE: /fat mount failed: {:?}", e),
         }
     }
 
