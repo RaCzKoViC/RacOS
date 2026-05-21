@@ -7,6 +7,7 @@ pub mod gdt;
 pub mod idt;
 pub mod acpi;
 pub mod smp;
+pub mod lapic;
 
 // Kernel entry point — assembly stub that sets up the stack and calls kernel_main
 core::arch::global_asm!(

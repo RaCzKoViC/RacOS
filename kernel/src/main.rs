@@ -123,6 +123,9 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     unsafe {
         arch::acpi::init(boot_info.rsdp_address);
         arch::smp::init();
+        // G.2: turn on the BSP's LAPIC so the IPI helpers are usable. G.3
+        // will fire INIT-SIPI-SIPI through them to bring up the APs.
+        arch::lapic::init_bsp();
     }
 
     // Initialize drivers (subsystem, block, PCI).
@@ -1202,6 +1205,25 @@ fn run_ci_smoke_and_exit() -> ! {
     let cpu_count = arch::smp::cpu_count();
     check!("smp::bsp_present", cpu_count >= 1);
     check!("smp::bsp_started", arch::smp::started_count() >= 1);
+
+    // 0b. BSP LAPIC (G.2) — software-enabled, current cpu's id matches
+    //     what the MADT reported for the BSP. Catches both "init_bsp
+    //     forgot to run" and "MADT vs hardware disagree on BSP id".
+    check!("lapic::enabled", arch::lapic::is_enabled());
+    let bsp_md = arch::smp::bsp_apic_id();
+    let bsp_hw = arch::lapic::bsp_id();
+    let bsp_cur = arch::lapic::current_apic_id();
+    if bsp_md != bsp_hw || bsp_hw != bsp_cur {
+        serial::serial_println!(
+            "[ SMOKE ] FAIL lapic::bsp_id_consistent madt={} hw={} current={}",
+            bsp_md, bsp_hw, bsp_cur,
+        );
+        all_pass = false;
+    } else {
+        serial::serial_println!(
+            "[ SMOKE ] PASS lapic::bsp_id_consistent (madt=hw=current={})", bsp_md,
+        );
+    }
 
     // 1. Block devices that drivers::init must have registered (ram0/ram1
     //    are unconditional; sda is only present when QEMU attached an AHCI
