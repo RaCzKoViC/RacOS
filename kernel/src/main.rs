@@ -126,6 +126,10 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         // G.2: turn on the BSP's LAPIC so the IPI helpers are usable. G.3
         // will fire INIT-SIPI-SIPI through them to bring up the APs.
         arch::lapic::init_bsp();
+        // G.3: walk every enabled MADT entry that isn't the BSP, fire
+        // INIT-SIPI-SIPI, and wait for each AP to reach its Rust idle
+        // halt. No-op on single-CPU guests.
+        let _ = arch::ap::bring_up_all();
     }
 
     // Initialize drivers (subsystem, block, PCI).
@@ -1205,6 +1209,20 @@ fn run_ci_smoke_and_exit() -> ! {
     let cpu_count = arch::smp::cpu_count();
     check!("smp::bsp_present", cpu_count >= 1);
     check!("smp::bsp_started", arch::smp::started_count() >= 1);
+    // G.3: every enabled MADT entry should now have a live Rust idle
+    // loop sitting on it. Catches a regressed trampoline (AP boots
+    // but never marks started) or a missed CPU in for_each_cpu.
+    let started = arch::smp::started_count();
+    if started == cpu_count {
+        serial::serial_println!(
+            "[ SMOKE ] PASS smp::all_aps_started ({}/{})", started, cpu_count,
+        );
+    } else {
+        serial::serial_println!(
+            "[ SMOKE ] FAIL smp::all_aps_started ({}/{})", started, cpu_count,
+        );
+        all_pass = false;
+    }
 
     // 0b. BSP LAPIC (G.2) — software-enabled, current cpu's id matches
     //     what the MADT reported for the BSP. Catches both "init_bsp

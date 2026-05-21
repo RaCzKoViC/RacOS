@@ -101,7 +101,7 @@ pub unsafe fn init() {
 
     if total > 1 {
         crate::serial::serial_println!(
-            "[  0.000610] RACORE: SMP - {} AP(s) waiting for INIT-SIPI-SIPI (G.2 pending)",
+            "[  0.000610] RACORE: SMP - {} AP(s) enumerated, waiting for arch::ap::bring_up_all",
             total - 1,
         );
     }
