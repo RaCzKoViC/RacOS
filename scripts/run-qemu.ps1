@@ -114,8 +114,12 @@ if ($Disk) {
         $fs.Close()
         Write-Host "  Disk:  created $diskPath ($size bytes)"
     }
+    # cache=writethrough fsyncs after every write so the on-disk image stays
+    # consistent even if QEMU is killed hard (e.g. Stop-Process -Force). The
+    # default writeback cache otherwise loses recent writes on abrupt exit
+    # and the next boot sees a stale/corrupt superblock.
     $QemuArgs += @(
-        "-drive",  "id=disk0,file=$diskPath,if=none,format=raw"
+        "-drive",  "id=disk0,file=$diskPath,if=none,format=raw,cache=writethrough"
         "-device", "ich9-ahci,id=ahci"
         "-device", "ide-hd,drive=disk0,bus=ahci.0"
     )

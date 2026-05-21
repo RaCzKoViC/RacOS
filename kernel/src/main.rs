@@ -238,6 +238,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 let racfs_fs = vfs::racfs::RacfsFilesystem::new(racfs);
                 unsafe { vfs::mount::mount_table().mount("/mnt", racfs_fs); }
                 serial::serial_println!("[  0.000370] RACORE: racfs mounted on /mnt (persistent, on sda)");
+
             }
             Err(e) => serial::serial_println!("[  0.000370] RACORE: /mnt mount failed: {:?}", e),
         }

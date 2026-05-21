@@ -426,4 +426,6 @@ impl Filesystem for DevfsFilesystem {
     fn name(&self) -> &str {
         "devfs"
     }
+
+    fn as_any(&self) -> &dyn core::any::Any { self }
 }

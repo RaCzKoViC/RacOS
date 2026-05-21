@@ -350,4 +350,6 @@ impl Filesystem for ProcFilesystem {
     fn name(&self) -> &str {
         "proc"
     }
+
+    fn as_any(&self) -> &dyn core::any::Any { self }
 }

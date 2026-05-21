@@ -332,6 +332,8 @@ impl Filesystem for Fat32Filesystem {
     fn name(&self) -> &str {
         "fat32"
     }
+
+    fn as_any(&self) -> &dyn core::any::Any { self }
 }
 
 

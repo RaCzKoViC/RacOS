@@ -26,20 +26,27 @@ fn map_vfs_error(err: VfsError) -> SyscallError {
     }
 }
 
-fn writable_store_for_fs(
-    fs_name: &str,
+/// Resolve the writable backing store for a mount entry. Uses Any-based
+/// downcast so that multiple mounts of the same FS (e.g. racfs on ram0 and
+/// racfs on sda) each return their *own* concrete backing instance, instead
+/// of a single global singleton.
+fn writable_store_from_mount(
+    mount: &crate::vfs::mount::MountEntry,
 ) -> Option<WritableStore> {
-    match fs_name {
-        "tmpfs" => Some(WritableStore::Tmpfs(unsafe { crate::vfs::tmpfs::instance() })),
-        "racfs" => Some(WritableStore::Racfs(unsafe { crate::vfs::racfs::instance() })),
-        _ => None,
+    let any = mount.fs.as_any();
+    if let Some(racfs_fs) = any.downcast_ref::<crate::vfs::racfs::RacfsFilesystem>() {
+        return Some(WritableStore::Racfs(racfs_fs.inner()));
     }
+    if let Some(tmpfs_fs) = any.downcast_ref::<crate::vfs::tmpfs::TmpfsFilesystem>() {
+        return Some(WritableStore::Tmpfs(tmpfs_fs.inner()));
+    }
+    None
 }
 
 /// Abstraction over writable filesystem stores (tmpfs and racfs).
 enum WritableStore {
-    Tmpfs(&'static alloc::sync::Arc<crate::vfs::tmpfs::Tmpfs>),
-    Racfs(&'static alloc::sync::Arc<crate::vfs::racfs::Racfs>),
+    Tmpfs(alloc::sync::Arc<crate::vfs::tmpfs::Tmpfs>),
+    Racfs(alloc::sync::Arc<crate::vfs::racfs::Racfs>),
 }
 
 impl WritableStore {
@@ -499,18 +506,15 @@ pub fn sys_open(path: *const u8, flags: u32, _mode: u32) -> SyscallResult {
     let (fs, ino, created) = match lookup_result {
         Ok(pair) => (pair.0, pair.1, false),
         Err(crate::vfs::inode::VfsError::NotFound) if flags & crate::vfs::file::flags::O_CREAT != 0 => {
-            // O_CREAT: try to create the file in the resolved filesystem
             let mt = unsafe { crate::vfs::mount::mount_table() };
             let (mount, remainder) = mt.resolve(path_str).ok_or(SyscallError::ENOENT)?;
-            let store = writable_store_for_fs(mount.fs.name()).ok_or(SyscallError::EACCES)?;
-            let (parent_ino, leaf) = store.split_parent_leaf(remainder)
-                .map_err(map_vfs_error)?;
+            let store = writable_store_from_mount(mount).ok_or(SyscallError::EACCES)?;
+            let (parent_ino, leaf) = store.split_parent_leaf(remainder).map_err(map_vfs_error)?;
             let parent_inode = mount.fs.get_inode(parent_ino).map_err(map_vfs_error)?;
             let parent_meta = parent_inode.metadata().map_err(map_vfs_error)?;
             require_dac_access(&parent_meta, crate::security::dac::Access::Write)?;
             require_dac_access(&parent_meta, crate::security::dac::Access::Execute)?;
-            let new_ino = store.create_file(parent_ino, leaf)
-                .map_err(map_vfs_error)?;
+            let new_ino = store.create_file(parent_ino, leaf).map_err(map_vfs_error)?;
             (mount.fs.clone(), new_ino, true)
         }
         Err(e) => return Err(map_vfs_error(e)),
@@ -1411,16 +1415,14 @@ pub fn sys_mkdir(path: *const u8, _mode: u32) -> SyscallResult {
     // Resolve through mount table to find the right FS and relative path
     let mt = unsafe { crate::vfs::mount::mount_table() };
     let (mount, remainder) = mt.resolve(path_str).ok_or(SyscallError::ENOENT)?;
-    let store = writable_store_for_fs(mount.fs.name()).ok_or(SyscallError::EACCES)?;
+    let store = writable_store_from_mount(mount).ok_or(SyscallError::EACCES)?;
 
-    let (parent_ino, leaf) = store.split_parent_leaf(remainder)
-        .map_err(map_vfs_error)?;
+    let (parent_ino, leaf) = store.split_parent_leaf(remainder).map_err(map_vfs_error)?;
     let parent_inode = mount.fs.get_inode(parent_ino).map_err(map_vfs_error)?;
     let parent_meta = parent_inode.metadata().map_err(map_vfs_error)?;
     require_dac_access(&parent_meta, crate::security::dac::Access::Write)?;
     require_dac_access(&parent_meta, crate::security::dac::Access::Execute)?;
-    let new_ino = store.create_dir(parent_ino, leaf)
-        .map_err(map_vfs_error)?;
+    let new_ino = store.create_dir(parent_ino, leaf).map_err(map_vfs_error)?;
     if let Ok(new_inode) = mount.fs.get_inode(new_ino) {
         if let Ok(mut meta) = new_inode.metadata() {
             let creds = current_creds();
@@ -1448,7 +1450,7 @@ pub fn sys_unlink(path: *const u8) -> SyscallResult {
 
     let mt = unsafe { crate::vfs::mount::mount_table() };
     let (mount, remainder) = mt.resolve(path_str).ok_or(SyscallError::ENOENT)?;
-    let store = writable_store_for_fs(mount.fs.name()).ok_or(SyscallError::EACCES)?;
+    let store = writable_store_from_mount(mount).ok_or(SyscallError::EACCES)?;
 
     let (parent_ino, leaf) = store.split_parent_leaf(remainder)
         .map_err(map_vfs_error)?;
@@ -2315,7 +2317,7 @@ pub fn sys_rename(old: *const u8, new: *const u8) -> SyscallResult {
     // Only writable tmpfs/racfs filesystems supported.
     let mt = unsafe { crate::vfs::mount::mount_table() };
     let (mount, _) = mt.resolve(old_str).ok_or(SyscallError::ENOENT)?;
-    let store = writable_store_for_fs(mount.fs.name()).ok_or(SyscallError::EACCES)?;
+    let store = writable_store_from_mount(mount).ok_or(SyscallError::EACCES)?;
 
     let (old_parent_ino, _old_leaf) = store.split_parent_leaf(old_str).map_err(map_vfs_error)?;
     let old_parent_inode = mount.fs.get_inode(old_parent_ino).map_err(map_vfs_error)?;

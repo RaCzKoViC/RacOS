@@ -871,6 +871,12 @@ impl RacfsFilesystem {
     pub fn new(racfs: Arc<Racfs>) -> Arc<Self> {
         Arc::new(RacfsFilesystem { inner: racfs })
     }
+
+    /// Access the concrete Racfs backing this mount. Used by syscall handlers
+    /// to route create/mkdir/unlink to the right disk, not a global singleton.
+    pub fn inner(&self) -> Arc<Racfs> {
+        self.inner.clone()
+    }
 }
 
 impl Filesystem for RacfsFilesystem {
@@ -890,6 +896,8 @@ impl Filesystem for RacfsFilesystem {
     fn name(&self) -> &str {
         "racfs"
     }
+
+    fn as_any(&self) -> &dyn core::any::Any { self }
 }
 
 // ─── Global instance ────────────────────────────────────────────────────────

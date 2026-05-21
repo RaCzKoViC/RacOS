@@ -339,6 +339,8 @@ impl Filesystem for Initramfs {
     fn name(&self) -> &str {
         "initramfs"
     }
+
+    fn as_any(&self) -> &dyn core::any::Any { self }
 }
 
 /// Wrapper that holds Arc<Initramfs> for proper Filesystem + InodeOps implementation.
@@ -379,4 +381,6 @@ impl Filesystem for InitramfsFs {
     fn name(&self) -> &str {
         "initramfs"
     }
+
+    fn as_any(&self) -> &dyn core::any::Any { self }
 }

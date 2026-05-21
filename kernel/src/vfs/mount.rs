@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use super::inode::{InodeOps, InodeNum, VfsResult, VfsError, DirEntry};
 
 /// A filesystem driver that can provide inodes.
-pub trait Filesystem: Send + Sync {
+pub trait Filesystem: Send + Sync + 'static {
     /// Get the root inode of this filesystem.
     fn root_inode(&self) -> Arc<dyn InodeOps>;
 
@@ -20,6 +20,11 @@ pub trait Filesystem: Send + Sync {
 
     /// Filesystem name (e.g., "initramfs", "devfs", "tmpfs").
     fn name(&self) -> &str;
+
+    /// Downcast hook so syscall handlers can reach the concrete writable
+    /// backing store of a mount (instead of looking it up by name in a
+    /// global singleton, which mixes up multiple mounts of the same FS).
+    fn as_any(&self) -> &dyn core::any::Any;
 }
 
 /// A mount point entry.

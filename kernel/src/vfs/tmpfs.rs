@@ -405,6 +405,10 @@ impl TmpfsFilesystem {
     pub fn new(tmpfs: Arc<Tmpfs>) -> Arc<Self> {
         Arc::new(TmpfsFilesystem { inner: tmpfs })
     }
+
+    pub fn inner(&self) -> Arc<Tmpfs> {
+        self.inner.clone()
+    }
 }
 
 impl Filesystem for TmpfsFilesystem {
@@ -426,6 +430,8 @@ impl Filesystem for TmpfsFilesystem {
     fn name(&self) -> &str {
         "tmpfs"
     }
+
+    fn as_any(&self) -> &dyn core::any::Any { self }
 }
 
 /// Global tmpfs instance for /tmp.
