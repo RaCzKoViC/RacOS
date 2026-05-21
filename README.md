@@ -89,4 +89,8 @@ just image        # zbuduj obraz ISO
 
 ## Licencja
 
-Proprietary — all rights reserved.
+Licensed under the **Apache License, Version 2.0** — see [LICENSE](LICENSE) for the
+full text. Copyright © 2026 RaCzKoViC.
+
+You may use, modify, and distribute this software under the terms of the
+license. See <http://www.apache.org/licenses/LICENSE-2.0> for details.
