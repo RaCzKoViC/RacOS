@@ -46,6 +46,7 @@ members = [
     "userland/coreutils/df",
     "userland/coreutils/umount",
     "userland/coreutils/mkfs-racfs",
+    "userland/coreutils/mkfs-fat32",
     "userland/coreutils/sync",
 ]
 default-members = [
@@ -92,6 +93,7 @@ default-members = [
     "userland/coreutils/df",
     "userland/coreutils/umount",
     "userland/coreutils/mkfs-racfs",
+    "userland/coreutils/mkfs-fat32",
     "userland/coreutils/sync",
 ]
 

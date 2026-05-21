@@ -2793,6 +2793,7 @@ pub fn sys_mkfs(
     let busy_path = match dev_name {
         "sda"  => Some("/mnt"),
         "ram0" => Some("/var"),
+        "ram1" => Some("/fat"),
         _      => None,
     };
     if let Some(path) = busy_path {
@@ -2806,6 +2807,11 @@ pub fn sys_mkfs(
     match fstype_str {
         "racfs" => {
             crate::vfs::racfs::Racfs::format_and_new(dev)
+                .map(|_| 0i64)
+                .map_err(|_| SyscallError::EIO)
+        }
+        "fat" | "fat32" => {
+            crate::vfs::fat32::format_fat32(dev, "RACOS")
                 .map(|_| 0i64)
                 .map_err(|_| SyscallError::EIO)
         }

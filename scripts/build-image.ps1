@@ -41,7 +41,7 @@ $env:RUSTFLAGS = $OldRustFlags
 
 # --- Step 2: Build coreutils ---
 Write-Host "`n[2/4] Building coreutils..." -ForegroundColor Yellow
-$Coreutils = @("racos-hello", "racos-echo", "racos-cat", "racos-true", "racos-false", "racos-sh", "racos-init", "racos-test", "racos-ls", "racos-wc", "racos-uptime", "racos-mkdir", "racos-rm", "racos-sleep", "racos-head", "racos-tail", "racos-env", "racos-basename", "racos-dirname", "racos-grep", "racos-cp", "racos-mv", "racos-cut", "racos-uniq", "racos-find", "racos-od", "racos-tee", "racos-hexdump", "racterm", "racos-dig", "racos-wget", "racos-mount", "racos-df", "racos-umount", "racos-mkfs-racfs", "racos-sync")
+$Coreutils = @("racos-hello", "racos-echo", "racos-cat", "racos-true", "racos-false", "racos-sh", "racos-init", "racos-test", "racos-ls", "racos-wc", "racos-uptime", "racos-mkdir", "racos-rm", "racos-sleep", "racos-head", "racos-tail", "racos-env", "racos-basename", "racos-dirname", "racos-grep", "racos-cp", "racos-mv", "racos-cut", "racos-uniq", "racos-find", "racos-od", "racos-tee", "racos-hexdump", "racterm", "racos-dig", "racos-wget", "racos-mount", "racos-df", "racos-umount", "racos-mkfs-racfs", "racos-mkfs-fat32", "racos-sync")
 foreach ($pkg in $Coreutils) {
     cargo build --package $pkg @CargoFlags -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
     if ($LASTEXITCODE -ne 0) { throw "Build failed for $pkg" }
@@ -61,7 +61,7 @@ New-Item -ItemType Directory -Force "$InitramfsRoot\etc" | Out-Null
 # Copy binaries — bin names match the [[bin]] name in Cargo.toml.
 # Tuple form is "<cargo-bin-name>=<initramfs-name>"; plain entries map 1:1.
 # Cargo rejects '.' in crate names so mkfs_racfs is renamed to mkfs.racfs here.
-$BinList = @("hello", "echo", "cat", "true", "false", "sh", "racterm", "racos-test", "ls", "wc", "uptime", "mkdir", "rm", "sleep", "head", "tail", "env", "basename", "dirname", "grep", "cp", "mv", "cut", "uniq", "find", "od", "tee", "hexdump", "dig", "wget", "mount", "df", "umount", "mkfs_racfs=mkfs.racfs", "sync")
+$BinList = @("hello", "echo", "cat", "true", "false", "sh", "racterm", "racos-test", "ls", "wc", "uptime", "mkdir", "rm", "sleep", "head", "tail", "env", "basename", "dirname", "grep", "cp", "mv", "cut", "uniq", "find", "od", "tee", "hexdump", "dig", "wget", "mount", "df", "umount", "mkfs_racfs=mkfs.racfs", "mkfs_fat32=mkfs.fat32", "sync")
 $SbinList = @("init")
 
 foreach ($entry in $BinList) {

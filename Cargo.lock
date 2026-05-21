@@ -225,6 +225,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-mkfs-fat32"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-mkfs-racfs"
 version = "0.1.0"
 dependencies = [
