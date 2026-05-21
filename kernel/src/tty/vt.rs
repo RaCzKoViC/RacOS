@@ -12,6 +12,14 @@ use crate::fb_console::{Color, FramebufferConsole, get_console};
 /// Number of virtual terminals (standard 6).
 pub const MAX_VT: usize = 6;
 
+/// ESC sequence parsing state for the off-screen VT buffer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EscState {
+    Idle,
+    EscSeen,
+    Csi,
+}
+
 /// State of a single virtual terminal.
 pub struct VirtualTerminal {
     /// Zero-based ID (0-5).
@@ -31,6 +39,9 @@ pub struct VirtualTerminal {
     bg: Color,
     /// Whether this VT is currently active (visible).
     active: bool,
+    /// Stateful parser for stripping ANSI CSI sequences across multiple
+    /// vt_print() calls (each sys_write may carry a partial sequence).
+    esc_state: EscState,
 }
 
 impl VirtualTerminal {
@@ -46,6 +57,68 @@ impl VirtualTerminal {
             fg: Color::White,
             bg: Color::Black,
             active: false,
+            esc_state: EscState::Idle,
+        }
+    }
+
+    /// Feed a byte stream into the VT buffer with ANSI CSI sequences stripped.
+    /// The framebuffer itself is rendered elsewhere (vt_print routes through
+    /// fb_console::write_str); this only keeps the off-screen "remembered
+    /// screen" buffer free of escape bytes so VT switching shows clean text.
+    pub fn consume_stripped(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            match self.esc_state {
+                EscState::Idle => {
+                    if b == 0x1B {
+                        self.esc_state = EscState::EscSeen;
+                    } else {
+                        self.put_char_local(b);
+                    }
+                }
+                EscState::EscSeen => {
+                    if b == b'[' {
+                        self.esc_state = EscState::Csi;
+                    } else {
+                        // Unknown ESC <x> — drop both bytes.
+                        self.esc_state = EscState::Idle;
+                    }
+                }
+                EscState::Csi => {
+                    // CSI body: keep consuming until the final byte (0x40..=0x7E).
+                    if b >= 0x40 && b <= 0x7E {
+                        self.esc_state = EscState::Idle;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Update only the off-screen buffer (no framebuffer side effect).
+    fn put_char_local(&mut self, c: u8) {
+        match c {
+            b'\n' => {
+                self.cursor_x = 0;
+                self.cursor_y += 1;
+            }
+            b'\r' => { self.cursor_x = 0; }
+            b'\x08' => {
+                if self.cursor_x > 0 { self.cursor_x -= 1; }
+            }
+            _ => {
+                let idx = (self.cursor_y * self.cols + self.cursor_x) as usize;
+                if idx < self.buffer.len() {
+                    self.buffer[idx] = c;
+                    self.cursor_x += 1;
+                    if self.cursor_x >= self.cols {
+                        self.cursor_x = 0;
+                        self.cursor_y += 1;
+                    }
+                }
+            }
+        }
+        if self.cursor_y >= self.rows {
+            self.scroll();
+            self.cursor_y = self.rows - 1;
         }
     }
 
@@ -214,12 +287,22 @@ pub unsafe fn get_manager() -> &'static mut VtManager {
 }
 
 /// Helper to write to current VT.
+///
+/// Routes the entire string through fb_console::write_str so that ANSI CSI
+/// sequences (\x1B[...) are parsed as a unit. Going through put_char one
+/// byte at a time, as a previous version did, exposed the ESC bytes to the
+/// framebuffer as literal characters whenever a CSI was split across
+/// multiple sys_write calls — producing garbage like `[K[14C` after every
+/// backspace in racsh.
 pub fn vt_print(s: &str) {
     unsafe {
         if let Some(mgr) = VT_MANAGER.as_mut() {
-            for &b in s.as_bytes() {
-                mgr.current().put_char(b);
-            }
+            // Update the off-screen VT buffer with stripped text (skip CSI).
+            mgr.current().consume_stripped(s.as_bytes());
+        }
+        // Render to the actual framebuffer with full CSI handling.
+        if let Some(console) = crate::fb_console::get_console() {
+            console.write_str(s);
         }
     }
 }

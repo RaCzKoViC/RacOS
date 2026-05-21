@@ -103,8 +103,21 @@ impl DeviceOps for SerialDevice {
         }
     }
     fn write(&self, _offset: u64, buf: &[u8]) -> VfsResult<usize> {
+        // Strip ANSI CSI sequences from the serial transcript — they would
+        // otherwise appear as literal `[K[14C` etc. in the host terminal
+        // that captures /serial stdio. The state machine spans the whole
+        // write so partial sequences across iterations would still work,
+        // though after the racsh refresh_cursor fix they arrive whole.
+        let mut esc = 0u8; // 0=idle, 1=ESC seen, 2=inside CSI
         for &byte in buf {
-            crate::serial::serial_print!("{}", byte as char);
+            match esc {
+                0 => {
+                    if byte == 0x1B { esc = 1; }
+                    else { crate::serial::serial_print!("{}", byte as char); }
+                }
+                1 => { esc = if byte == b'[' { 2 } else { 0 }; }
+                _ => { if (0x40..=0x7E).contains(&byte) { esc = 0; } }
+            }
         }
 
         // Mirror console output to the active virtual terminal so the

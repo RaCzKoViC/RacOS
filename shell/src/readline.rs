@@ -317,17 +317,27 @@ fn refresh_line(state: &LineState, prompt: &str) {
 
 /// Move terminal cursor to the correct position.
 fn refresh_cursor(state: &LineState, prompt: &str) {
-    // Move to absolute column: \r then move right (prompt_len + cursor) columns
-    let _ = libc_lite::write(1, b"\r");
+    // Emit the whole sequence in ONE write so the terminal's CSI parser
+    // sees a complete ESC [ <n> C without intervening flushes.
+    //
+    // Layout: "\r\x1B[<col>C"  (with col omitted entirely if 0)
+    let mut buf = [0u8; 32];
+    buf[0] = b'\r';
+    let mut len = 1;
     let col = prompt.len() + state.cursor;
     if col > 0 {
-        // ESC [ <n> C — move cursor right n columns
-        let mut num_buf = [0u8; 16];
-        let n = format_usize(col, &mut num_buf);
-        let _ = libc_lite::write(1, b"\x1B[");
-        let _ = libc_lite::write(1, &num_buf[..n]);
-        let _ = libc_lite::write(1, b"C");
+        buf[len] = 0x1B;
+        len += 1;
+        buf[len] = b'[';
+        len += 1;
+        let mut num = [0u8; 16];
+        let nlen = format_usize(col, &mut num);
+        buf[len..len + nlen].copy_from_slice(&num[..nlen]);
+        len += nlen;
+        buf[len] = b'C';
+        len += 1;
     }
+    let _ = libc_lite::write(1, &buf[..len]);
 }
 
 /// Read one byte from stdin. Returns None on EOF/error.
