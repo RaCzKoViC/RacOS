@@ -85,6 +85,7 @@ pub const SYS_HOSTNAME: u64 = 75;
 pub const SYS_GETRANDOM: u64 = 76;
 pub const SYS_CLONE: u64 = 77;
 pub const SYS_GETHOSTBYNAME: u64 = 78;
+pub const SYS_MKFS: u64 = 79;
 pub const SYS_PTHREAD_CREATE: u64 = 0x400;
 
 /// Main syscall dispatcher called from the assembly entry stub.
@@ -190,6 +191,7 @@ pub extern "C" fn syscall_dispatch(
         SYS_GETRANDOM => handlers::sys_getrandom(arg1 as *mut u8, arg2 as usize, arg3 as u32),
         SYS_CLONE => handlers::sys_clone(arg1 as u32, arg2 as *mut u8, arg3 as i32, arg4 as i32, arg5 as *mut u8),
         SYS_GETHOSTBYNAME => handlers::sys_gethostbyname(arg1 as *const u8, arg2 as usize, arg3 as *mut u8),
+        SYS_MKFS => handlers::sys_mkfs(arg1 as *const u8, arg2 as usize, arg3 as *const u8, arg4 as usize),
         SYS_PTHREAD_CREATE => handlers::sys_pthread_create(arg1, arg2),
         _ => Err(SyscallError::ENOSYS),
     };

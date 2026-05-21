@@ -2745,6 +2745,64 @@ pub fn sys_umount(target: *const u8) -> SyscallResult {
 }
 
 // ─────────────────────────────────────────────────
+// Syscall 79: sys_mkfs
+// ─────────────────────────────────────────────────
+
+/// Format a block device with the given filesystem type.
+///
+/// `src` is a block device name (raw "sda" or path "/dev/sda"); `fstype`
+/// is currently only "racfs". Refuses if the device backs an active mount —
+/// the caller must `umount` first.
+pub fn sys_mkfs(
+    src: *const u8, src_len: usize,
+    fstype: *const u8, fstype_len: usize,
+) -> SyscallResult {
+    require_cap(crate::security::capability::CAP_SYS_ADMIN)?;
+
+    if src_len == 0 || src_len > 64 || fstype_len == 0 || fstype_len > 16 {
+        return Err(SyscallError::EINVAL);
+    }
+    validate_user_ptr(src as u64, src_len)?;
+    validate_user_ptr(fstype as u64, fstype_len)?;
+    let src_str = unsafe {
+        core::str::from_utf8(core::slice::from_raw_parts(src, src_len))
+            .map_err(|_| SyscallError::EINVAL)?
+    };
+    let fstype_str = unsafe {
+        core::str::from_utf8(core::slice::from_raw_parts(fstype, fstype_len))
+            .map_err(|_| SyscallError::EINVAL)?
+    };
+
+    let dev_name = src_str.strip_prefix("/dev/").unwrap_or(src_str);
+
+    // Safety: refuse if the device is currently mounted somewhere. Without a
+    // proper device→mount map we use a small hard-coded table; the kernel
+    // mounts ram0 at /var and sda at /mnt by convention.
+    let mt = unsafe { crate::vfs::mount::mount_table() };
+    let busy_path = match dev_name {
+        "sda"  => Some("/mnt"),
+        "ram0" => Some("/var"),
+        _      => None,
+    };
+    if let Some(path) = busy_path {
+        if mt.is_mounted(path) {
+            return Err(SyscallError::EADDRINUSE); // best fit for "device busy"
+        }
+    }
+
+    let dev = crate::drivers::block::find(dev_name).ok_or(SyscallError::ENOENT)?;
+
+    match fstype_str {
+        "racfs" => {
+            crate::vfs::racfs::Racfs::format_and_new(dev)
+                .map(|_| 0i64)
+                .map_err(|_| SyscallError::EIO)
+        }
+        _ => Err(SyscallError::EINVAL),
+    }
+}
+
+// ─────────────────────────────────────────────────
 // Syscall 68: sys_mprotect
 // ─────────────────────────────────────────────────
 

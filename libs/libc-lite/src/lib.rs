@@ -93,6 +93,7 @@ pub const SYS_HOSTNAME: u64 = 75;
 pub const SYS_GETRANDOM: u64 = 76;
 pub const SYS_CLONE: u64 = 77;
 pub const SYS_GETHOSTBYNAME: u64 = 78;
+pub const SYS_MKFS: u64 = 79;
 pub const SYS_PTHREAD_CREATE: u64 = 0x400;
 
 // ─────────────────────────────────────────────────
@@ -715,6 +716,28 @@ pub fn gethostbyname(name: &[u8]) -> Result<[u8; 4], i64> {
         )
     };
     if ret < 0 { Err(ret) } else { Ok(ip) }
+}
+
+/// Unmount a filesystem from `target`. Requires CAP_SYS_ADMIN.
+pub fn umount(target: &[u8]) -> Result<(), i64> {
+    // Caller must pass a NUL-terminated byte slice (validate_user_string in kernel).
+    let ret = unsafe { syscall1(SYS_UMOUNT, target.as_ptr() as u64) };
+    if ret < 0 { Err(ret) } else { Ok(()) }
+}
+
+/// Format `device` with the given filesystem type ("racfs" currently).
+/// Refuses if the device backs an active mount.
+pub fn mkfs(device: &[u8], fstype: &[u8]) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall4(
+            SYS_MKFS,
+            device.as_ptr() as u64,
+            device.len() as u64,
+            fstype.as_ptr() as u64,
+            fstype.len() as u64,
+        )
+    };
+    if ret < 0 { Err(ret) } else { Ok(()) }
 }
 
 pub fn socket(domain: i32, stype: i32, protocol: i32) -> Result<i32, i64> {

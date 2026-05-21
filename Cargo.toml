@@ -44,6 +44,8 @@ members = [
     "userland/network/wget",
     "userland/coreutils/mount",
     "userland/coreutils/df",
+    "userland/coreutils/umount",
+    "userland/coreutils/mkfs-racfs",
 ]
 default-members = [
     "init",
@@ -87,6 +89,8 @@ default-members = [
     "userland/network/wget",
     "userland/coreutils/mount",
     "userland/coreutils/df",
+    "userland/coreutils/umount",
+    "userland/coreutils/mkfs-racfs",
 ]
 
 [workspace.package]

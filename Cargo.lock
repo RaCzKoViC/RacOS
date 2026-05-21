@@ -225,6 +225,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-mkfs-racfs"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-mount"
 version = "0.1.0"
 dependencies = [
@@ -297,6 +304,13 @@ dependencies = [
 
 [[package]]
 name = "racos-true"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-umount"
 version = "0.1.0"
 dependencies = [
  "libc-lite",
