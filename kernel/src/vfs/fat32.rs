@@ -654,6 +654,16 @@ impl Fat32Fs {
         self.write_dir_entry(lba, slot, &entry)?;
         self.remember_parent(parent_cluster, cluster);
         self.set_cached_size(cluster as InodeNum, 0);
+        // Seed the metadata cache so the very next get_inode(cluster) — which
+        // sys_open does immediately after create_file returns — actually finds
+        // an entry instead of falling through to NotFound. Without this the
+        // create call succeeds on disk and then the syscall layer reports
+        // ENOENT to userland, which is how `echo > /fat/HELLO/FILE.TXT`
+        // looked like a silent no-op.
+        let mut meta = InodeMetadata::new(cluster as InodeNum, FileType::Regular);
+        meta.mode = FileMode::new(0o644);
+        meta.size = 0;
+        self.cache_metadata(cluster as InodeNum, meta);
         Ok(cluster)
     }
 
@@ -684,6 +694,12 @@ impl Fat32Fs {
         let (lba, slot) = self.find_or_alloc_dir_slot(parent_cluster)?;
         self.write_dir_entry(lba, slot, &entry)?;
         self.remember_parent(parent_cluster, cluster);
+        // Same metadata-cache seeding as create_file — without it the next
+        // get_inode on this dir cluster would return NotFound.
+        let mut meta = InodeMetadata::new(cluster as InodeNum, FileType::Directory);
+        meta.mode = FileMode::new(0o755);
+        meta.size = 0;
+        self.cache_metadata(cluster as InodeNum, meta);
         Ok(cluster)
     }
 
