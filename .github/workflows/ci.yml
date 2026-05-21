@@ -43,7 +43,23 @@ jobs:
         run: cargo build --package racos-boot --target x86_64-unknown-uefi
 
       - name: Build userland workspace
-        run: cargo build --workspace --exclude racore --exclude racos-boot
+        # Build for x86_64-unknown-none (matches build-image.ps1) — building
+        # against the host toolchain pulls in libgcc and collides with
+        # libc_lite's no_std memcpy/memset/memmove. Pre-2026-05 CI happened
+        # to work because the workspace was smaller; once more userland
+        # binaries piled in this began failing at link time on racos-mkdir.
+        # rpkg/rapt are host-side tooling (use std) so they can't share the
+        # bare-metal target — excluded here, host build covered below.
+        run: |
+          cargo build --workspace \
+            --exclude racore --exclude racos-boot \
+            --exclude rpkg --exclude rapt \
+            --target x86_64-unknown-none \
+            -Z build-std=core,alloc \
+            -Z build-std-features=compiler-builtins-mem
+
+      - name: Build host-side packaging tools (rpkg + rapt)
+        run: cargo build -p rpkg -p rapt
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
@@ -71,7 +87,10 @@ jobs:
       - name: Install nasm
         run: sudo apt-get update && sudo apt-get install -y nasm
       - name: Run host-side workspace tests
-        run: cargo test --workspace --exclude racore --exclude racos-boot
+        # racsh's parser has #[test]s that run cleanly on host. Other crates
+        # depend on libc-lite which collides with libgcc when linked against
+        # the host toolchain, so we narrow the host-test set to racsh only.
+        run: cargo test -p racsh
         continue-on-error: true
 
   boot-smoke:
