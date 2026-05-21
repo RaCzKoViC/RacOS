@@ -7,7 +7,8 @@
 # Usage: powershell -File scripts/build-image.ps1 [-Release]
 
 param(
-    [switch]$Release
+    [switch]$Release,
+    [string[]]$KernelFeatures = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,7 +34,12 @@ Write-Host "Target dir: $TargetDir"
 # --- Step 1: Build kernel ---
 Write-Host "`n[1/4] Building kernel..." -ForegroundColor Yellow
 $env:RUSTFLAGS = "-C relocation-model=static -C link-arg=-no-pie"
-cargo build --package racore @CargoFlags
+$KernelArgs = @("--package", "racore") + $CargoFlags
+if ($KernelFeatures.Count -gt 0) {
+    $KernelArgs += @("--features", ($KernelFeatures -join ","))
+    Write-Host "  Kernel features: $($KernelFeatures -join ',')"
+}
+cargo build @KernelArgs
 if ($LASTEXITCODE -ne 0) { throw "Kernel build failed" }
 
 # Restore default flags before building userland binaries.

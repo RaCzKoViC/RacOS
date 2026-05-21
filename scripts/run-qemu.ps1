@@ -17,7 +17,8 @@ param(
     [switch]$Net,
     [switch]$KernelTest,
     [switch]$Disk,
-    [int]$Ram = 512
+    [int]$Ram = 512,
+    [string[]]$KernelFeatures = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,7 +34,11 @@ $KernelElf = "C:\Users\Maciej\RacOS-target\x86_64-unknown-none\debug\racore"
 # Build kernel with static relocation model for direct physical entry jumping
 $oldRustflags = $env:RUSTFLAGS
 $env:RUSTFLAGS = "-C relocation-model=static -C link-arg=-no-pie"
-cargo build --package racore --target x86_64-unknown-none
+$KernelArgs = @("--package", "racore", "--target", "x86_64-unknown-none")
+if ($KernelFeatures.Count -gt 0) {
+    $KernelArgs += @("--features", ($KernelFeatures -join ","))
+}
+cargo build @KernelArgs
 if ($LASTEXITCODE -ne 0) { throw "Kernel build failed" }
 $env:RUSTFLAGS = $oldRustflags
 

@@ -701,7 +701,13 @@ impl Fat32Fs {
         let (_, _, entry) = self.find_dir_entry(parent_cluster, name)?
             .ok_or(VfsError::NotFound)?;
         let c = entry.get_cluster();
-        // Cache size + parent for later writes.
+        // Cache metadata + size + parent so VFS walk-by-inode can resolve this
+        // cluster later (Fat32Filesystem::get_inode reads from this cache).
+        let ft = if entry.is_dir() { FileType::Directory } else { FileType::Regular };
+        let mut meta = InodeMetadata::new(c as InodeNum, ft);
+        meta.mode = FileMode::new(if ft == FileType::Directory { 0o755 } else { 0o644 });
+        meta.size = if ft == FileType::Regular { entry.size as u64 } else { 0 };
+        self.cache_metadata(c as InodeNum, meta);
         if !entry.is_dir() {
             self.set_cached_size(c as InodeNum, entry.size as u64);
         }

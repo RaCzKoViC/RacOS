@@ -275,6 +275,13 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         drivers::block::count()
     );
 
+    // CI boot smoke (off by default — enable with `--features ci-smoke`).
+    // Runs synchronous assertions against the live kernel state and exits
+    // the QEMU guest via isa-debug-exit, so the host can read a real exit
+    // code instead of grepping the serial log.
+    #[cfg(feature = "ci-smoke")]
+    run_ci_smoke_and_exit();
+
     // Phase F.2: kernel-side writeback daemon. Periodically flushes dirty
     // cache entries on every block-backed mount so user-visible data lands
     // on disk even without an explicit sync().
@@ -1135,5 +1142,114 @@ fn flushd_task() -> ! {
             last_run = now;
         }
         task::scheduler::yield_now();
+    }
+}
+
+// ─── CI boot smoke harness ────────────────────────────────────────────────
+//
+// Compiled in only when the `ci-smoke` feature is enabled. The smoke runs
+// synchronous, deterministic assertions and signals the host via
+// isa-debug-exit (port 0xf4):
+//   write 0x10 → QEMU exits with (0x10 << 1) | 1 = 33  (success)
+//   write 0x11 → QEMU exits with (0x11 << 1) | 1 = 35  (failure)
+// CI asserts on the integer exit code, so kernel panics, hangs and asserted
+// failures are all distinguishable from a success.
+
+/// Write `code` to the QEMU isa-debug-exit port at 0xf4 and halt. Never
+/// returns. The port maps `eax` → `(eax << 1) | 1` as QEMU's exit code.
+#[cfg(feature = "ci-smoke")]
+fn exit_qemu(code: u32) -> ! {
+    unsafe {
+        core::arch::asm!(
+            "out dx, eax",
+            in("dx") 0xf4u16,
+            in("eax") code,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    loop { arch::halt(); }
+}
+
+#[cfg(feature = "ci-smoke")]
+fn run_ci_smoke_and_exit() -> ! {
+    serial::serial_println!("[ SMOKE ] CI boot smoke starting");
+    let mut all_pass = true;
+
+    macro_rules! check {
+        ($name:expr, $cond:expr) => {{
+            let ok = $cond;
+            if ok {
+                serial::serial_println!("[ SMOKE ] PASS {}", $name);
+            } else {
+                serial::serial_println!("[ SMOKE ] FAIL {}", $name);
+                all_pass = false;
+            }
+        }};
+    }
+
+    // 1. Block devices that drivers::init must have registered (ram0/ram1
+    //    are unconditional; sda is only present when QEMU attached an AHCI
+    //    disk, so it's reported as an info skip when missing).
+    check!("block::ram0", drivers::block::find("ram0").is_some());
+    check!("block::ram1", drivers::block::find("ram1").is_some());
+    let has_sda = drivers::block::find("sda").is_some();
+    if !has_sda {
+        serial::serial_println!("[ SMOKE ] SKIP block::sda (no AHCI disk attached)");
+    }
+
+    // 2. VFS mount table topology.
+    let mt = unsafe { vfs::mount::mount_table() };
+    check!("vfs::mount /",     mt.is_mounted("/"));
+    check!("vfs::mount /dev",  mt.is_mounted("/dev"));
+    check!("vfs::mount /tmp",  mt.is_mounted("/tmp"));
+    check!("vfs::mount /proc", mt.is_mounted("/proc"));
+    check!("vfs::mount /var",  mt.is_mounted("/var"));
+    check!("vfs::mount /fat",  mt.is_mounted("/fat"));
+    if has_sda {
+        check!("vfs::mount /mnt", mt.is_mounted("/mnt"));
+    }
+
+    // 3. racfs round-trip on ram0 (file create + write + read + unlink).
+    {
+        let racfs = unsafe { vfs::racfs::instance().clone() };
+        let ino = racfs.create_file(0, "smoke.txt").unwrap_or(0);
+        check!("racfs::create_file", ino > 0);
+        let payload = b"racfs-smoke-1234";
+        let wrote = racfs.write_file(ino, 0, payload).unwrap_or(0);
+        check!("racfs::write_file", wrote == payload.len());
+        let mut buf = [0u8; 32];
+        let read = racfs.read_file(ino, 0, &mut buf).unwrap_or(0);
+        check!("racfs::read_file", read == payload.len() && &buf[..read] == payload);
+        check!("racfs::unlink", racfs.unlink(0, "smoke.txt").is_ok());
+    }
+
+    // 4. FAT32 round-trip on /fat (already exercised by smoke_test during
+    //    boot — re-check the BOOT.CNT we wrote in main).
+    if let Ok((fs, _)) = mt.lookup_path("/fat/TEST/BOOT.CNT") {
+        if let Ok((_, ino)) = mt.lookup_path("/fat/TEST/BOOT.CNT") {
+            if let Ok(inode) = fs.get_inode(ino) {
+                let mut buf = [0u8; 16];
+                let n = inode.read(0, &mut buf).unwrap_or(0);
+                check!("fat32::boot.cnt non-empty", n > 0);
+            } else {
+                check!("fat32::boot.cnt readable", false);
+            }
+        }
+    } else {
+        check!("fat32::boot.cnt exists", false);
+    }
+
+    // 5. initramfs binaries we expect for userland tooling.
+    check!("initramfs::/sbin/init",   mt.lookup_path("/sbin/init").is_ok());
+    check!("initramfs::/bin/sh",      mt.lookup_path("/bin/sh").is_ok());
+    check!("initramfs::mkfs.racfs",   mt.lookup_path("/bin/mkfs.racfs").is_ok());
+    check!("initramfs::mkfs.fat32",   mt.lookup_path("/bin/mkfs.fat32").is_ok());
+
+    if all_pass {
+        serial::serial_println!("[ SMOKE ] ALL PASS — exiting QEMU via isa-debug-exit (code 0x10)");
+        exit_qemu(0x10);
+    } else {
+        serial::serial_println!("[ SMOKE ] AT LEAST ONE FAILURE — exiting QEMU via isa-debug-exit (code 0x11)");
+        exit_qemu(0x11);
     }
 }

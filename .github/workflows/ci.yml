@@ -139,6 +139,78 @@ jobs:
           name: boot-log
           path: boot.log
 
+  kernel-smoke-isadbg:
+    name: Kernel smoke (isa-debug-exit assertions)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools-preview
+          targets: x86_64-unknown-none, x86_64-unknown-uefi
+      - name: Install QEMU, OVMF, nasm, python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf nasm mtools python3
+
+      - name: Build kernel (with ci-smoke feature) + bootloader
+        run: |
+          RUSTFLAGS="-C relocation-model=static -C link-arg=-no-pie" \
+            cargo build --package racore --target x86_64-unknown-none --features ci-smoke
+          cargo build --package racos-boot --target x86_64-unknown-uefi
+
+      - name: Stage ESP
+        run: |
+          mkdir -p esp/EFI/BOOT
+          cp target/x86_64-unknown-uefi/debug/bootx64.efi esp/EFI/BOOT/BOOTX64.EFI
+          cp target/x86_64-unknown-none/debug/racore esp/racore.elf
+          if [ -d initramfs-root ]; then
+            python3 scripts/pack-initramfs.py initramfs-root esp/initramfs.img || true
+          fi
+
+      - name: Boot QEMU with isa-debug-exit (60s budget)
+        id: smoke
+        run: |
+          OVMF=/usr/share/OVMF/OVMF_CODE.fd
+          set +e
+          timeout 60 qemu-system-x86_64 \
+            -machine q35 -cpu qemu64 -m 512M \
+            -drive if=pflash,format=raw,file=$OVMF,readonly=on \
+            -drive file=fat:rw:esp,format=raw \
+            -serial file:smoke.log -display none -no-reboot \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04
+          EXIT=$?
+          set -e
+          echo "QEMU_EXIT=$EXIT" >> $GITHUB_OUTPUT
+          echo "QEMU exit code: $EXIT (expect 33 for success)"
+          echo "--- smoke.log tail ---"
+          tail -n 120 smoke.log
+
+      - name: Assert isa-debug-exit success (exit == 33)
+        run: |
+          # isa-debug-exit maps writes to (val << 1) | 1:
+          #   0x10 (success) -> 33
+          #   0x11 (failure) -> 35
+          #   timeout via `timeout(1)` -> 124
+          # Any panic / triple-fault would either hang (-> 124) or kill QEMU
+          # with a non-33 code, so the exact equality is the strongest signal.
+          if [ "${{ steps.smoke.outputs.QEMU_EXIT }}" != "33" ]; then
+            echo "FAIL: smoke exit ${{ steps.smoke.outputs.QEMU_EXIT }} != 33"
+            exit 1
+          fi
+          # Belt-and-braces: confirm the "ALL PASS" banner is present.
+          grep -q "\[ SMOKE \] ALL PASS" smoke.log \
+            || (echo "FAIL: 'ALL PASS' banner not seen in smoke log" && exit 1)
+          echo "Kernel smoke PASSED"
+
+      - name: Upload smoke log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-log
+          path: smoke.log
+
   interactive-smoke:
     name: QEMU interactive shell (TCP serial)
     runs-on: ubuntu-latest
