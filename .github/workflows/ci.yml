@@ -134,7 +134,20 @@ jobs:
 
       - name: Boot in QEMU (15s budget)
         run: |
-          OVMF=/usr/share/OVMF/OVMF_CODE.fd
+          # Ubuntu 24.04 renamed the OVMF code blob to OVMF_CODE_4M.fd and
+          # dropped the symlink; older releases still ship OVMF_CODE.fd. Pick
+          # whichever exists so the workflow survives a runner image bump.
+          for cand in \
+            /usr/share/OVMF/OVMF_CODE.fd \
+            /usr/share/OVMF/OVMF_CODE_4M.fd \
+            /usr/share/qemu/OVMF.fd; do
+            if [ -f "$cand" ]; then OVMF="$cand"; break; fi
+          done
+          if [ -z "$OVMF" ]; then
+            echo "FAIL: no OVMF firmware found"; exit 1
+          fi
+          echo "Using OVMF=$OVMF"
+          qemu-system-x86_64 --version | head -n 1
           timeout 15 qemu-system-x86_64 \
             -machine q35 -cpu qemu64 -m 512M \
             -drive if=pflash,format=raw,file=$OVMF,readonly=on \
@@ -205,8 +218,14 @@ jobs:
         # QEMU to exit before serial is opened. The Linux OVMF + serial
         # file: combo just works without them.
         run: |
-          OVMF=/usr/share/OVMF/OVMF_CODE.fd
-          ls -la /usr/share/OVMF/ || true
+          for cand in \
+            /usr/share/OVMF/OVMF_CODE.fd \
+            /usr/share/OVMF/OVMF_CODE_4M.fd \
+            /usr/share/qemu/OVMF.fd; do
+            if [ -f "$cand" ]; then OVMF="$cand"; break; fi
+          done
+          if [ -z "$OVMF" ]; then echo "FAIL: no OVMF firmware"; exit 1; fi
+          echo "Using OVMF=$OVMF"
           qemu-system-x86_64 --version | head -n 1
           set +e
           timeout 60 qemu-system-x86_64 \
@@ -279,7 +298,14 @@ jobs:
 
       - name: Boot + drive racsh over TCP-serial
         run: |
-          OVMF=/usr/share/OVMF/OVMF_CODE.fd
+          for cand in \
+            /usr/share/OVMF/OVMF_CODE.fd \
+            /usr/share/OVMF/OVMF_CODE_4M.fd \
+            /usr/share/qemu/OVMF.fd; do
+            if [ -f "$cand" ]; then OVMF="$cand"; break; fi
+          done
+          if [ -z "$OVMF" ]; then echo "FAIL: no OVMF firmware"; exit 1; fi
+          echo "Using OVMF=$OVMF"
           qemu-system-x86_64 \
             -machine q35 -cpu qemu64 -m 512M \
             -drive if=pflash,format=raw,file=$OVMF,readonly=on \
@@ -300,6 +326,8 @@ jobs:
           ) | timeout 8 ncat 127.0.0.1 4444 > shell.log || true
           kill $QEMU_PID 2>/dev/null || true
           wait $QEMU_PID 2>/dev/null || true
+          echo "--- qemu-host.log (whatever QEMU printed before being killed) ---"
+          cat qemu-host.log || true
           echo "--- shell.log ---"
           cat shell.log
 
