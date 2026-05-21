@@ -370,13 +370,23 @@ impl Fat32Fs {
         let mut skip_clusters = offset / cluster_size;
         let mut cluster_offset = offset % cluster_size;
 
+        // Guard against pathological FAT chains (cycles, bogus pointers, etc).
+        // A correct chain visits each cluster at most once.
+        let max_walk = (self.total_clusters as usize).saturating_add(2);
+        let mut walked = 0usize;
+
         while skip_clusters > 0 {
             current_cluster = self.next_cluster(current_cluster)?;
-            if current_cluster >= FAT_ENTRY_EOC_MIN { return Ok(0); }
+            if current_cluster < 2 || current_cluster >= FAT_ENTRY_EOC_MIN { return Ok(0); }
+            walked += 1;
+            if walked > max_walk { return Err(VfsError::IoError); }
             skip_clusters -= 1;
         }
 
-        while bytes_read < buf.len() && current_cluster < FAT_ENTRY_EOC_MIN {
+        while bytes_read < buf.len()
+            && current_cluster >= 2
+            && current_cluster < FAT_ENTRY_EOC_MIN
+        {
             let cluster_lba = self.cluster_to_lba(current_cluster);
 
             while bytes_read < buf.len() && cluster_offset < cluster_size {
@@ -402,6 +412,8 @@ impl Fat32Fs {
             if bytes_read >= buf.len() { break; }
             current_cluster = self.next_cluster(current_cluster)?;
             cluster_offset = 0;
+            walked += 1;
+            if walked > max_walk { return Err(VfsError::IoError); }
         }
 
         Ok(bytes_read)
@@ -487,6 +499,10 @@ impl Fat32Fs {
         F: FnMut(u64, usize, &FatDirEntry) -> Option<R>,
     {
         let mut cluster = dir_cluster;
+        // Visit each cluster at most once. A pathological / cyclic chain
+        // (bug or corrupted FAT) used to spin the kernel forever here.
+        let max_walk = (self.total_clusters as usize).saturating_add(2);
+        let mut walked = 0usize;
         while cluster >= 2 && cluster < FAT_ENTRY_EOC_MIN {
             let cluster_lba = self.cluster_to_lba(cluster);
             for s in 0..self.bpb.sectors_per_cluster as u64 {
@@ -507,6 +523,8 @@ impl Fat32Fs {
                 }
             }
             cluster = self.next_cluster(cluster)?;
+            walked += 1;
+            if walked > max_walk { return Err(VfsError::IoError); }
         }
         Ok(None)
     }
@@ -516,6 +534,8 @@ impl Fat32Fs {
     fn find_or_alloc_dir_slot(&self, dir_cluster: u32) -> VfsResult<(u64, usize)> {
         let mut cluster = dir_cluster;
         let mut last_cluster = dir_cluster;
+        let max_walk = (self.total_clusters as usize).saturating_add(2);
+        let mut walked = 0usize;
         while cluster >= 2 && cluster < FAT_ENTRY_EOC_MIN {
             let cluster_lba = self.cluster_to_lba(cluster);
             for s in 0..self.bpb.sectors_per_cluster as u64 {
@@ -532,6 +552,8 @@ impl Fat32Fs {
             }
             last_cluster = cluster;
             cluster = self.next_cluster(cluster)?;
+            walked += 1;
+            if walked > max_walk { return Err(VfsError::IoError); }
         }
         // Need to extend the dir chain with a fresh, zeroed cluster.
         let new_cluster = self.alloc_cluster()?;
