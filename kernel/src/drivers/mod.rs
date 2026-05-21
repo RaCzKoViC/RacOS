@@ -24,10 +24,11 @@ pub fn init() {
         block::init_default_ramdisk();
     }
 
-    // PCI enumeration; bind the first virtio-net we find.
     let pci_devices = pci::enumerate_pci();
-    for dev in pci_devices {
-        if let Some(net) = virtio_net::VirtioNet::new(&dev) {
+
+    // Bind the first virtio-net we find.
+    for dev in &pci_devices {
+        if let Some(net) = virtio_net::VirtioNet::new(dev) {
             crate::serial::serial_println!(
                 "[  0.001200] DRIVERS: VirtIO-Net @ PCI {:02x}:{:02x}.{:01x}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 dev.bus, dev.slot, dev.func,
@@ -39,13 +40,52 @@ pub fn init() {
             );
             let mut slot = NIC.lock();
             *slot = Some(Box::new(net));
-            // Only bind the first one for MVP.
             break;
         }
     }
 
     if NIC.lock().is_none() {
         crate::serial::serial_println!("[  0.001220] DRIVERS: no VirtIO-Net device found");
+    }
+
+    // Bring up AHCI (Phase F step 1). Failure here is non-fatal — the system
+    // still boots on the RAM disk.
+    match ahci::init(&pci_devices) {
+        Ok(())  => crate::serial::serial_println!("[  0.001300] DRIVERS: AHCI initialized, sda registered"),
+        Err(e)  => crate::serial::serial_println!("[  0.001300] DRIVERS: AHCI init skipped: {:?}", e),
+    }
+}
+
+/// Persistence smoke test for AHCI. On first boot writes a marker into LBA 1;
+/// on later boots reads it back to prove data survived. Skipped silently if
+/// no SATA disk is registered.
+pub fn ahci_self_test() {
+    use block::SECTOR_SIZE;
+    let Some(dev) = block::find("sda") else { return; };
+    let marker = b"RACOS-AHCI-PhaseF";
+    let mut buf = [0u8; SECTOR_SIZE];
+    match dev.read_sector(1, &mut buf) {
+        Ok(()) => {
+            if buf[..marker.len()] == *marker {
+                crate::serial::serial_println!(
+                    "[  0.001320] DRIVERS: AHCI persistence OK — marker at LBA 1 survived reboot"
+                );
+            } else {
+                let mut w = [0u8; SECTOR_SIZE];
+                w[..marker.len()].copy_from_slice(marker);
+                match dev.write_sector(1, &w) {
+                    Ok(()) => crate::serial::serial_println!(
+                        "[  0.001320] DRIVERS: AHCI first-boot marker written to LBA 1"
+                    ),
+                    Err(e) => crate::serial::serial_println!(
+                        "[  0.001320] DRIVERS: AHCI write failed: {:?}", e
+                    ),
+                }
+            }
+        }
+        Err(e) => crate::serial::serial_println!(
+            "[  0.001320] DRIVERS: AHCI read failed: {:?}", e
+        ),
     }
 }
 

@@ -7,6 +7,7 @@
 #          -Headless   — no graphical window, serial only (useful for CI)
 #          -Net        — attach virtio-net-pci on QEMU user networking (10.0.2.0/24)
 #          -KernelTest — wire up isa-debug-exit device for in-kernel test harness
+#          -Disk       — attach racos-disk.img to ich9-ahci (created if missing)
 #          -Ram <MB>   — override guest RAM (default 512)
 
 param(
@@ -15,6 +16,7 @@ param(
     [switch]$Headless,
     [switch]$Net,
     [switch]$KernelTest,
+    [switch]$Disk,
     [int]$Ram = 512
 )
 
@@ -98,6 +100,26 @@ if ($Net) {
         "-object", "filter-dump,id=f0,netdev=net0,file=$pcapPath"
     )
     Write-Host "  PCAP:  $pcapPath"
+}
+
+if ($Disk) {
+    # Persistent SATA disk on ich9-ahci. The image is created lazily — first
+    # run produces a 16 MiB sparse file that survives reboots and stays in the
+    # project root next to the pcap.
+    $diskPath = "$ProjectRoot\racos-disk.img"
+    if (-not (Test-Path $diskPath)) {
+        $size = 16MB
+        $fs = [System.IO.File]::Create($diskPath)
+        $fs.SetLength($size)
+        $fs.Close()
+        Write-Host "  Disk:  created $diskPath ($size bytes)"
+    }
+    $QemuArgs += @(
+        "-drive",  "id=disk0,file=$diskPath,if=none,format=raw"
+        "-device", "ich9-ahci,id=ahci"
+        "-device", "ide-hd,drive=disk0,bus=ahci.0"
+    )
+    Write-Host "  Disk:  $diskPath -> ich9-ahci"
 }
 
 if ($KernelTest) {

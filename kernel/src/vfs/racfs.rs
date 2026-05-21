@@ -217,6 +217,32 @@ unsafe impl Send for Racfs {}
 unsafe impl Sync for Racfs {}
 
 impl Racfs {
+    /// Mount an existing racfs from `device` without touching its contents.
+    /// Returns Err(IoError) if the superblock magic / version does not match,
+    /// which the caller may use to fall back to `format_and_new`.
+    pub fn open(device: Arc<dyn BlockDevice>) -> VfsResult<Arc<Self>> {
+        let mut cache = BlockCache::new(device);
+        let mut buf = [0u8; SECTOR_SIZE];
+        cache.read_sector(0, &mut buf).map_err(|_| VfsError::IoError)?;
+        let sb = superblock_from_sector(&buf);
+        if sb.magic != RACFS_MAGIC || sb.version != RACFS_VERSION {
+            return Err(VfsError::IoError);
+        }
+        Ok(Arc::new(Racfs {
+            cache: UnsafeCell::new(cache),
+            sb: UnsafeCell::new(sb),
+        }))
+    }
+
+    /// Probe `device` for a valid racfs superblock; if absent, format it.
+    /// Returns the resulting filesystem either way.
+    pub fn open_or_format(device: Arc<dyn BlockDevice>) -> VfsResult<Arc<Self>> {
+        match Self::open(device.clone()) {
+            Ok(fs) => Ok(fs),
+            Err(_) => Self::format_and_new(device),
+        }
+    }
+
     /// Format and mount a block device as racfs.
     pub fn format_and_new(device: Arc<dyn BlockDevice>) -> VfsResult<Arc<Self>> {
         let total_sectors = device.sector_count() as u32;
@@ -891,5 +917,44 @@ pub unsafe fn init() -> Arc<Racfs> {
 /// Must be called after init().
 pub unsafe fn instance() -> &'static Arc<Racfs> {
     (*core::ptr::addr_of!(RACFS_INSTANCE)).as_ref().unwrap()
+}
+
+/// Persistence smoke test for a mounted racfs. Looks up `boot-counter` in the
+/// root; if it exists, reads the integer, increments it and writes it back; if
+/// not, creates it with `1`. Run on each boot to show that file contents
+/// survive reboots across the entire on-disk format (inodes, bitmap, data
+/// blocks, directory entries).
+pub fn persistence_test(fs: &Racfs, label: &str) {
+    use alloc::string::ToString;
+    const NAME: &str = "boot-counter";
+    match fs.lookup_path(NAME) {
+        Ok(ino) => {
+            let mut buf = [0u8; 16];
+            let n = fs.read_file(ino, 0, &mut buf).unwrap_or(0);
+            let text = core::str::from_utf8(&buf[..n]).unwrap_or("0");
+            let value: u32 = text.trim().parse().unwrap_or(0);
+            let next = value.saturating_add(1);
+            let s = next.to_string();
+            // Write the new counter back over the old contents.
+            let _ = fs.write_file(ino, 0, s.as_bytes());
+            crate::serial::serial_println!(
+                "[ RACFS {} ] boot-counter = {} (was {}, file survived reboot)",
+                label, next, value,
+            );
+        }
+        Err(_) => {
+            match fs.create_file(0, NAME) {
+                Ok(ino) => {
+                    let _ = fs.write_file(ino, 0, b"1");
+                    crate::serial::serial_println!(
+                        "[ RACFS {} ] created boot-counter = 1 (first boot)", label
+                    );
+                }
+                Err(e) => crate::serial::serial_println!(
+                    "[ RACFS {} ] create boot-counter failed: {:?}", label, e
+                ),
+            }
+        }
+    }
 }
 

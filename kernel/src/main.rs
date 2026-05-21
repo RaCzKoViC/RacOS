@@ -116,6 +116,9 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Initialize drivers (subsystem, block, PCI).
     drivers::init();
+    // Phase F smoke test: verify AHCI persistence (write marker on first boot,
+    // confirm it on later boots).
+    drivers::ahci_self_test();
     // Phase E smoke test: verify the NIC TX path before the rest of init runs.
     drivers::nic_self_test();
     // Phase E krok 2/3: bring up the IPv4 stack and run the ARP→ICMP→DNS demo.
@@ -215,12 +218,28 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         }
     }
 
-    // Set up and mount racfs at /var (block-device-backed on ram0)
+    // Set up and mount racfs at /var (ephemeral, block-device-backed on ram0)
     {
         let racfs = unsafe { vfs::racfs::init() };
         let racfs_fs = vfs::racfs::RacfsFilesystem::new(racfs);
         unsafe {
             vfs::mount::mount_table().mount("/var", racfs_fs);
+        }
+    }
+
+    // Phase F krok 3: mount racfs on the persistent SATA disk at /mnt.
+    // Open existing FS if the superblock is valid; otherwise format it once.
+    if let Some(sda) = drivers::block::find("sda") {
+        match vfs::racfs::Racfs::open_or_format(sda) {
+            Ok(racfs) => {
+                // Run persistence test against the on-disk FS before handing
+                // it off to the mount table.
+                vfs::racfs::persistence_test(&racfs, "sda");
+                let racfs_fs = vfs::racfs::RacfsFilesystem::new(racfs);
+                unsafe { vfs::mount::mount_table().mount("/mnt", racfs_fs); }
+                serial::serial_println!("[  0.000370] RACORE: racfs mounted on /mnt (persistent, on sda)");
+            }
+            Err(e) => serial::serial_println!("[  0.000370] RACORE: /mnt mount failed: {:?}", e),
         }
     }
 

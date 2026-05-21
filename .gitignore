@@ -19,6 +19,7 @@ Thumbs.db
 *.qcow2
 *.raw
 *.iso
+*.img
 !images/*.iso
 
 # Debug
