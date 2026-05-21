@@ -48,6 +48,7 @@ const INO_LOADAVG: InodeNum = 6;
 const INO_SELF: InodeNum = 7;
 const INO_MOUNTS: InodeNum = 8;
 const INO_DISKSTATS: InodeNum = 9;
+const INO_CACHESTATS: InodeNum = 10;
 
 fn pid_dir_ino(pid: u32) -> InodeNum { 1000 + pid as u64 * 10 }
 fn pid_status_ino(pid: u32) -> InodeNum { 1000 + pid as u64 * 10 + 1 }
@@ -101,6 +102,7 @@ impl InodeOps for ProcRootInode {
             "self" => Ok(INO_SELF),
             "mounts" => Ok(INO_MOUNTS),
             "diskstats" => Ok(INO_DISKSTATS),
+            "cachestats" => Ok(INO_CACHESTATS),
             _ => {
                 // Try to parse as PID
                 if let Ok(pid) = name.parse::<u32>() {
@@ -122,6 +124,7 @@ impl InodeOps for ProcRootInode {
         entries.push(DirEntry { name: String::from("self"), ino: INO_SELF, file_type: FileType::Directory });
         entries.push(DirEntry { name: String::from("mounts"), ino: INO_MOUNTS, file_type: FileType::Regular });
         entries.push(DirEntry { name: String::from("diskstats"), ino: INO_DISKSTATS, file_type: FileType::Regular });
+        entries.push(DirEntry { name: String::from("cachestats"), ino: INO_CACHESTATS, file_type: FileType::Regular });
         // Add entries for known PIDs
         // We scan the scheduler for live tasks
         Ok(entries)
@@ -190,6 +193,23 @@ impl ProcFileInode {
                             _ => "none",
                         };
                         out.push_str(&format!("{} {} {} rw 0 0\n", dev, m.path, m.fs.name()));
+                    }
+                }
+                out
+            }
+            INO_CACHESTATS => {
+                let mut out = String::from("# mount hits misses cached_entries dirty_entries hit_rate%\n");
+                unsafe {
+                    let mt = super::mount::mount_table();
+                    for m in mt.entries() {
+                        let any = m.fs.as_any();
+                        if let Some(racfs_fs) = any.downcast_ref::<super::racfs::RacfsFilesystem>() {
+                            let (hits, misses, entries, dirty) = racfs_fs.inner().cache_stats();
+                            let total = hits + misses;
+                            let pct = if total > 0 { (hits * 100) / total } else { 0 };
+                            out.push_str(&format!("{} {} {} {} {} {}\n",
+                                m.path, hits, misses, entries, dirty, pct));
+                        }
                     }
                 }
                 out
@@ -375,7 +395,8 @@ impl Filesystem for ProcFilesystem {
         match ino {
             INO_ROOT => Ok(Arc::new(ProcRootInode)),
             INO_UPTIME | INO_MEMINFO | INO_VERSION | INO_CPUINFO
-            | INO_STAT | INO_LOADAVG | INO_MOUNTS | INO_DISKSTATS => {
+            | INO_STAT | INO_LOADAVG | INO_MOUNTS | INO_DISKSTATS
+            | INO_CACHESTATS => {
                 Ok(Arc::new(ProcFileInode { ino }))
             }
             INO_SELF => {

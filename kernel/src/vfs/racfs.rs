@@ -333,6 +333,20 @@ impl Racfs {
         (sb.data_block_count, sb.free_blocks, sb.inode_count, sb.free_inodes)
     }
 
+    /// Force all dirty cache entries to disk. Idempotent — no-op if nothing
+    /// is dirty. Called by sys_sync and the periodic flushd kernel task.
+    pub fn sync(&self) -> VfsResult<()> {
+        self.cache_mut().flush().map_err(|_| VfsError::IoError)
+    }
+
+    /// Cache counters: (hits, misses, cached_entries, dirty_entries).
+    /// Used by /proc/cachestats.
+    pub fn cache_stats(&self) -> (u64, u64, usize, usize) {
+        let cache = self.cache_mut();
+        let (h, m, e) = cache.stats();
+        (h, m, e, cache.dirty_count())
+    }
+
     /// Flush the superblock to disk.
     fn flush_sb(&self) -> VfsResult<()> {
         let buf = superblock_to_sector(self.sb());

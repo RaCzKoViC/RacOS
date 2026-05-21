@@ -46,6 +46,7 @@ members = [
     "userland/coreutils/df",
     "userland/coreutils/umount",
     "userland/coreutils/mkfs-racfs",
+    "userland/coreutils/sync",
 ]
 default-members = [
     "init",
@@ -91,6 +92,7 @@ default-members = [
     "userland/coreutils/df",
     "userland/coreutils/umount",
     "userland/coreutils/mkfs-racfs",
+    "userland/coreutils/sync",
 ]
 
 [workspace.package]

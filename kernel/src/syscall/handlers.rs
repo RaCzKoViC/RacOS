@@ -2803,6 +2803,17 @@ pub fn sys_mkfs(
 }
 
 // ─────────────────────────────────────────────────
+// Syscall 80: sys_sync
+// ─────────────────────────────────────────────────
+
+/// Flush all dirty block-cache entries to their backing devices.
+/// Returns the number of mounts synced (always >=0; never fails).
+pub fn sys_sync() -> SyscallResult {
+    let n = unsafe { crate::vfs::mount::flush_all() };
+    Ok(n as i64)
+}
+
+// ─────────────────────────────────────────────────
 // Syscall 68: sys_mprotect
 // ─────────────────────────────────────────────────
 

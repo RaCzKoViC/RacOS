@@ -282,6 +282,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-sync"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-tail"
 version = "0.1.0"
 dependencies = [

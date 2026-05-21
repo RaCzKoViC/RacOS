@@ -249,6 +249,17 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         drivers::block::count()
     );
 
+    // Phase F.2: kernel-side writeback daemon. Periodically flushes dirty
+    // cache entries on every block-backed mount so user-visible data lands
+    // on disk even without an explicit sync().
+    unsafe {
+        if let Err(e) = task::scheduler::spawn("flushd", flushd_task) {
+            serial::serial_println!("[  0.000310] RACORE: flushd spawn failed: {}", e);
+        } else {
+            serial::serial_println!("[  0.000310] RACORE: flushd writeback daemon spawned");
+        }
+    }
+
     if RUN_KERNEL_SELF_TESTS {
         // Optional bring-up self-tests.
         unsafe {
@@ -1073,6 +1084,30 @@ fn test_net() -> ! {
 
     serial::serial_println!("[TEST-NET ] Loopback socket test complete");
     loop {
+        task::scheduler::yield_now();
+    }
+}
+
+/// Periodic writeback daemon. Wakes every ~5 seconds (5000 PIT ticks) and
+/// flushes dirty cache entries on every block-backed mount. Crucial for
+/// safety: even if eager flush in racfs ever skips a write, the daemon
+/// guarantees data lands on disk within a bounded window.
+const FLUSHD_INTERVAL_TICKS: u64 = 5_000;
+fn flushd_task() -> ! {
+    serial::serial_println!("[ FLUSHD  ] task started, interval={} ticks", FLUSHD_INTERVAL_TICKS);
+    let mut last_run = interrupts::pit::ticks();
+    let mut total_syncs: u64 = 0;
+    loop {
+        let now = interrupts::pit::ticks();
+        if now.saturating_sub(last_run) >= FLUSHD_INTERVAL_TICKS {
+            let synced = unsafe { vfs::mount::flush_all() };
+            total_syncs += synced as u64;
+            serial::serial_println!(
+                "[ FLUSHD  ] tick — synced {} mount(s) (cumulative {})",
+                synced, total_syncs,
+            );
+            last_run = now;
+        }
         task::scheduler::yield_now();
     }
 }

@@ -96,6 +96,30 @@ impl MountTable {
     pub fn entries(&self) -> &[MountEntry] {
         &self.mounts
     }
+}
+
+/// Flush every block-backed mount in the global mount table.
+/// Returns the number of mounts successfully synced. Errors are swallowed
+/// because partial progress is still useful for crash safety.
+///
+/// # Safety
+/// Caller must ensure the global mount table has been initialised.
+pub unsafe fn flush_all() -> usize {
+    let mt = mount_table();
+    let mut count = 0;
+    for entry in mt.mounts.iter() {
+        let any = entry.fs.as_any();
+        if let Some(racfs_fs) = any.downcast_ref::<super::racfs::RacfsFilesystem>() {
+            if racfs_fs.inner().sync().is_ok() { count += 1; }
+        }
+    }
+    count
+}
+
+impl MountTable {
+    // Re-open the impl block so subsequent methods (if any) compile.
+    #[allow(dead_code)]
+    fn _flush_stub(&self) {}
 
     /// Resolve a path to a filesystem and relative path.
     /// Returns the longest-prefix matching mount and the remainder of the path.

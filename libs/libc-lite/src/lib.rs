@@ -94,6 +94,7 @@ pub const SYS_GETRANDOM: u64 = 76;
 pub const SYS_CLONE: u64 = 77;
 pub const SYS_GETHOSTBYNAME: u64 = 78;
 pub const SYS_MKFS: u64 = 79;
+pub const SYS_SYNC: u64 = 80;
 pub const SYS_PTHREAD_CREATE: u64 = 0x400;
 
 // ─────────────────────────────────────────────────
@@ -723,6 +724,13 @@ pub fn umount(target: &[u8]) -> Result<(), i64> {
     // Caller must pass a NUL-terminated byte slice (validate_user_string in kernel).
     let ret = unsafe { syscall1(SYS_UMOUNT, target.as_ptr() as u64) };
     if ret < 0 { Err(ret) } else { Ok(()) }
+}
+
+/// Flush all dirty block-cache entries to disk. Returns the number of
+/// mounts synced (block-backed filesystems only).
+pub fn sync() -> Result<i64, i64> {
+    let ret = unsafe { syscall0(SYS_SYNC) };
+    if ret < 0 { Err(ret) } else { Ok(ret) }
 }
 
 /// Format `device` with the given filesystem type ("racfs" currently).
