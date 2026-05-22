@@ -137,6 +137,44 @@ pub fn current_kernel_stack() -> u64 {
     unsafe { (*core::ptr::addr_of!(TSS)).rsp0 }
 }
 
+/// Load the BSP's kernel GDT on the running CPU and reload all segment
+/// registers (including CS via a far return) to point at it. Called from
+/// `ap_entry` after long-mode bring-up so the AP stops using its
+/// trampoline GDT — that one has 0x08 as a *32-bit* code segment, which
+/// triple-faults the moment an IRQ tries to load CS = 0x08 from the IDT.
+///
+/// # Safety
+/// Must run on an AP in long mode, before that AP loads the IDT or takes
+/// any interrupt. Interrupts must be disabled (no IDT loaded yet either way).
+pub unsafe fn load_kernel_gdt_for_this_cpu() {
+    #[allow(static_mut_refs)]
+    let gdt_ptr = GdtPointer {
+        limit: (size_of::<[GdtEntry; 7]>() - 1) as u16,
+        base: (*core::ptr::addr_of!(GDT)).as_ptr() as u64,
+    };
+    core::arch::asm!(
+        "lgdt [{}]",
+        // Reload CS via far return to the kernel 64-bit code segment.
+        "push 0x08",
+        "lea rax, [rip + 2f]",
+        "push rax",
+        "retfq",
+        "2:",
+        // Reload data segment registers to kernel data.
+        "mov ax, 0x10",
+        "mov ds, ax",
+        "mov es, ax",
+        "mov fs, ax",
+        // Don't touch GS — the AP has already pointed IA32_GS_BASE at its
+        // own PerCpu slot via percpu::init_for_this_cpu and the visible
+        // descriptor only matters for non-64-bit code segments anyway.
+        "mov ss, ax",
+        in(reg) &gdt_ptr,
+        out("rax") _,
+        options(nostack),
+    );
+}
+
 /// Install the TSS descriptor into the GDT and load it.
 unsafe fn install_tss() {
     let tss_addr = core::ptr::addr_of!(TSS) as u64;

@@ -129,6 +129,10 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         // G.4 foundation: BSP claims its per-CPU slot before bringing up
         // any AP. APs initialise their own slots from ap_entry.
         arch::percpu::init_for_this_cpu(arch::lapic::current_apic_id());
+        // G.4.1: BSP arms its own LAPIC timer. The IDT vector was
+        // installed by idt::init() above; once IF is on (later in this
+        // function) timer IRQs start landing and bumping PerCpu.tick_count.
+        arch::lapic::init_timer_for_this_cpu();
         // G.3: walk every enabled MADT entry that isn't the BSP, fire
         // INIT-SIPI-SIPI, and wait for each AP to reach its Rust idle
         // halt. No-op on single-CPU guests.
@@ -1246,6 +1250,40 @@ fn run_ci_smoke_and_exit() -> ! {
     });
     if percpu_ok {
         serial::serial_println!("[ SMOKE ] PASS percpu::gs_base_coherent");
+    } else {
+        all_pass = false;
+    }
+
+    // G.4.1: every CPU should have armed its own LAPIC timer and seen at
+    // least one tick land on its own PerCpu.tick_count. Smoke runs with
+    // IF=0 (kernel_main hasn't enabled IRQs yet), so the BSP timer is
+    // armed but masked until we sti briefly. APs sti'd in ap_entry, so
+    // they may already have ticks; the busy wait gives them more.
+    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    for _ in 0..2_000_000u32 {
+        core::hint::spin_loop();
+    }
+    unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
+    let mut timer_ok = true;
+    arch::smp::for_each_cpu::<(), _>(|cpu| {
+        let slot = arch::percpu::peek(cpu.apic_id).expect("PerCpu slot");
+        let ticks = slot.tick_count.load(core::sync::atomic::Ordering::SeqCst);
+        if ticks == 0 {
+            serial::serial_println!(
+                "[ SMOKE ] FAIL lapic_timer::tick apic_id={} ticks=0",
+                cpu.apic_id,
+            );
+            timer_ok = false;
+        } else {
+            serial::serial_println!(
+                "[ SMOKE ] INFO lapic_timer apic_id={} ticks={}",
+                cpu.apic_id, ticks,
+            );
+        }
+        None
+    });
+    if timer_ok {
+        serial::serial_println!("[ SMOKE ] PASS lapic_timer::per_cpu_ticking");
     } else {
         all_pass = false;
     }

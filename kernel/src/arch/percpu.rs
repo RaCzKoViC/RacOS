@@ -34,6 +34,11 @@ pub struct PerCpu {
     /// GS base during init. BSP-side smoke reads back and compares; if the
     /// CPUs' GS bases got crossed, the values won't line up.
     pub self_check: AtomicU32,
+    /// Monotonic LAPIC-timer tick counter for this CPU. Incremented by the
+    /// per-CPU timer IRQ handler via `gs:[offset]`, never touched from
+    /// another CPU — gives G.4 proper a free, lock-free preemption clock
+    /// to dispatch the future per-CPU runqueue against.
+    pub tick_count: AtomicU64,
 }
 
 impl PerCpu {
@@ -42,9 +47,15 @@ impl PerCpu {
             self_ptr:   AtomicU64::new(0),
             apic_id:    AtomicU32::new(0),
             self_check: AtomicU32::new(0),
+            tick_count: AtomicU64::new(0),
         }
     }
 }
+
+/// Byte offset of `tick_count` inside `PerCpu` for the LAPIC timer IRQ
+/// handler. We rely on `#[repr(C)]` ordering: self_ptr (8) + apic_id (4) +
+/// self_check (4) = 16. AtomicU64 is naturally 8-aligned so no padding.
+pub const OFFSET_TICK_COUNT: usize = 16;
 
 /// One slot per supported CPU. Wrapped in UnsafeCell because each CPU
 /// writes *only* its own slot, and only after init has placed the address

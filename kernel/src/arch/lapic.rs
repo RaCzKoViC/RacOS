@@ -24,6 +24,27 @@ const LAPIC_REG_SVR:      usize = 0x0F0;
 const LAPIC_REG_ESR:      usize = 0x280;
 const LAPIC_REG_ICR_LOW:  usize = 0x300;
 const LAPIC_REG_ICR_HIGH: usize = 0x310;
+// LAPIC timer (G.4.1)
+const LAPIC_REG_LVT_TIMER:    usize = 0x320;
+const LAPIC_REG_INITIAL_COUNT: usize = 0x380;
+const LAPIC_REG_CURRENT_COUNT: usize = 0x390;
+const LAPIC_REG_DIVIDE_CONFIG: usize = 0x3E0;
+
+/// IDT vector the per-CPU LAPIC timer fires on. Picked above the legacy
+/// PIC range (0x20..0x2F) and the spurious vector (0xFF) so it doesn't
+/// collide with anything else the kernel already routes.
+pub const LAPIC_TIMER_VECTOR: u8 = 0x40;
+const LVT_TIMER_PERIODIC: u32 = 0b01 << 17;
+const LVT_TIMER_MASKED:   u32 = 1 << 16;
+/// Divider 16 (DCR bits 3,1,0 = 011) — gives a useful tick rate against
+/// QEMU's typical ~1 GHz LAPIC bus clock without slamming the CPU. The
+/// exact rate isn't load-bearing for G.4.1 (we just need *some* tick per
+/// CPU); calibration against PIT/HPET is G.6.
+const TIMER_DIVIDE_BY_16: u32 = 0b011;
+/// Initial count → roughly one tick per 100k bus cycles. Picked low enough
+/// to fire quickly under TCG (slow QEMU emulation), high enough to not
+/// drown the serial log when smoke is enabled.
+const TIMER_INITIAL_COUNT: u32 = 100_000;
 
 // SVR bit 8 = APIC software enable. Spurious vector usually 0xFF.
 const SVR_ENABLE: u32 = 1 << 8;
@@ -131,6 +152,40 @@ pub fn current_apic_id() -> u32 {
 
 pub fn bsp_id() -> u32 {
     BSP_ID.load(Ordering::SeqCst)
+}
+
+/// Program the running CPU's LAPIC timer in periodic mode. Every CPU calls
+/// this from its own init path (BSP after `init_bsp`, APs from `ap_entry`)
+/// so every CPU drives its own tick stream — that's the building block
+/// G.4 proper (per-CPU runqueues) will hang preemption off of.
+///
+/// # Safety
+/// Must run on the CPU that owns this LAPIC. `init_bsp` must have
+/// populated `LAPIC_BASE`; on APs, the AP's LAPIC must already be software-
+/// enabled via SVR (ap_entry does that before calling us).
+pub unsafe fn init_timer_for_this_cpu() {
+    let base = LAPIC_BASE.load(Ordering::SeqCst);
+    if base == 0 { return; }
+    // Mask first so we never see a stale countdown fire mid-config.
+    write_reg(LAPIC_REG_LVT_TIMER, LVT_TIMER_MASKED);
+    write_reg(LAPIC_REG_DIVIDE_CONFIG, TIMER_DIVIDE_BY_16);
+    // Unmask and arm: vector + periodic mode, no masking.
+    write_reg(
+        LAPIC_REG_LVT_TIMER,
+        LAPIC_TIMER_VECTOR as u32 | LVT_TIMER_PERIODIC,
+    );
+    // Writing INITIAL_COUNT starts the countdown.
+    write_reg(LAPIC_REG_INITIAL_COUNT, TIMER_INITIAL_COUNT);
+}
+
+/// Disarm the running CPU's LAPIC timer. Used by code that needs to make
+/// LAPIC writes without a periodic IRQ landing on top of it (e.g. AP
+/// bring-up before the IDT is installed).
+pub unsafe fn disable_timer_for_this_cpu() {
+    let base = LAPIC_BASE.load(Ordering::SeqCst);
+    if base == 0 { return; }
+    write_reg(LAPIC_REG_INITIAL_COUNT, 0);
+    write_reg(LAPIC_REG_LVT_TIMER, LVT_TIMER_MASKED);
 }
 
 /// Signal end-of-interrupt to the LAPIC. Required after every LAPIC-routed

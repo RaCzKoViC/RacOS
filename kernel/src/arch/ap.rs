@@ -248,11 +248,22 @@ unsafe extern "C" fn ap_entry() -> ! {
     // per-CPU code (scheduler runqueue, IRQ tick counters, ...) just
     // works via `percpu::current()`.
     crate::arch::percpu::init_for_this_cpu(id);
+    // G.4.1: drop the trampoline GDT (where 0x08 is a 32-bit code segment)
+    // and switch to the kernel GDT so IDT selectors that say "CS = 0x08"
+    // resolve to a 64-bit segment instead of triple-faulting on IRQ entry.
+    crate::arch::gdt::load_kernel_gdt_for_this_cpu();
+    // G.4.1: load the shared IDT and arm this CPU's own LAPIC timer.
+    // Handler only touches gs:[OFFSET_TICK_COUNT] (per-CPU) and the local
+    // LAPIC's EOI MMIO, so there's no cross-CPU state at IRQ time.
+    crate::arch::idt::load_on_this_cpu();
+    lapic::init_timer_for_this_cpu();
     smp::mark_started(id);
 
-    // Park the AP. Interrupts stay off — we have no per-CPU IDT/TSS yet,
-    // taking an IRQ here would either re-enter the BSP's handlers on the
-    // wrong stack or just triple-fault on the missing IST entries.
+    // Park the AP with IF=1 so its periodic timer fires and drives the
+    // per-CPU tick counter. A proper per-CPU IDT/TSS for ring-3 service
+    // routines is still future work, but the timer never crosses CPL on
+    // an AP (no ring-3 yet) so a missing IST entry doesn't bite here.
+    core::arch::asm!("sti", options(nomem, nostack));
     loop {
         core::arch::asm!("hlt", options(nomem, nostack));
     }
