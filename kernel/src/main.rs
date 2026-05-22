@@ -1305,6 +1305,83 @@ fn run_ci_smoke_and_exit() -> ! {
         check!("racfs::unlink", racfs.unlink(0, "smoke.txt").is_ok());
     }
 
+    // 3b. /mnt round-trip via mount_table — mirrors the racsh path
+    //     (echo > /mnt/x; cat /mnt/x). This is the exact path that was
+    //     broken interactively: create through the per-mount store, then
+    //     re-resolve through mount_table().lookup_path and read back via
+    //     the resolved Filesystem + Inode handles. If the bug is in cache
+    //     coherency between mutating writes and a fresh mount-table
+    //     lookup, it will surface here as either ENOENT or a 0-byte read.
+    if has_sda {
+        let mt = unsafe { vfs::mount::mount_table() };
+        let mut subtest_pass = true;
+        let payload = b"mnt-roundtrip-9876";
+        let path = "/mnt/smoke-mnt.txt";
+
+        // (a) Reach the concrete Racfs backing /mnt and create a fresh file.
+        let mnt_racfs = mt.entries().iter()
+            .find(|m| m.path == "/mnt")
+            .and_then(|m| m.fs.as_any().downcast_ref::<vfs::racfs::RacfsFilesystem>())
+            .map(|fs| fs.inner());
+        if let Some(racfs) = mnt_racfs {
+            // Make the test idempotent across re-runs against the same disk.
+            let _ = racfs.unlink(0, "smoke-mnt.txt");
+            let ino = racfs.create_file(0, "smoke-mnt.txt").unwrap_or(0);
+            if ino == 0 {
+                serial::serial_println!("[ SMOKE ] FAIL mnt::create_file");
+                subtest_pass = false;
+            }
+            let wrote = racfs.write_file(ino, 0, payload).unwrap_or(0);
+            if wrote != payload.len() {
+                serial::serial_println!(
+                    "[ SMOKE ] FAIL mnt::write_file wrote={} want={}",
+                    wrote, payload.len(),
+                );
+                subtest_pass = false;
+            }
+        } else {
+            serial::serial_println!("[ SMOKE ] FAIL mnt::downcast_racfs");
+            subtest_pass = false;
+        }
+
+        // (b) Re-resolve the file from the path API as cat would.
+        match mt.lookup_path(path) {
+            Ok((fs, ino)) => {
+                match fs.get_inode(ino) {
+                    Ok(inode) => {
+                        let mut buf = [0u8; 64];
+                        let n = inode.read(0, &mut buf).unwrap_or(0);
+                        if n != payload.len() || &buf[..n] != payload {
+                            serial::serial_println!(
+                                "[ SMOKE ] FAIL mnt::read_after_create n={} content={:?}",
+                                n, &buf[..n.min(buf.len())],
+                            );
+                            subtest_pass = false;
+                        }
+                    }
+                    Err(e) => {
+                        serial::serial_println!(
+                            "[ SMOKE ] FAIL mnt::get_inode {:?}", e,
+                        );
+                        subtest_pass = false;
+                    }
+                }
+            }
+            Err(e) => {
+                serial::serial_println!(
+                    "[ SMOKE ] FAIL mnt::lookup_after_create {:?}", e,
+                );
+                subtest_pass = false;
+            }
+        }
+
+        if subtest_pass {
+            serial::serial_println!("[ SMOKE ] PASS mnt::roundtrip");
+        } else {
+            all_pass = false;
+        }
+    }
+
     // 4. FAT32 round-trip on /fat (already exercised by smoke_test during
     //    boot — re-check the BOOT.CNT we wrote in main).
     if let Ok((fs, _)) = mt.lookup_path("/fat/TEST/BOOT.CNT") {

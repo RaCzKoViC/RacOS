@@ -228,10 +228,17 @@ jobs:
           echo "Using OVMF=$OVMF"
           qemu-system-x86_64 --version | head -n 1
           set +e
+          # Provide a fresh sparse disk image so the smoke can exercise the
+          # AHCI / racfs round-trip on /mnt. Re-created from zero each run so
+          # the mnt::roundtrip assertion is deterministic across CI invocations.
+          dd if=/dev/zero of=ci-smoke-disk.img bs=1M count=16 status=none
           timeout 60 qemu-system-x86_64 \
             -machine q35 -cpu qemu64 -m 512M \
             -drive if=pflash,format=raw,file=$OVMF,readonly=on \
             -drive file=fat:rw:esp,format=raw \
+            -drive id=disk0,file=ci-smoke-disk.img,if=none,format=raw,cache=writethrough \
+            -device ich9-ahci,id=ahci \
+            -device ide-hd,drive=disk0,bus=ahci.0 \
             -serial file:smoke.log -display none \
             -no-reboot \
             -device isa-debug-exit,iobase=0xf4,iosize=0x04

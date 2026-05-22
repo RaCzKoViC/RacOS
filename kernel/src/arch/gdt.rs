@@ -132,6 +132,11 @@ pub unsafe fn set_kernel_stack(rsp0: u64) {
     tss.rsp0 = rsp0;
 }
 
+/// Read the current TSS.RSP0 (kernel stack pointer for ring 3 → ring 0).
+pub fn current_kernel_stack() -> u64 {
+    unsafe { (*core::ptr::addr_of!(TSS)).rsp0 }
+}
+
 /// Install the TSS descriptor into the GDT and load it.
 unsafe fn install_tss() {
     let tss_addr = core::ptr::addr_of!(TSS) as u64;

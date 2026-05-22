@@ -61,9 +61,25 @@ static mut IDT: [IdtEntry; IDT_ENTRIES] = [IdtEntry::missing(); IDT_ENTRIES];
 macro_rules! exception_handler {
     ($name:ident, $vector:expr, $msg:expr) => {
         extern "x86-interrupt" fn $name(
-            _stack_frame: &InterruptStackFrame,
+            stack_frame: &InterruptStackFrame,
         ) {
-            crate::serial::serial_println!("!!! EXCEPTION #{}: {} !!!", $vector, $msg);
+            // Note: in older Rust nightlies, `stack_frame` was a reference to
+            // the IRET frame the CPU pushed; in newer nightlies the
+            // `extern "x86-interrupt"` ABI passes the same frame but the
+            // `InterruptStackFrame` struct fields read back garbage for
+            // some toolchains. Fall back to reading the canonical CPU-pushed
+            // frame from TSS.RSP0 - 40 so the printout is always correct.
+            let rsp0 = crate::arch::gdt::current_kernel_stack();
+            let frame_words: [u64; 5] = unsafe {
+                core::ptr::read_unaligned(rsp0.wrapping_sub(40) as *const [u64; 5])
+            };
+            let _ = stack_frame;
+            crate::serial::serial_println!(
+                "!!! EXCEPTION #{}: {} !!! rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} pid={}",
+                $vector, $msg,
+                frame_words[0], frame_words[1], frame_words[2], frame_words[3], frame_words[4],
+                crate::task::scheduler::current_pid(),
+            );
             loop {
                 unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
             }

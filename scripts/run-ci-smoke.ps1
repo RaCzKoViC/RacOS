@@ -11,7 +11,8 @@
 param(
     [switch]$Linux,
     [int]$TimeoutSec = 60,
-    [int]$Smp = 1
+    [int]$Smp = 1,
+    [switch]$Disk
 )
 
 $ErrorActionPreference = "Stop"
@@ -73,6 +74,23 @@ $QemuArgs = @(
     "-no-reboot",
     "-device",  "isa-debug-exit,iobase=0xf4,iosize=0x04"
 )
+
+if ($Disk) {
+    # Attach a freshly-zeroed 16 MiB AHCI image so the kernel sees sda and
+    # the smoke can exercise the persistent /mnt round-trip path. Re-creating
+    # the file each run keeps the test deterministic across invocations.
+    $diskPath = Join-Path $Root "racos-smoke-disk.img"
+    if (Test-Path $diskPath) { Remove-Item $diskPath -Force }
+    $fs = [System.IO.File]::Create($diskPath)
+    $fs.SetLength(16MB)
+    $fs.Close()
+    $QemuArgs += @(
+        "-drive",  "id=disk0,file=$diskPath,if=none,format=raw,cache=writethrough",
+        "-device", "ich9-ahci,id=ahci",
+        "-device", "ide-hd,drive=disk0,bus=ahci.0"
+    )
+    Write-Host ("Attached smoke disk: " + $diskPath)
+}
 
 Write-Host ("Launching QEMU (ci-smoke, " + $TimeoutSec + "s budget)...")
 
