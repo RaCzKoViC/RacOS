@@ -21,7 +21,20 @@ pub struct TaskContext {
     pub rbp: u64,
     pub rsp: u64,
     pub rip: u64,
+    /// Full RFLAGS, saved/restored by `context_switch`. Critical so that
+    /// AC (bit 18) — set by a STAC inside the syscall handler — survives
+    /// preemption back into another task; without this, a syscall that
+    /// gets context-switched out mid-flight comes back with AC=0 and any
+    /// subsequent kernel→user memory access trips SMAP. Also keeps the
+    /// rest of RFLAGS coherent across yields (DF, IF, etc.).
+    pub rflags: u64,
 }
+
+/// Default RFLAGS for freshly-created tasks: IF=1 (bit 9) + bit 1
+/// (reserved, always set on x86_64) = 0x202. Gives kernel tasks
+/// interrupts enabled on first dispatch; user tasks have this overwritten
+/// by IRETQ from the user_entry_trampoline frame anyway.
+pub const DEFAULT_RFLAGS: u64 = 0x202;
 
 impl TaskContext {
     pub const fn new() -> Self {
@@ -34,6 +47,7 @@ impl TaskContext {
             rbp: 0,
             rsp: 0,
             rip: 0,
+            rflags: DEFAULT_RFLAGS,
         }
     }
 
@@ -76,6 +90,14 @@ pub unsafe extern "C" fn context_switch(old: *mut TaskContext, new: *const TaskC
     // FAILURE: If either pointer is invalid, undefined behavior (crash/corruption).
     // TESTED BY: scheduler integration tests (Sprint 4)
     core::arch::naked_asm!(
+        // Save RFLAGS first (using pushfq/pop into rax → memory). This
+        // captures AC (SMAP), DF, IF, etc. so when the outgoing task is
+        // resumed later, it sees the same flags state it had at switch
+        // time — without this, a syscall mid-flight loses STAC's AC=1
+        // after preemption and the next user-mem touch trips SMAP.
+        "pushfq",
+        "pop rax",
+        "mov [rdi + 0x40], rax",
         // Save callee-saved registers to old context (RDI = old)
         "mov [rdi + 0x00], r15",
         "mov [rdi + 0x08], r14",
@@ -95,6 +117,11 @@ pub unsafe extern "C" fn context_switch(old: *mut TaskContext, new: *const TaskC
         "mov rbx, [rsi + 0x20]",
         "mov rbp, [rsi + 0x28]",
         "mov rsp, [rsi + 0x30]",
+        // Restore RFLAGS *after* RSP (so push/pop use the new task's
+        // kernel stack — necessary for popfq to land in the right place).
+        "mov rax, [rsi + 0x40]",
+        "push rax",
+        "popfq",
         // Jump to new task's saved RIP
         "jmp [rsi + 0x38]",
         // Label for the return point of the OLD task (when it's switched back to)

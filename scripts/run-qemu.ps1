@@ -76,7 +76,7 @@ if (-not $NoAccel) {
 $QemuArgs = @(
     "-machine", $Machine
     "-accel", $Accel
-    "-cpu", "qemu64"
+    "-cpu", "qemu64,+smep,+smap"
     "-m", "${Ram}M"
     "-drive", "if=pflash,format=raw,readonly=on,file=$OvmfCode"
     "-boot", "menu=on"

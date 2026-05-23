@@ -115,8 +115,22 @@ unsafe extern "C" fn syscall_entry() {
         "mov rsi, rdi",                     // arg1
         "mov rdi, rax",                     // syscall number
 
+        // STAC: set RFLAGS.AC=1 so the dispatcher (and every handler it
+        // reaches) can read/write user-mapped pages while SMAP is enabled
+        // on CR4. SMAP is the *default* — kernel code that isn't a syscall
+        // handler (IRQ routines, scheduler bookkeeping, network stack) has
+        // AC=0 and therefore can't touch user memory by accident. STAC is
+        // a NOP on CPUs that don't actually have SMAP enabled, so this
+        // is safe to emit unconditionally.
+        "stac",
+
         // Call Rust dispatcher
         "call {dispatch}",
+
+        // CLAC: drop AC=0 before restoring user state, so any spurious
+        // ring-0 user-memory access between here and SYSRETQ would still
+        // trip SMAP.
+        "clac",
 
         // RAX now contains the return value
         "add rsp, 8",                       // Pop arg6

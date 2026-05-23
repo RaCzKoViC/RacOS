@@ -24,7 +24,7 @@ if (Test-Path $SerialLog) { Remove-Item $SerialLog -Force }
 $args = @(
     "-machine", "q35",
     "-accel",   "tcg",
-    "-cpu",     "qemu64",
+    "-cpu",     "qemu64,+smep,+smap",
     "-m",       "512M",
     "-drive",   "if=pflash,format=raw,readonly=on,file=$OvmfCode",
     "-boot",    "menu=on",

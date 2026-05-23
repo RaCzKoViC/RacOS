@@ -56,20 +56,93 @@ _start:
 pub fn init() {
     gdt::init();
     idt::init();
-    crate::serial::serial_println!("[  0.000660] RACORE: SMEP/SMAP skipped (bring-up mode)");
+    enable_smep_smap();
+}
+
+/// CPUID feature bits we care about for ring-0 / ring-3 hardening:
+/// CPUID.(EAX=07h, ECX=0):EBX bit 7  → SMEP support
+/// CPUID.(EAX=07h, ECX=0):EBX bit 20 → SMAP support
+#[derive(Clone, Copy)]
+struct CpuFeatures {
+    smep: bool,
+    smap: bool,
+}
+
+fn detect_features() -> CpuFeatures {
+    // CPUID.0:EAX gives the maximum standard leaf. Bail out early if leaf 7
+    // isn't supported (very old CPUs / minimal hypervisor models).
+    let max_leaf: u32;
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "mov {tmp:e}, ebx",
+            "pop rbx",
+            inout("eax") 0u32 => max_leaf,
+            out("ecx") _, out("edx") _,
+            tmp = out(reg) _,
+            options(nostack, preserves_flags),
+        );
+    }
+    if max_leaf < 7 {
+        return CpuFeatures { smep: false, smap: false };
+    }
+    // CPUID leaf 7, sub-leaf 0 → feature bits in EBX.
+    let ebx: u32;
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "mov {ebx:e}, ebx",
+            "pop rbx",
+            inout("eax") 7u32 => _,
+            inout("ecx") 0u32 => _,
+            out("edx") _,
+            ebx = out(reg) ebx,
+            options(nostack, preserves_flags),
+        );
+    }
+    CpuFeatures {
+        smep: (ebx & (1 << 7))  != 0,
+        smap: (ebx & (1 << 20)) != 0,
+    }
 }
 
 /// Enable SMEP (Supervisor Mode Execution Prevention, CR4.bit20) and
-/// SMAP (Supervisor Mode Access Prevention, CR4.bit21) for security.
+/// SMAP (Supervisor Mode Access Prevention, CR4.bit21) when the host CPU
+/// supports them.
+///
+/// - SMEP causes a #PF when ring-0 tries to execute a page mapped U=1 (the
+///   classic "ret2usr" defense). Free win — we never intentionally jump
+///   into user pages from kernel mode, and SYSRET / IRETQ to ring 3 don't
+///   count as "ring-0 execution of a user page".
+///
+/// - SMAP causes a #PF when ring-0 reads/writes a U=1 page without
+///   AC=1 in RFLAGS. The syscall entry stub wraps the dispatcher in
+///   STAC/CLAC so handlers can still touch user buffers; everywhere else
+///   in the kernel (IRQ handlers, scheduler, network stack) is now blocked
+///   from touching user memory by accident.
 fn enable_smep_smap() {
+    let f = detect_features();
+    if !f.smep && !f.smap {
+        crate::serial::serial_println!(
+            "[  0.000660] RACORE: CPU exposes neither SMEP nor SMAP (CPUID.7:EBX), staying in bring-up mode"
+        );
+        return;
+    }
+    let mut bits: u64 = 0;
+    if f.smep { bits |= 1 << 20; }
+    if f.smap { bits |= 1 << 21; }
     unsafe {
         let mut cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
-        // SMEP = bit 20, SMAP = bit 21
-        cr4 |= (1 << 20) | (1 << 21);
+        cr4 |= bits;
         core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
     }
-    crate::serial::serial_println!("[  0.000050] RACORE: SMEP and SMAP enabled");
+    crate::serial::serial_println!(
+        "[  0.000660] RACORE: CR4 hardening: SMEP={} SMAP={}",
+        f.smep, f.smap,
+    );
 }
 
 /// Halt the CPU until the next interrupt.

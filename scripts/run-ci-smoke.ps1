@@ -62,7 +62,7 @@ if (Test-Path $KernelSrc) {
 $QemuArgs = @(
     "-machine", "q35",
     "-accel",   "tcg",
-    "-cpu",     "qemu64",
+    "-cpu",     "qemu64,+smep,+smap",
     "-smp",     "$Smp",
     "-m",       "512M",
     "-drive",   "if=pflash,format=raw,readonly=on,file=$OvmfCode",

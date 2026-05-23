@@ -233,7 +233,7 @@ jobs:
           # the mnt::roundtrip assertion is deterministic across CI invocations.
           dd if=/dev/zero of=ci-smoke-disk.img bs=1M count=16 status=none
           timeout 60 qemu-system-x86_64 \
-            -machine q35 -cpu qemu64 -m 512M \
+            -machine q35 -cpu qemu64,+smep,+smap -m 512M \
             -drive if=pflash,format=raw,file=$OVMF,readonly=on \
             -drive file=fat:rw:esp,format=raw \
             -drive id=disk0,file=ci-smoke-disk.img,if=none,format=raw,cache=writethrough \
@@ -314,7 +314,7 @@ jobs:
           if [ -z "$OVMF" ]; then echo "FAIL: no OVMF firmware"; exit 1; fi
           echo "Using OVMF=$OVMF"
           qemu-system-x86_64 \
-            -machine q35 -cpu qemu64 -m 512M \
+            -machine q35 -cpu qemu64,+smep,+smap -m 512M \
             -drive if=pflash,format=raw,file=$OVMF,readonly=on \
             -drive file=fat:rw:esp,format=raw \
             -chardev socket,id=ser,host=127.0.0.1,port=4444,server=on,wait=off \
