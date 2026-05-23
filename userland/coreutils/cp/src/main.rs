@@ -33,7 +33,10 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     match libc_lite::open(src_path, 0, 0) {
         Ok(src_fd) => {
             // Create destination file (write-only, truncate, create with 0o644)
-            match libc_lite::open(dst_path, 0x0601, 0o644) {  // O_WRONLY | O_CREAT | O_TRUNC
+            // O_WRONLY (0x0001) | O_CREAT (0x0040) | O_TRUNC (0x0200) = 0x0241.
+            // The previous value 0x0601 was O_WRONLY|O_APPEND|O_TRUNC and
+            // missed O_CREAT — cp would fail on any non-existent destination.
+            match libc_lite::open(dst_path, 0x0241, 0o644) {
                 Ok(dst_fd) => {
                     // Copy data
                     let mut buf = [0u8; 4096];

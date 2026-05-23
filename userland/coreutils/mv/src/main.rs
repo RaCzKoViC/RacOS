@@ -32,7 +32,9 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     // Copy source to destination
     match libc_lite::open(src_path, 0, 0) {
         Ok(src_fd) => {
-            match libc_lite::open(dst_path, 0x0601, 0o644) {
+            // O_WRONLY|O_CREAT|O_TRUNC = 0x0241 (was 0x0601 = WRONLY|APPEND|TRUNC,
+            // missing O_CREAT — mv failed on any non-existent destination).
+            match libc_lite::open(dst_path, 0x0241, 0o644) {
                 Ok(dst_fd) => {
                     // Copy data
                     let mut buf = [0u8; 4096];

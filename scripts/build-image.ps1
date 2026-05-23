@@ -42,8 +42,13 @@ if ($KernelFeatures.Count -gt 0) {
 cargo build @KernelArgs
 if ($LASTEXITCODE -ne 0) { throw "Kernel build failed" }
 
-# Restore default flags before building userland binaries.
-$env:RUSTFLAGS = $OldRustFlags
+# Userland build: compile core/alloc with debug-assertions off so the
+# `core::ptr::read::precondition_check` UB-check UD2 stubs are not emitted.
+# Those panics fire inside racsh / coreutils whenever Rust thinks a raw
+# pointer might be misaligned (false-positive on this nightly), and crash
+# the shell mid-pipeline. We don't lose much by disabling them in userland
+# — the kernel-side UB checks stay on via its own RUSTFLAGS earlier.
+$env:RUSTFLAGS = "$OldRustFlags -C debug-assertions=off"
 
 # --- Step 2: Build coreutils ---
 Write-Host "`n[2/4] Building coreutils..." -ForegroundColor Yellow

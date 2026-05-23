@@ -20,7 +20,11 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         let mut len = 0;
         unsafe { while *file_ptr.add(len) != 0 { len += 1; } }
         let path = unsafe { core::slice::from_raw_parts(file_ptr, len + 1) };
-        match libc_lite::open(path, 0x0601, 0o644) {
+        // O_WRONLY (0x0001) | O_CREAT (0x0040) | O_TRUNC (0x0200) = 0x0241.
+        // The previous value 0x0601 was O_WRONLY|O_APPEND|O_TRUNC and
+        // crucially missed O_CREAT, so `tee` could never create the output
+        // file and failed with "cannot open for writing" on any new path.
+        match libc_lite::open(path, 0x0241, 0o644) {
             Ok(fd) => {
                 fds[fd_count] = fd;
                 fd_count += 1;
