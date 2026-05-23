@@ -1,4 +1,15 @@
+# Pinned to a reproducible dated nightly. Floating `nightly` makes the
+# build implicitly depend on whichever rustc upstream shipped today,
+# which bit us a few times (UB-check changes, ABI tweaks). The date
+# below is the snapshot every RacOS commit on `main` is verified
+# against — bump only when you've run cargo fmt / clippy / check / the
+# kernel smoke green on the new date and tested an interactive QEMU
+# boot too.
+#
+# 2026-05-21 corresponds to rustc 1.97.0-nightly (b954122bb 2026-05-20)
+# which is the toolchain the Phase G.4.1 + Phase H step 1 commits were
+# verified against.
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-05-21"
 components = ["rust-src", "rustfmt", "clippy", "llvm-tools-preview"]
 targets = ["x86_64-unknown-none", "x86_64-unknown-uefi"]

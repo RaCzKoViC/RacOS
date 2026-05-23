@@ -34,10 +34,13 @@ RacOS to w pełni autorski system operacyjny budowany od zera — bez kopiowania
 
 ## Stos technologiczny
 
-- **Kernel**: Rust + x86_64 assembly
-- **Userland**: C17 + libc-lite (faza początkowa)
-- **Build**: clang/llvm, lld, nasm, cargo, just+ninja
-- **CI**: lint → build → unit tests → kernel tests → boot tests → integration tests → image build
+- **Kernel (RaCore)**: Rust `#![no_std]` + minimalny x86_64 assembly (boot stub, syscall entry, AP trampoline, context switch). Pełna lista invariantów w [`docs/language-policy.md`](docs/language-policy.md).
+- **Bootloader**: Rust `x86_64-unknown-uefi`.
+- **Userland (coreutils + sieć + shell + terminal + init)**: Rust `#![no_std]` na top of `libc-lite` (autorska crate na raw `syscall` instrukcji). Dziewięć pure-safe binaries (`true`, `false`, `df`, `env`, `id`, `mount`, `sync`, `sh`, `init`) ma `#![deny(unsafe_code)]` z lokalnym `#[allow(unsafe_code)]` tylko na `#[no_mangle]` C-ABI entry point.
+- **C kompatybilność**: warstwa ABI (`libc-lite` C ABI surface) jest jedynym miejscem gdzie C może być używane — głównie do testów ABI i przyszłych portów userland. Kernel i bootloader **nie są** pisane w C ani C++.
+- **Toolchain**: Rust nightly **przypięta do daty** (`nightly-2026-05-21`) przez `rust-toolchain.toml`. Bumpować dopiero po zielonym przebiegu `cargo fmt --check`, `cargo clippy`, `cargo check`, ci-smoke i interactive QEMU boot na nowej dacie.
+- **Build**: cargo + `-Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem`, link via rust-lld, PowerShell scripts do staging ESP i initramfs.
+- **CI**: GitHub Actions — lint (fmt + clippy advisory) → build (kernel + bootloader + userland) → unit/integration tests (host) → kernel smoke przez `isa-debug-exit` → boot smoke (UEFI) → interactive shell smoke przez TCP-serial.
 
 ## Struktura repozytorium
 

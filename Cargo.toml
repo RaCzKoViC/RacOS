@@ -103,6 +103,17 @@ edition = "2021"
 license = "Proprietary"
 repository = ""
 
+# Workspace-wide lint policy. Packages opt in via `[lints] workspace = true`
+# in their own Cargo.toml. The kernel, bootloader, libc-lite, and other
+# crates that need raw unsafe blocks for hardware/ABI/memory work do opt
+# in — `unsafe_op_in_unsafe_fn = "deny"` only changes *style* (every
+# unsafe op must sit in its own `unsafe { ... }` block, even inside an
+# `unsafe fn`), it doesn't outlaw unsafe code. Pure-safe userland
+# binaries instead use `#![forbid(unsafe_code)]` in their own source
+# file because that's a stronger guarantee than a workspace deny.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
 [profile.dev]
 panic = "abort"
 opt-level = 0

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! rapt — High-level package manager for RacOS
 //!
 //! Phase E MVP in this crate provides:

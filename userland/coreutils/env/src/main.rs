@@ -1,10 +1,12 @@
 #![no_std]
 #![no_main]
+#![deny(unsafe_code)]
 
 use libc_lite;
 
 /// env — print environment (stub: prints PWD and PATH from getcwd).
 /// In RacOS userland, env vars aren't inherited yet, so this is minimal.
+#[allow(unsafe_code)] // C ABI entry point: linker symbol exemption only
 #[no_mangle]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     // Print PWD

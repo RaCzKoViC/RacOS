@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! rpkg — Low-level package installer for RacOS
 //!
 //! Phase E MVP in this crate provides:

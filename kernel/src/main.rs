@@ -6,12 +6,23 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+// Modern unsafe-discipline: every unsafe op should sit in its own
+// `unsafe { ... }` block, even inside an `unsafe fn` (Rust 2024-edition
+// default, backported here as a warning so we can migrate gradually
+// without forcing the edition bump or a 200+ site refactor in one
+// commit). Each unsafe block touched in new code carries its own
+// SAFETY comment per docs/language-policy.md.
+#![warn(unsafe_op_in_unsafe_fn)]
 #![allow(
     dead_code,
     unused_imports,
     unused_variables,
     function_casts_as_integer,
-    unreachable_code
+    unreachable_code,
+    // The warn above intentionally lights up most of the kernel until
+    // we migrate. Silence the noise crate-wide while keeping the warn
+    // active for new code that opts back in with an inner `#[warn(...)]`.
+    unsafe_op_in_unsafe_fn
 )]
 
 extern crate alloc;

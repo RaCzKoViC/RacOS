@@ -85,7 +85,10 @@ fn detect_features() -> CpuFeatures {
         );
     }
     if max_leaf < 7 {
-        return CpuFeatures { smep: false, smap: false };
+        return CpuFeatures {
+            smep: false,
+            smap: false,
+        };
     }
     // CPUID leaf 7, sub-leaf 0 → feature bits in EBX.
     let ebx: u32;
@@ -103,7 +106,7 @@ fn detect_features() -> CpuFeatures {
         );
     }
     CpuFeatures {
-        smep: (ebx & (1 << 7))  != 0,
+        smep: (ebx & (1 << 7)) != 0,
         smap: (ebx & (1 << 20)) != 0,
     }
 }
@@ -131,8 +134,12 @@ fn enable_smep_smap() {
         return;
     }
     let mut bits: u64 = 0;
-    if f.smep { bits |= 1 << 20; }
-    if f.smap { bits |= 1 << 21; }
+    if f.smep {
+        bits |= 1 << 20;
+    }
+    if f.smap {
+        bits |= 1 << 21;
+    }
     unsafe {
         let mut cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
@@ -141,7 +148,8 @@ fn enable_smep_smap() {
     }
     crate::serial::serial_println!(
         "[  0.000660] RACORE: CR4 hardening: SMEP={} SMAP={}",
-        f.smep, f.smap,
+        f.smep,
+        f.smap,
     );
 }
 
