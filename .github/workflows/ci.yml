@@ -322,15 +322,20 @@ jobs:
             -display none -no-reboot \
             > qemu-host.log 2>&1 &
           QEMU_PID=$!
-          # Give QEMU/UEFI time to boot to the racsh prompt
-          sleep 5
-          # Drive racsh: send a few commands, capture serial replies for 6s
+          # Give QEMU/UEFI time to boot to the racsh prompt. TCG under
+          # ubuntu-latest is highly variable — measured boot has gone from
+          # ~3s to ~12s across runs, which is why this job alternated
+          # pass/fail historically. 15s here makes it tolerant.
+          sleep 15
+          # Drive racsh: send a few commands with generous spacing, then
+          # leave the channel open ~5s so trailing kernel log + prompt make
+          # it back into shell.log. timeout caps the whole exchange.
           (
-            sleep 1; printf 'pwd\n'
-            sleep 1; printf 'echo ci-smoke-ok\n'
-            sleep 1; printf 'cat /proc/version\n'
-            sleep 2
-          ) | timeout 8 ncat 127.0.0.1 4444 > shell.log || true
+            sleep 2; printf 'pwd\n'
+            sleep 2; printf 'echo ci-smoke-ok\n'
+            sleep 2; printf 'cat /proc/version\n'
+            sleep 5
+          ) | timeout 25 ncat 127.0.0.1 4444 > shell.log || true
           kill $QEMU_PID 2>/dev/null || true
           wait $QEMU_PID 2>/dev/null || true
           echo "--- qemu-host.log (whatever QEMU printed before being killed) ---"
