@@ -95,7 +95,9 @@ impl KernelHeapAllocator {
                 if prev.is_null() {
                     self.head = block.next;
                 } else {
-                    unsafe { (*prev).next = block.next; }
+                    unsafe {
+                        (*prev).next = block.next;
+                    }
                 }
                 let next_saved = block.next;
 
@@ -232,17 +234,23 @@ impl HeapSpinLock {
     }
 
     fn lock(&self) {
-        while self.locked.compare_exchange_weak(
-            false, true,
-            core::sync::atomic::Ordering::Acquire,
-            core::sync::atomic::Ordering::Relaxed,
-        ).is_err() {
+        while self
+            .locked
+            .compare_exchange_weak(
+                false,
+                true,
+                core::sync::atomic::Ordering::Acquire,
+                core::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
             core::hint::spin_loop();
         }
     }
 
     fn unlock(&self) {
-        self.locked.store(false, core::sync::atomic::Ordering::Release);
+        self.locked
+            .store(false, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -285,8 +293,8 @@ unsafe impl GlobalAlloc for LockedHeap {
 /// Must be called once during early kernel init, after phys allocator is ready.
 pub unsafe fn init() -> Result<(), &'static str> {
     let frames = INITIAL_HEAP_SIZE / FRAME_SIZE;
-    let base_frame = phys::alloc_contiguous(frames)
-        .map_err(|_| "Failed to allocate heap frames")?;
+    let base_frame =
+        phys::alloc_contiguous(frames).map_err(|_| "Failed to allocate heap frames")?;
 
     let heap_start = base_frame.addr() as usize;
 
@@ -317,7 +325,9 @@ mod tests {
 
     impl MockPhysAllocator {
         fn new() -> Self {
-            MockPhysAllocator { next_addr: 0x1000000 } // Start at 16MB
+            MockPhysAllocator {
+                next_addr: 0x1000000,
+            } // Start at 16MB
         }
 
         fn alloc(&self, frames: usize) -> Option<usize> {
@@ -326,7 +336,9 @@ mod tests {
         }
     }
 
-    static MOCK_PHYS: MockPhysAllocator = MockPhysAllocator { next_addr: 0x1000000 };
+    static MOCK_PHYS: MockPhysAllocator = MockPhysAllocator {
+        next_addr: 0x1000000,
+    };
 
     // Mock alloc_contiguous for tests
     fn mock_alloc_contiguous(frames: usize) -> Result<phys::PhysFrame, &'static str> {
@@ -340,7 +352,7 @@ mod tests {
     #[test]
     fn test_kernel_heap_allocator_basic() {
         let allocator = KernelHeapAllocator::empty();
-        
+
         // Test that allocator starts empty
         assert_eq!(allocator.heap_start, 0);
         assert_eq!(allocator.heap_size, 0);

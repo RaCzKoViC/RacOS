@@ -11,10 +11,10 @@
 
 extern crate alloc;
 
+use crate::sync::SpinLock;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::sync::SpinLock;
 
 use super::inode::{
     DirEntry, FileMode, FileType, InodeMetadata, InodeNum, InodeOps, VfsError, VfsResult,
@@ -112,11 +112,20 @@ impl DeviceOps for SerialDevice {
         for &byte in buf {
             match esc {
                 0 => {
-                    if byte == 0x1B { esc = 1; }
-                    else { crate::serial::serial_print!("{}", byte as char); }
+                    if byte == 0x1B {
+                        esc = 1;
+                    } else {
+                        crate::serial::serial_print!("{}", byte as char);
+                    }
                 }
-                1 => { esc = if byte == b'[' { 2 } else { 0 }; }
-                _ => { if (0x40..=0x7E).contains(&byte) { esc = 0; } }
+                1 => {
+                    esc = if byte == b'[' { 2 } else { 0 };
+                }
+                _ => {
+                    if (0x40..=0x7E).contains(&byte) {
+                        esc = 0;
+                    }
+                }
             }
         }
 
@@ -147,7 +156,9 @@ impl DeviceOps for UrandomDevice {
         seed ^= crate::task::scheduler::current_pid() as u64;
         seed ^= buf.len() as u64;
         for byte in buf.iter_mut() {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *byte = (seed >> 33) as u8;
         }
         Ok(buf.len())
@@ -221,7 +232,14 @@ impl Devfs {
     }
 
     /// Register a device. Returns the inode number.
-    pub fn register(&mut self, name: &str, dev_type: DeviceType, major: u32, minor: u32, ops: Arc<dyn DeviceOps>) -> InodeNum {
+    pub fn register(
+        &mut self,
+        name: &str,
+        dev_type: DeviceType,
+        major: u32,
+        minor: u32,
+        ops: Arc<dyn DeviceOps>,
+    ) -> InodeNum {
         let ino = (self.devices.len() + 1) as InodeNum; // inode 0 = root dir
         self.devices.push(DeviceNode {
             name: String::from(name),
@@ -234,7 +252,10 @@ impl Devfs {
 
         crate::serial::serial_println!(
             "[  DEVFS  ] Registered /dev/{} ({:?}, {}:{})",
-            name, dev_type, major, minor
+            name,
+            dev_type,
+            major,
+            minor
         );
 
         ino
@@ -256,7 +277,13 @@ impl Devfs {
         self.register("stderr", DeviceType::Char, 0, 2, Arc::new(SerialDevice));
         // Register block devices from the block driver subsystem.
         if let Some(ram0) = crate::drivers::block::find("ram0") {
-            self.register("ram0", DeviceType::Block, 8, 0, Arc::new(RamBlockDevOps::new(ram0)));
+            self.register(
+                "ram0",
+                DeviceType::Block,
+                8,
+                0,
+                Arc::new(RamBlockDevOps::new(ram0)),
+            );
         }
     }
 }
@@ -288,9 +315,12 @@ impl DeviceOps for RamBlockDevOps {
         while done < to_read {
             let lba = pos / SECTOR_SIZE as u64;
             let off_in_sector = (pos % SECTOR_SIZE as u64) as usize;
-            self.dev.read_sector(lba, &mut sector_buf).map_err(|_| VfsError::IoError)?;
+            self.dev
+                .read_sector(lba, &mut sector_buf)
+                .map_err(|_| VfsError::IoError)?;
             let chunk = (SECTOR_SIZE - off_in_sector).min(to_read - done);
-            buf[done..done + chunk].copy_from_slice(&sector_buf[off_in_sector..off_in_sector + chunk]);
+            buf[done..done + chunk]
+                .copy_from_slice(&sector_buf[off_in_sector..off_in_sector + chunk]);
             done += chunk;
             pos += chunk as u64;
         }
@@ -314,11 +344,16 @@ impl DeviceOps for RamBlockDevOps {
             let off_in_sector = (pos % SECTOR_SIZE as u64) as usize;
             // Read-modify-write for partial sector writes.
             if off_in_sector != 0 || (to_write - done) < SECTOR_SIZE {
-                self.dev.read_sector(lba, &mut sector_buf).map_err(|_| VfsError::IoError)?;
+                self.dev
+                    .read_sector(lba, &mut sector_buf)
+                    .map_err(|_| VfsError::IoError)?;
             }
             let chunk = (SECTOR_SIZE - off_in_sector).min(to_write - done);
-            sector_buf[off_in_sector..off_in_sector + chunk].copy_from_slice(&buf[done..done + chunk]);
-            self.dev.write_sector(lba, &sector_buf).map_err(|_| VfsError::IoError)?;
+            sector_buf[off_in_sector..off_in_sector + chunk]
+                .copy_from_slice(&buf[done..done + chunk]);
+            self.dev
+                .write_sector(lba, &sector_buf)
+                .map_err(|_| VfsError::IoError)?;
             done += chunk;
             pos += chunk as u64;
         }
@@ -440,5 +475,7 @@ impl Filesystem for DevfsFilesystem {
         "devfs"
     }
 
-    fn as_any(&self) -> &dyn core::any::Any { self }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }

@@ -20,14 +20,20 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     }
 
     // Get start time
-    let mut start = libc_lite::Timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut start = libc_lite::Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     let _ = libc_lite::clock_gettime(libc_lite::CLOCK_MONOTONIC, &mut start);
 
     let target = start.tv_sec + secs;
 
     // Busy-wait loop
     loop {
-        let mut now = libc_lite::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut now = libc_lite::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let _ = libc_lite::clock_gettime(libc_lite::CLOCK_MONOTONIC, &mut now);
         if now.tv_sec >= target {
             break;
@@ -52,6 +58,8 @@ fn parse_u64(s: &[u8]) -> u64 {
 unsafe fn arg_name(argv: *const *const u8, i: usize) -> &'static [u8] {
     let ptr = *argv.add(i);
     let mut len = 0;
-    while *ptr.add(len) != 0 { len += 1; }
+    while *ptr.add(len) != 0 {
+        len += 1;
+    }
     core::slice::from_raw_parts(ptr, len)
 }

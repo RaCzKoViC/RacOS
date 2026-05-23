@@ -1,10 +1,10 @@
 // RaCore — Kernel Synchronisation Primitives
-// 
+//
 // Implements spinlocks and other low-level sync tools for internal kernel use.
 
-use core::sync::atomic::{AtomicBool, Ordering};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Simple spinlock implementation using atomic operations.
 pub struct SpinLock<T> {
@@ -22,7 +22,11 @@ impl<T> SpinLock<T> {
 
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
         // Spin until we get the lock.
-        while self.lock.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        while self
+            .lock
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             core::hint::spin_loop();
         }
         SpinLockGuard { lock_ref: self }
@@ -32,7 +36,11 @@ impl<T> SpinLock<T> {
     /// Safe to call from interrupt handlers — they can skip work instead of
     /// deadlocking against the interrupted code.
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
-        if self.lock.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        if self
+            .lock
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
             Some(SpinLockGuard { lock_ref: self })
         } else {
             None

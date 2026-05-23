@@ -61,12 +61,12 @@ struct MadtHeader {
 }
 
 // MADT entry tags.
-const MADT_LAPIC:        u8 = 0;
-const MADT_IOAPIC:       u8 = 1;
+const MADT_LAPIC: u8 = 0;
+const MADT_IOAPIC: u8 = 1;
 const MADT_INT_OVERRIDE: u8 = 2;
-const MADT_LAPIC_NMI:    u8 = 4;
-const MADT_LAPIC_OVR:    u8 = 5;
-const MADT_X2APIC:       u8 = 9;
+const MADT_LAPIC_NMI: u8 = 4;
+const MADT_LAPIC_OVR: u8 = 5;
+const MADT_X2APIC: u8 = 9;
 
 #[repr(C, packed)]
 struct MadtLapic {
@@ -142,7 +142,9 @@ impl AcpiInfo {
         }
     }
 
-    pub fn cpu_count(&self) -> usize { self.cpus.len() }
+    pub fn cpu_count(&self) -> usize {
+        self.cpus.len()
+    }
     pub fn enabled_cpu_count(&self) -> usize {
         self.cpus.iter().filter(|c| c.enabled).count()
     }
@@ -189,13 +191,18 @@ pub unsafe fn init(rsdp_addr: u64) {
     for cpu in &info.cpus {
         crate::serial::serial_println!(
             "[  0.000520] RACORE:   CPU acpi_uid={} apic_id={} enabled={} x2apic={}",
-            cpu.acpi_uid, cpu.apic_id, cpu.enabled, cpu.is_x2apic,
+            cpu.acpi_uid,
+            cpu.apic_id,
+            cpu.enabled,
+            cpu.is_x2apic,
         );
     }
     for io in &info.ioapics {
         crate::serial::serial_println!(
             "[  0.000530] RACORE:   IOAPIC id={} addr=0x{:08X} gsi_base={}",
-            io.id, io.address, io.gsi_base,
+            io.id,
+            io.address,
+            io.gsi_base,
         );
     }
 
@@ -229,29 +236,48 @@ unsafe fn parse_rsdp(addr: u64) -> Result<AcpiInfo, &'static str> {
         }
         let xsdt_addr = rsdp2.xsdt_address;
         parse_sdt_array(
-            xsdt_addr, /*is_xsdt=*/true,
-            &mut cpus, &mut ioapics, &mut lapic_addr,
+            xsdt_addr,
+            /*is_xsdt=*/ true,
+            &mut cpus,
+            &mut ioapics,
+            &mut lapic_addr,
         )?;
     } else {
         let rsdt_addr = rsdp.rsdt_address as u64;
         parse_sdt_array(
-            rsdt_addr, /*is_xsdt=*/false,
-            &mut cpus, &mut ioapics, &mut lapic_addr,
+            rsdt_addr,
+            /*is_xsdt=*/ false,
+            &mut cpus,
+            &mut ioapics,
+            &mut lapic_addr,
         )?;
     }
 
     if cpus.is_empty() {
         // MADT absent or empty — synthesize the BSP so the rest of bring-up
         // has something to talk about.
-        cpus.push(CpuInfo { acpi_uid: 0, apic_id: 0, enabled: true, is_x2apic: false });
+        cpus.push(CpuInfo {
+            acpi_uid: 0,
+            apic_id: 0,
+            enabled: true,
+            is_x2apic: false,
+        });
     }
 
-    Ok(AcpiInfo { revision, lapic_addr, cpus, ioapics })
+    Ok(AcpiInfo {
+        revision,
+        lapic_addr,
+        cpus,
+        ioapics,
+    })
 }
 
 unsafe fn parse_sdt_array(
-    sdt_addr: u64, is_xsdt: bool,
-    cpus: &mut Vec<CpuInfo>, ioapics: &mut Vec<IoApicInfo>, lapic_addr: &mut u64,
+    sdt_addr: u64,
+    is_xsdt: bool,
+    cpus: &mut Vec<CpuInfo>,
+    ioapics: &mut Vec<IoApicInfo>,
+    lapic_addr: &mut u64,
 ) -> Result<(), &'static str> {
     if sdt_addr == 0 {
         return Err("null RSDT/XSDT address");
@@ -281,7 +307,9 @@ unsafe fn parse_sdt_array(
             ptr::copy_nonoverlapping(entries_ptr.add(i * 4), b.as_mut_ptr(), 4);
             u32::from_le_bytes(b) as u64
         };
-        if entry_addr == 0 { continue; }
+        if entry_addr == 0 {
+            continue;
+        }
 
         let entry_hdr = &*(entry_addr as *const SdtHeader);
         if &entry_hdr.signature == MADT_SIG {
@@ -296,19 +324,21 @@ unsafe fn parse_sdt_array(
 
 unsafe fn parse_madt(
     addr: u64,
-    cpus: &mut Vec<CpuInfo>, ioapics: &mut Vec<IoApicInfo>, lapic_addr: &mut u64,
+    cpus: &mut Vec<CpuInfo>,
+    ioapics: &mut Vec<IoApicInfo>,
+    lapic_addr: &mut u64,
 ) {
     let madt = &*(addr as *const MadtHeader);
     let total_len = madt.header.length as usize;
     *lapic_addr = madt.local_apic_address as u64;
 
     let entries_start = addr as usize + core::mem::size_of::<MadtHeader>();
-    let entries_end   = addr as usize + total_len;
+    let entries_end = addr as usize + total_len;
     let mut p = entries_start;
 
     while p + 2 <= entries_end {
         let entry_type = *(p as *const u8);
-        let entry_len  = *((p + 1) as *const u8) as usize;
+        let entry_len = *((p + 1) as *const u8) as usize;
         if entry_len < 2 || p + entry_len > entries_end {
             break;
         }
@@ -319,7 +349,7 @@ unsafe fn parse_madt(
                 let enabled = (e.flags & 0x3) != 0;
                 cpus.push(CpuInfo {
                     acpi_uid: e.acpi_processor_id as u32,
-                    apic_id:  e.apic_id as u32,
+                    apic_id: e.apic_id as u32,
                     enabled,
                     is_x2apic: false,
                 });
@@ -337,7 +367,7 @@ unsafe fn parse_madt(
                 let enabled = (e.flags & 0x3) != 0;
                 cpus.push(CpuInfo {
                     acpi_uid: e.acpi_processor_uid,
-                    apic_id:  e.x2apic_id,
+                    apic_id: e.x2apic_id,
                     enabled,
                     is_x2apic: true,
                 });

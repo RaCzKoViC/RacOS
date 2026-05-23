@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use libc_lite::{clock_gettime, Timespec, CLOCK_MONOTONIC, print, println};
+use libc_lite::{clock_gettime, print, println, Timespec, CLOCK_MONOTONIC};
 
 fn print_num(mut n: u64) {
     if n == 0 {
@@ -24,7 +24,10 @@ fn print_num(mut n: u64) {
 
 #[no_mangle]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     match clock_gettime(CLOCK_MONOTONIC, &mut ts) {
         Ok(()) => {
             let hours = ts.tv_sec / 3600;

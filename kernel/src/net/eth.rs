@@ -17,13 +17,22 @@ pub struct EthHeader {
 impl EthHeader {
     /// Parse the first 14 bytes of an Ethernet II frame. Returns `None` if too short.
     pub fn parse(frame: &[u8]) -> Option<(Self, &[u8])> {
-        if frame.len() < ETH_HDR_LEN { return None; }
+        if frame.len() < ETH_HDR_LEN {
+            return None;
+        }
         let mut dst = [0u8; 6];
         let mut src = [0u8; 6];
         dst.copy_from_slice(&frame[0..6]);
         src.copy_from_slice(&frame[6..12]);
         let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
-        Some((EthHeader { dst, src, ethertype }, &frame[ETH_HDR_LEN..]))
+        Some((
+            EthHeader {
+                dst,
+                src,
+                ethertype,
+            },
+            &frame[ETH_HDR_LEN..],
+        ))
     }
 }
 

@@ -22,9 +22,17 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 
     // Get lengths
     let mut src_len = 0usize;
-    unsafe { while *src_ptr.add(src_len) != 0 { src_len += 1; } }
+    unsafe {
+        while *src_ptr.add(src_len) != 0 {
+            src_len += 1;
+        }
+    }
     let mut dst_len = 0usize;
-    unsafe { while *dst_ptr.add(dst_len) != 0 { dst_len += 1; } }
+    unsafe {
+        while *dst_ptr.add(dst_len) != 0 {
+            dst_len += 1;
+        }
+    }
 
     let src_path = unsafe { core::slice::from_raw_parts(src_ptr, src_len + 1) };
     let dst_path = unsafe { core::slice::from_raw_parts(dst_ptr, dst_len + 1) };
@@ -43,17 +51,15 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
                     loop {
                         match libc_lite::read(src_fd, &mut buf) {
                             Ok(0) => break,
-                            Ok(n) => {
-                                match libc_lite::write(dst_fd, &buf[..n]) {
-                                    Ok(_) => {}
-                                    Err(_) => {
-                                        let _ = libc_lite::write(2, b"cp: write error\n");
-                                        let _ = libc_lite::close(src_fd);
-                                        let _ = libc_lite::close(dst_fd);
-                                        return 1;
-                                    }
+                            Ok(n) => match libc_lite::write(dst_fd, &buf[..n]) {
+                                Ok(_) => {}
+                                Err(_) => {
+                                    let _ = libc_lite::write(2, b"cp: write error\n");
+                                    let _ = libc_lite::close(src_fd);
+                                    let _ = libc_lite::close(dst_fd);
+                                    return 1;
                                 }
-                            }
+                            },
                             Err(_) => {
                                 let _ = libc_lite::write(2, b"cp: read error\n");
                                 let _ = libc_lite::close(src_fd);

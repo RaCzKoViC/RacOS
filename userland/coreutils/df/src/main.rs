@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use libc_lite::{open, read, close, write, print, println};
+use libc_lite::{close, open, print, println, read, write};
 
 fn print_u64_right(n: u64, width: usize) {
     let mut digits = [0u8; 20];
@@ -45,7 +45,10 @@ fn print_str_left(s: &str, width: usize) {
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let fd = match open(b"/proc/diskstats\0", 0, 0) {
         Ok(fd) => fd,
-        Err(_) => { println("df: cannot open /proc/diskstats"); return 1; }
+        Err(_) => {
+            println("df: cannot open /proc/diskstats");
+            return 1;
+        }
     };
 
     let mut raw = [0u8; 2048];
@@ -53,7 +56,12 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     loop {
         match read(fd, &mut raw[total_read..]) {
             Ok(0) => break,
-            Ok(n) => { total_read += n; if total_read >= raw.len() { break; } }
+            Ok(n) => {
+                total_read += n;
+                if total_read >= raw.len() {
+                    break;
+                }
+            }
             Err(_) => break,
         }
     }
@@ -61,7 +69,10 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
     let text = match core::str::from_utf8(&raw[..total_read]) {
         Ok(s) => s,
-        Err(_) => { println("df: invalid utf8 in /proc/diskstats"); return 1; }
+        Err(_) => {
+            println("df: invalid utf8 in /proc/diskstats");
+            return 1;
+        }
     };
 
     // Header.
@@ -75,22 +86,31 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
     for line in text.split('\n') {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         // Fields: mount total used free total_ino free_ino
         let mut it = line.split_ascii_whitespace();
-        let mount = match it.next() { Some(s) => s, None => continue };
+        let mount = match it.next() {
+            Some(s) => s,
+            None => continue,
+        };
         let total: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let used:  u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let free:  u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let _ti:   u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let fi:    u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let used: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let free: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let _ti: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let fi: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
 
         print_str_left(mount, 14);
-        print_u64_right(total, 11); print(" ");
-        print_u64_right(used,  11); print(" ");
-        print_u64_right(free,  11); print(" ");
+        print_u64_right(total, 11);
+        print(" ");
+        print_u64_right(used, 11);
+        print(" ");
+        print_u64_right(free, 11);
+        print(" ");
         let pct = if total > 0 { (used * 100) / total } else { 0 };
-        print_u64_right(pct, 5); print("%  ");
+        print_u64_right(pct, 5);
+        print("%  ");
         print_u64_right(fi, 12);
         print("\n");
     }

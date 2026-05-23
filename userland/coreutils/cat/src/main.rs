@@ -13,10 +13,16 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     } else {
         for i in 1..argc {
             let arg_ptr = unsafe { *argv.add(i as usize) };
-            if arg_ptr.is_null() { continue; }
+            if arg_ptr.is_null() {
+                continue;
+            }
             // Find length
             let mut len = 0usize;
-            unsafe { while *arg_ptr.add(len) != 0 { len += 1; } }
+            unsafe {
+                while *arg_ptr.add(len) != 0 {
+                    len += 1;
+                }
+            }
             if len == 1 && unsafe { *arg_ptr } == b'-' {
                 cat_fd(0); // "-" means stdin
             } else {
@@ -44,7 +50,9 @@ fn cat_fd(fd: i32) {
     loop {
         match libc_lite::read(fd, &mut buf) {
             Ok(0) => break,
-            Ok(n) => { let _ = libc_lite::write(1, &buf[..n]); }
+            Ok(n) => {
+                let _ = libc_lite::write(1, &buf[..n]);
+            }
             Err(_) => break,
         }
     }

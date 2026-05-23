@@ -34,11 +34,15 @@ struct StatBuf {
 macro_rules! check {
     ($name:expr, $cond:expr) => {
         if $cond {
-            unsafe { PASS += 1; }
+            unsafe {
+                PASS += 1;
+            }
             print("  [PASS] ");
             println($name);
         } else {
-            unsafe { FAIL += 1; }
+            unsafe {
+                FAIL += 1;
+            }
             print("  [FAIL] ");
             println($name);
         }
@@ -89,7 +93,11 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     print_u32(fail);
     println(" failed ===");
 
-    if fail > 0 { 1 } else { 0 }
+    if fail > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ─────────────────────────────────────────────────

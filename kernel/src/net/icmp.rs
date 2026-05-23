@@ -23,8 +23,12 @@ pub fn write_echo(out: &mut [u8], echo_type: u8, identifier: u16, seq: u16, payl
 
 /// Parse and validate an ICMP message. Returns (type, code, identifier, seq, payload).
 pub fn parse(msg: &[u8]) -> Option<(u8, u8, u16, u16, &[u8])> {
-    if msg.len() < ICMP_HDR_LEN { return None; }
-    if ipv4::checksum(msg) != 0 { return None; }
+    if msg.len() < ICMP_HDR_LEN {
+        return None;
+    }
+    if ipv4::checksum(msg) != 0 {
+        return None;
+    }
     let t = msg[0];
     let c = msg[1];
     let id = u16::from_be_bytes([msg[4], msg[5]]);

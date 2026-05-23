@@ -213,9 +213,7 @@ impl EscParser {
             // BEL terminates OSC
             0x07 => {
                 self.state = State::Ground;
-                let s = core::str::from_utf8(&self.osc_buf)
-                    .unwrap_or("")
-                    .into();
+                let s = core::str::from_utf8(&self.osc_buf).unwrap_or("").into();
                 Some(Action::OscDispatch(s))
             }
             // ESC might start ST (ESC \)
@@ -223,9 +221,7 @@ impl EscParser {
                 // We'll optimistically treat any ESC as OSC terminator
                 // A proper implementation would check for backslash next
                 self.state = State::Ground;
-                let s = core::str::from_utf8(&self.osc_buf)
-                    .unwrap_or("")
-                    .into();
+                let s = core::str::from_utf8(&self.osc_buf).unwrap_or("").into();
                 Some(Action::OscDispatch(s))
             }
             _ => {

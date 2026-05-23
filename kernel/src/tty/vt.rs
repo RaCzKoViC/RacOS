@@ -5,9 +5,9 @@
 
 #![allow(static_mut_refs)]
 
-use alloc::vec::Vec;
+use crate::fb_console::{get_console, Color, FramebufferConsole};
 use alloc::vec;
-use crate::fb_console::{Color, FramebufferConsole, get_console};
+use alloc::vec::Vec;
 
 /// Number of virtual terminals (standard 6).
 pub const MAX_VT: usize = 6;
@@ -100,9 +100,13 @@ impl VirtualTerminal {
                 self.cursor_x = 0;
                 self.cursor_y += 1;
             }
-            b'\r' => { self.cursor_x = 0; }
+            b'\r' => {
+                self.cursor_x = 0;
+            }
             b'\x08' => {
-                if self.cursor_x > 0 { self.cursor_x -= 1; }
+                if self.cursor_x > 0 {
+                    self.cursor_x -= 1;
+                }
             }
             _ => {
                 let idx = (self.cursor_y * self.cols + self.cursor_x) as usize;
@@ -132,7 +136,8 @@ impl VirtualTerminal {
             b'\r' => {
                 self.cursor_x = 0;
             }
-            b'\x08' => { // Backspace
+            b'\x08' => {
+                // Backspace
                 if self.cursor_x > 0 {
                     self.cursor_x -= 1;
                 }
@@ -204,7 +209,7 @@ impl VirtualTerminal {
     pub fn redraw(&self) {
         if let Some(console) = unsafe { get_console() } {
             console.clear();
-            
+
             // Temporary: print VT header
             let msg = alloc::format!("--- Virtual Terminal {} ---\n", self.id + 1);
             console.write_str(&msg);
@@ -249,10 +254,7 @@ impl VtManager {
         // Set VT1 as active
         vts[0].set_active(true);
 
-        VtManager {
-            vts,
-            current_vt: 0,
-        }
+        VtManager { vts, current_vt: 0 }
     }
 
     /// Switch to a specific VT.

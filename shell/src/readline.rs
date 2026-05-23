@@ -229,9 +229,7 @@ fn handle_escape(state: &mut LineState, history: &History, prompt: &str) {
             }
             if state.hist_idx == 0 {
                 // Save current line before browsing
-                state.saved_line = String::from(
-                    core::str::from_utf8(&state.buf).unwrap_or("")
-                );
+                state.saved_line = String::from(core::str::from_utf8(&state.buf).unwrap_or(""));
             }
             if state.hist_idx < history.len() {
                 state.hist_idx += 1;

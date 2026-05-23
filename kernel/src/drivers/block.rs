@@ -115,12 +115,22 @@ pub unsafe fn register(device: Arc<dyn BlockDevice>) {
 }
 
 pub fn count() -> usize {
-    unsafe { (*core::ptr::addr_of!(DEVICES)).as_ref().map(|d| d.len()).unwrap_or(0) }
+    unsafe {
+        (*core::ptr::addr_of!(DEVICES))
+            .as_ref()
+            .map(|d| d.len())
+            .unwrap_or(0)
+    }
 }
 
 /// Get a block device by index.
 pub fn get(index: usize) -> Option<Arc<dyn BlockDevice>> {
-    unsafe { (*core::ptr::addr_of!(DEVICES)).as_ref()?.get(index).cloned() }
+    unsafe {
+        (*core::ptr::addr_of!(DEVICES))
+            .as_ref()?
+            .get(index)
+            .cloned()
+    }
 }
 
 /// Find a block device by name.

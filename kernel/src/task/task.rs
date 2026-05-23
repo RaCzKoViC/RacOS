@@ -140,8 +140,11 @@ impl Task {
         unsafe {
             // Guard page: fill with sentinel byte so scheduler.check_kernel_stack_guard
             // can detect an overflow at the next context switch.
-            core::ptr::write_bytes(alloc_base as *mut u8, KERNEL_STACK_GUARD_BYTE,
-                                   KERNEL_STACK_GUARD_PAGES * phys::FRAME_SIZE);
+            core::ptr::write_bytes(
+                alloc_base as *mut u8,
+                KERNEL_STACK_GUARD_BYTE,
+                KERNEL_STACK_GUARD_PAGES * phys::FRAME_SIZE,
+            );
             // Usable stack: zeroed.
             core::ptr::write_bytes(stack_base as *mut u8, 0, KERNEL_STACK_SIZE);
         }
@@ -230,8 +233,8 @@ unsafe extern "C" fn task_entry_trampoline() -> ! {
     // for new tasks after their first context switch.
     // RBX was set to the entry function in Task::new_kernel.
     core::arch::naked_asm!(
-        "sti",       // Re-enable interrupts
-        "call rbx",  // Call the actual entry function (fn() -> !)
-        "ud2",       // Should never reach here
+        "sti",      // Re-enable interrupts
+        "call rbx", // Call the actual entry function (fn() -> !)
+        "ud2",      // Should never reach here
     );
 }

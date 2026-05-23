@@ -84,7 +84,9 @@ impl Tmpfs {
     }
 
     fn set_total_bytes(&self, v: usize) {
-        unsafe { *self.total_bytes.get() = v; }
+        unsafe {
+            *self.total_bytes.get() = v;
+        }
     }
 
     /// Allocate a new inode.
@@ -123,7 +125,9 @@ impl Tmpfs {
         });
 
         // Add to parent's children
-        let parent = nodes.get_mut(parent_ino as usize).ok_or(VfsError::NotFound)?;
+        let parent = nodes
+            .get_mut(parent_ino as usize)
+            .ok_or(VfsError::NotFound)?;
         parent.children.push(ino);
         Ok(ino)
     }
@@ -157,7 +161,9 @@ impl Tmpfs {
             removed: false,
         });
 
-        let parent = nodes.get_mut(parent_ino as usize).ok_or(VfsError::NotFound)?;
+        let parent = nodes
+            .get_mut(parent_ino as usize)
+            .ok_or(VfsError::NotFound)?;
         parent.children.push(ino);
         Ok(ino)
     }
@@ -187,7 +193,9 @@ impl Tmpfs {
         // If directory, check it's empty
         let child = nodes.get(child_ino as usize).ok_or(VfsError::NotFound)?;
         if child.file_type == FileType::Directory {
-            let active_children = child.children.iter()
+            let active_children = child
+                .children
+                .iter()
                 .filter(|&&c| nodes.get(c as usize).map(|n| !n.removed).unwrap_or(false))
                 .count();
             if active_children > 0 {
@@ -202,7 +210,9 @@ impl Tmpfs {
         nodes[child_ino as usize].removed = true;
 
         // Remove from parent's children list
-        let parent = nodes.get_mut(parent_ino as usize).ok_or(VfsError::NotFound)?;
+        let parent = nodes
+            .get_mut(parent_ino as usize)
+            .ok_or(VfsError::NotFound)?;
         parent.children.remove(idx);
         Ok(())
     }
@@ -413,7 +423,10 @@ impl TmpfsFilesystem {
 
 impl Filesystem for TmpfsFilesystem {
     fn root_inode(&self) -> Arc<dyn InodeOps> {
-        Arc::new(TmpfsInode { ino: 0, fs: self.inner.clone() })
+        Arc::new(TmpfsInode {
+            ino: 0,
+            fs: self.inner.clone(),
+        })
     }
 
     fn get_inode(&self, ino: InodeNum) -> VfsResult<Arc<dyn InodeOps>> {
@@ -424,14 +437,19 @@ impl Filesystem for TmpfsFilesystem {
         if nodes[ino as usize].removed {
             return Err(VfsError::NotFound);
         }
-        Ok(Arc::new(TmpfsInode { ino, fs: self.inner.clone() }))
+        Ok(Arc::new(TmpfsInode {
+            ino,
+            fs: self.inner.clone(),
+        }))
     }
 
     fn name(&self) -> &str {
         "tmpfs"
     }
 
-    fn as_any(&self) -> &dyn core::any::Any { self }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
 /// Global tmpfs instance for /tmp.
@@ -445,7 +463,10 @@ pub unsafe fn init() -> Arc<Tmpfs> {
     let tmpfs = Tmpfs::new();
     let inst = &mut *core::ptr::addr_of_mut!(TMPFS_INSTANCE);
     *inst = Some(tmpfs.clone());
-    crate::serial::serial_println!("[  0.000350] RACORE: tmpfs initialized (max {} KiB)", TMPFS_MAX_SIZE / 1024);
+    crate::serial::serial_println!(
+        "[  0.000350] RACORE: tmpfs initialized (max {} KiB)",
+        TMPFS_MAX_SIZE / 1024
+    );
     tmpfs
 }
 

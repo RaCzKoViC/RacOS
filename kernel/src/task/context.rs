@@ -45,7 +45,7 @@ impl TaskContext {
         extern "C" {
             fn user_task_trampoline();
         }
-        
+
         let mut context = Self::new();
         // The trampoline is written in assembly to secure ring transitions.
         // It resides in the kernel code but will switch to ring 3.
@@ -87,7 +87,6 @@ pub unsafe extern "C" fn context_switch(old: *mut TaskContext, new: *const TaskC
         // Save return address as RIP
         "lea rax, [rip + 2f]",
         "mov [rdi + 0x38], rax",
-
         // Restore callee-saved registers from new context (RSI = new)
         "mov r15, [rsi + 0x00]",
         "mov r14, [rsi + 0x08]",
@@ -96,10 +95,8 @@ pub unsafe extern "C" fn context_switch(old: *mut TaskContext, new: *const TaskC
         "mov rbx, [rsi + 0x20]",
         "mov rbp, [rsi + 0x28]",
         "mov rsp, [rsi + 0x30]",
-
         // Jump to new task's saved RIP
         "jmp [rsi + 0x38]",
-
         // Label for the return point of the OLD task (when it's switched back to)
         "2:",
         "ret",

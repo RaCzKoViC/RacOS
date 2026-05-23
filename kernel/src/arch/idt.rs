@@ -89,13 +89,17 @@ macro_rules! exception_handler {
 
 macro_rules! exception_handler_with_error {
     ($name:ident, $vector:expr, $msg:expr) => {
-        extern "x86-interrupt" fn $name(
-            _stack_frame: &InterruptStackFrame,
-            error_code: u64,
-        ) {
-            crate::serial::serial_println!("!!! EXCEPTION #{}: {} (error: 0x{:X}) !!!", $vector, $msg, error_code);
+        extern "x86-interrupt" fn $name(_stack_frame: &InterruptStackFrame, error_code: u64) {
+            crate::serial::serial_println!(
+                "!!! EXCEPTION #{}: {} (error: 0x{:X}) !!!",
+                $vector,
+                $msg,
+                error_code
+            );
             loop {
-                unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
+                unsafe {
+                    core::arch::asm!("cli; hlt", options(nomem, nostack));
+                }
             }
         }
     };
@@ -127,16 +131,13 @@ exception_handler_with_error!(stack_segment_fault, 12, "Stack-Segment Fault");
 exception_handler_with_error!(general_protection, 13, "General Protection Fault");
 
 /// Page Fault handler — if user space, kill process; if kernel, halt.
-extern "x86-interrupt" fn page_fault(
-    stack_frame: &InterruptStackFrame,
-    error_code: u64,
-) {
+extern "x86-interrupt" fn page_fault(stack_frame: &InterruptStackFrame, error_code: u64) {
     let rip = stack_frame.instruction_pointer;
     let cs = stack_frame.code_segment;
     let cpl = cs & 0x3;
     let current_pid = crate::task::scheduler::current_pid();
-    let current_is_user_task = current_pid >= 100
-        && crate::task::scheduler::current_page_table_phys() != 0;
+    let current_is_user_task =
+        current_pid >= 100 && crate::task::scheduler::current_page_table_phys() != 0;
     let fault_addr: u64;
     unsafe {
         core::arch::asm!("mov {}, cr2", out(reg) fault_addr, options(nomem, nostack));
@@ -154,7 +155,9 @@ extern "x86-interrupt" fn page_fault(
         );
         // Signal handling is not complete yet; terminate immediately to avoid
         // fault loops on the same instruction.
-        unsafe { crate::task::scheduler::exit_current(128 + 11); }
+        unsafe {
+            crate::task::scheduler::exit_current(128 + 11);
+        }
     }
 
     // Fault in kernel space — this is a kernel bug
@@ -166,7 +169,9 @@ extern "x86-interrupt" fn page_fault(
         error_code,
     );
     loop {
-        unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("cli; hlt", options(nomem, nostack));
+        }
     }
 }
 exception_handler!(x87_floating_point, 16, "x87 Floating-Point");
@@ -184,7 +189,9 @@ pub unsafe fn com1_poke(byte: u8) {
     loop {
         let status: u8;
         core::arch::asm!("in al, dx", in("dx") 0x3FDu16, out("al") status, options(nomem, nostack, preserves_flags));
-        if status & 0x20 != 0 { break; }
+        if status & 0x20 != 0 {
+            break;
+        }
     }
     core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") byte, options(nomem, nostack, preserves_flags));
 }
@@ -281,8 +288,12 @@ pub fn init() {
         IDT[36].set_handler(serial_handler as u64, 0x08, 0, 0);
 
         // G.4.1: per-CPU LAPIC timer at vector 0x40.
-        IDT[crate::arch::lapic::LAPIC_TIMER_VECTOR as usize]
-            .set_handler(lapic_timer_handler as u64, 0x08, 0, 0);
+        IDT[crate::arch::lapic::LAPIC_TIMER_VECTOR as usize].set_handler(
+            lapic_timer_handler as u64,
+            0x08,
+            0,
+            0,
+        );
 
         #[allow(static_mut_refs)]
         let idt_ptr = IdtPointer {

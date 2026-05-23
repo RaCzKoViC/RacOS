@@ -13,7 +13,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use super::inode::{InodeOps, InodeMetadata, VfsResult, VfsError, InodeNum, FileType};
+use super::inode::{FileType, InodeMetadata, InodeNum, InodeOps, VfsError, VfsResult};
 
 /// Ring buffer capacity (4 KiB).
 const PIPE_CAPACITY: usize = 4096;
@@ -112,7 +112,12 @@ pub struct PipeReadEnd {
 
 impl Drop for PipeReadEnd {
     fn drop(&mut self) {
-        unsafe { self.shared.get_mut().read_closed.store(true, Ordering::Relaxed); }
+        unsafe {
+            self.shared
+                .get_mut()
+                .read_closed
+                .store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -162,7 +167,12 @@ pub struct PipeWriteEnd {
 
 impl Drop for PipeWriteEnd {
     fn drop(&mut self) {
-        unsafe { self.shared.get_mut().write_closed.store(true, Ordering::Relaxed); }
+        unsafe {
+            self.shared
+                .get_mut()
+                .write_closed
+                .store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -206,7 +216,10 @@ pub fn create_pipe() -> (Arc<dyn InodeOps>, Arc<dyn InodeOps>) {
     let ino_r = NEXT_PIPE_INO.fetch_add(1, Ordering::Relaxed) as InodeNum;
     let ino_w = NEXT_PIPE_INO.fetch_add(1, Ordering::Relaxed) as InodeNum;
 
-    let read_end = Arc::new(PipeReadEnd { shared: shared.clone(), ino: ino_r });
+    let read_end = Arc::new(PipeReadEnd {
+        shared: shared.clone(),
+        ino: ino_r,
+    });
     let write_end = Arc::new(PipeWriteEnd { shared, ino: ino_w });
 
     (read_end, write_end)

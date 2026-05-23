@@ -6,7 +6,13 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
-#![allow(dead_code, unused_imports, unused_variables, function_casts_as_integer, unreachable_code)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    function_casts_as_integer,
+    unreachable_code
+)]
 
 extern crate alloc;
 
@@ -26,10 +32,10 @@ mod tty;
 mod vfs;
 #[macro_use]
 mod print;
+mod mod_loader;
 mod panic;
 mod shell_fs;
 mod sync;
-mod mod_loader;
 
 use boot::BootInfo;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -59,12 +65,18 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         fb_console::init(boot_info);
     }
 
-    println!("RACORE: RacOS kernel starting (Build {})", env!("CARGO_PKG_VERSION"));
-    
+    println!(
+        "RACORE: RacOS kernel starting (Build {})",
+        env!("CARGO_PKG_VERSION")
+    );
+
     // Validate boot info
     boot::validate(boot_info);
 
-    serial::serial_println!("[  0.000010] RACORE: Boot info validated (magic OK, version {})", boot_info.version);
+    serial::serial_println!(
+        "[  0.000010] RACORE: Boot info validated (magic OK, version {})",
+        boot_info.version
+    );
 
     // Report memory
     let usable_bytes = boot::count_usable_memory(boot_info);
@@ -168,19 +180,27 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Initialize scheduler with idle task (PID 0)
     // SAFETY: Called once, heap is ready, interrupts still disabled.
-    unsafe { task::scheduler::init(); }
+    unsafe {
+        task::scheduler::init();
+    }
 
     // Initialize SYSCALL/SYSRET mechanism
     // SAFETY: Called once, GDT/TSS are initialized, interrupts disabled.
-    unsafe { syscall::entry::init(); }
+    unsafe {
+        syscall::entry::init();
+    }
 
     // Snapshot the boot-time kernel CR3. All future user page tables inherit
     // their kernel mappings from this snapshot (see virt::create_user_page_table).
     // Must happen before any user process is constructed.
-    unsafe { mm::virt::capture_kernel_cr3(); }
+    unsafe {
+        mm::virt::capture_kernel_cr3();
+    }
 
     // Initialize VFS
-    unsafe { vfs::mount::init(); }
+    unsafe {
+        vfs::mount::init();
+    }
 
     // Set up and mount initramfs at root
     {
@@ -191,16 +211,23 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 boot_info.initramfs_size,
                 boot_info.initramfs_base
             );
-            vfs::initramfs::Initramfs::from_binary(boot_info.initramfs_base, boot_info.initramfs_size)
-                .unwrap_or_else(|| {
-                    serial::serial_println!("[  0.000280] RACORE: Binary initramfs parse failed, using built-in");
-                    let mut fs = vfs::initramfs::Initramfs::new();
-                    let _sbin_ino = fs.add_dir("sbin");
-                    let _etc_ino = fs.add_dir("etc");
-                    fs
-                })
+            vfs::initramfs::Initramfs::from_binary(
+                boot_info.initramfs_base,
+                boot_info.initramfs_size,
+            )
+            .unwrap_or_else(|| {
+                serial::serial_println!(
+                    "[  0.000280] RACORE: Binary initramfs parse failed, using built-in"
+                );
+                let mut fs = vfs::initramfs::Initramfs::new();
+                let _sbin_ino = fs.add_dir("sbin");
+                let _etc_ino = fs.add_dir("etc");
+                fs
+            })
         } else {
-            serial::serial_println!("[  0.000280] RACORE: No initramfs from bootloader, using built-in");
+            serial::serial_println!(
+                "[  0.000280] RACORE: No initramfs from bootloader, using built-in"
+            );
             let mut fs = vfs::initramfs::Initramfs::new();
             let _sbin_ino = fs.add_dir("sbin");
             let _etc_ino = fs.add_dir("etc");
@@ -268,8 +295,12 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                     // the FAT32 instance even without a directory entry on
                     // the root FS.
                 }
-                unsafe { vfs::mount::mount_table().mount("/fat", fat_fs); }
-                serial::serial_println!("[  0.000365] RACORE: fat32 mounted on /fat (volatile, on ram1)");
+                unsafe {
+                    vfs::mount::mount_table().mount("/fat", fat_fs);
+                }
+                serial::serial_println!(
+                    "[  0.000365] RACORE: fat32 mounted on /fat (volatile, on ram1)"
+                );
             }
             Err(e) => serial::serial_println!("[  0.000365] RACORE: /fat mount failed: {:?}", e),
         }
@@ -284,9 +315,12 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 // it off to the mount table.
                 vfs::racfs::persistence_test(&racfs, "sda");
                 let racfs_fs = vfs::racfs::RacfsFilesystem::new(racfs);
-                unsafe { vfs::mount::mount_table().mount("/mnt", racfs_fs); }
-                serial::serial_println!("[  0.000370] RACORE: racfs mounted on /mnt (persistent, on sda)");
-
+                unsafe {
+                    vfs::mount::mount_table().mount("/mnt", racfs_fs);
+                }
+                serial::serial_println!(
+                    "[  0.000370] RACORE: racfs mounted on /mnt (persistent, on sda)"
+                );
             }
             Err(e) => serial::serial_println!("[  0.000370] RACORE: /mnt mount failed: {:?}", e),
         }
@@ -322,12 +356,10 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 .expect("Failed to spawn test-task-a");
             task::scheduler::spawn("test-task-b", test_task_b)
                 .expect("Failed to spawn test-task-b");
-            task::scheduler::spawn("test-racfs", test_racfs)
-                .expect("Failed to spawn test-racfs");
+            task::scheduler::spawn("test-racfs", test_racfs).expect("Failed to spawn test-racfs");
             task::scheduler::spawn("test-security", test_security)
                 .expect("Failed to spawn test-security");
-            task::scheduler::spawn("test-net", test_net)
-                .expect("Failed to spawn test-net");
+            task::scheduler::spawn("test-net", test_net).expect("Failed to spawn test-net");
         }
     }
 
@@ -342,7 +374,9 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 serial::serial_println!("[  0.000360] RACORE: init watchdog skipped (bring-up)");
             }
             None => {
-                serial::serial_println!("[  0.000360] RACORE: init start failed, entering emergency shell");
+                serial::serial_println!(
+                    "[  0.000360] RACORE: init start failed, entering emergency shell"
+                );
                 spawn_kernel_shell_once();
             }
         }
@@ -354,7 +388,9 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Enable interrupts
     serial::serial_println!("[  0.000400] RACORE: Enabling interrupts");
-    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
 
     serial::serial_println!("[  0.000500] RACORE: Entering idle loop (scheduler active)");
 
@@ -419,19 +455,28 @@ fn try_spawn_init() -> Option<u32> {
         let loaded = match elf::load_elf(&data) {
             Ok(l) => l,
             Err(e) => {
-                serial::serial_println!("[  0.000350] RACORE: ELF load failed for '{}': {:?}", path, e);
+                serial::serial_println!(
+                    "[  0.000350] RACORE: ELF load failed for '{}': {:?}",
+                    path,
+                    e
+                );
                 continue;
             }
         };
 
         // Create user process
-        let mut process = match task::process::UserProcess::from_elf(path, &loaded, &[path.as_bytes()]) {
-            Ok(p) => p,
-            Err(e) => {
-                serial::serial_println!("[  0.000350] RACORE: Process create failed for '{}': {}", path, e);
-                continue;
-            }
-        };
+        let mut process =
+            match task::process::UserProcess::from_elf(path, &loaded, &[path.as_bytes()]) {
+                Ok(p) => p,
+                Err(e) => {
+                    serial::serial_println!(
+                        "[  0.000350] RACORE: Process create failed for '{}': {}",
+                        path,
+                        e
+                    );
+                    continue;
+                }
+            };
 
         // Set up stdin/stdout/stderr (FDs 0, 1, 2) pointing to /dev/console
         {
@@ -440,10 +485,10 @@ fn try_spawn_init() -> Option<u32> {
                 if let Ok(inode) = fs.get_inode(ino) {
                     use alloc::sync::Arc;
                     use vfs::file::OpenFile;
-                    let stdin  = Arc::new(OpenFile::new(ino, inode.clone(), 0)); // O_RDONLY
+                    let stdin = Arc::new(OpenFile::new(ino, inode.clone(), 0)); // O_RDONLY
                     let stdout = Arc::new(OpenFile::new(ino, inode.clone(), 1)); // O_WRONLY
-                    let stderr = Arc::new(OpenFile::new(ino, inode, 1));         // O_WRONLY
-                    let _ = process.task.fd_table.alloc(stdin);  // fd 0
+                    let stderr = Arc::new(OpenFile::new(ino, inode, 1)); // O_WRONLY
+                    let _ = process.task.fd_table.alloc(stdin); // fd 0
                     let _ = process.task.fd_table.alloc(stdout); // fd 1
                     let _ = process.task.fd_table.alloc(stderr); // fd 2
                     serial::serial_println!("[  0.000355] RACORE: FDs 0/1/2 → /dev/console");
@@ -462,7 +507,11 @@ fn try_spawn_init() -> Option<u32> {
                 return Some(pid);
             }
             Err(e) => {
-                serial::serial_println!("[  0.000350] RACORE: spawn_user failed for '{}': {}", path, e);
+                serial::serial_println!(
+                    "[  0.000350] RACORE: spawn_user failed for '{}': {}",
+                    path,
+                    e
+                );
             }
         }
     }
@@ -514,7 +563,9 @@ fn init_watchdog_task() -> ! {
                         now.saturating_sub(start_tick),
                     );
                     spawn_kernel_shell_once();
-                    loop { task::scheduler::yield_now(); }
+                    loop {
+                        task::scheduler::yield_now();
+                    }
                 }
                 _ if now.saturating_sub(start_tick) > INIT_QUICK_FAIL_WINDOW_TICKS => {
                     serial::serial_println!(
@@ -522,7 +573,9 @@ fn init_watchdog_task() -> ! {
                         init_pid,
                         INIT_QUICK_FAIL_WINDOW_TICKS,
                     );
-                    loop { task::scheduler::yield_now(); }
+                    loop {
+                        task::scheduler::yield_now();
+                    }
                 }
                 _ => {}
             }
@@ -806,11 +859,7 @@ fn parse_and_dispatch(line: &str) {
     let args = &tokens[1..count];
 
     if KERNEL_SHELL_DEBUG {
-        serial::serial_println!(
-            "[ SHELL ] command='{}' argc={}",
-            command,
-            args.len()
-        );
+        serial::serial_println!("[ SHELL ] command='{}' argc={}", command, args.len());
     }
 
     for cmd in SHELL_COMMANDS {
@@ -896,7 +945,9 @@ fn test_racfs() -> ! {
         Ok(ino) => ino,
         Err(e) => {
             serial::serial_println!("[TEST-RACFS] FAIL lookup test dir: {:?}", e);
-            loop { task::scheduler::yield_now(); }
+            loop {
+                task::scheduler::yield_now();
+            }
         }
     };
 
@@ -907,7 +958,9 @@ fn test_racfs() -> ! {
         }
         Err(e) => {
             serial::serial_println!("[TEST-RACFS] FAIL create file: {:?}", e);
-            loop { task::scheduler::yield_now(); }
+            loop {
+                task::scheduler::yield_now();
+            }
         }
     };
 
@@ -955,7 +1008,10 @@ fn test_racfs() -> ! {
             if entries.is_empty() {
                 serial::serial_println!("[TEST-RACFS] post-unlink readdir PASS: 0 entries");
             } else {
-                serial::serial_println!("[TEST-RACFS] post-unlink readdir FAIL: {} entries", entries.len());
+                serial::serial_println!(
+                    "[TEST-RACFS] post-unlink readdir FAIL: {} entries",
+                    entries.len()
+                );
             }
         }
         Err(e) => serial::serial_println!("[TEST-RACFS] FAIL post-unlink readdir: {:?}", e),
@@ -1000,11 +1056,16 @@ fn test_security() -> ! {
     if dac_read && !dac_write {
         serial::serial_println!("[TEST-SEC ] C3 DAC PASS (0644 blocks non-owner writes)");
     } else {
-        serial::serial_println!("[TEST-SEC ] C3 DAC FAIL (read={}, write={})", dac_read, dac_write);
+        serial::serial_println!(
+            "[TEST-SEC ] C3 DAC FAIL (read={}, write={})",
+            dac_read,
+            dac_write
+        );
     }
 
     let mut cap_creds = user_creds;
-    cap_creds.cap_effective = security::capability::cap_mask(security::capability::CAP_DAC_OVERRIDE);
+    cap_creds.cap_effective =
+        security::capability::cap_mask(security::capability::CAP_DAC_OVERRIDE);
     let override_write = security::dac::can_access(&cap_creds, &meta, security::dac::Access::Write);
     if override_write {
         serial::serial_println!("[TEST-SEC ] C2 CAP_DAC_OVERRIDE PASS");
@@ -1037,7 +1098,8 @@ fn test_security() -> ! {
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let _ = task::scheduler::with_current_task_mut(|t| {
-            t.creds.cap_effective = security::capability::cap_mask(security::capability::CAP_SETUID);
+            t.creds.cap_effective =
+                security::capability::cap_mask(security::capability::CAP_SETUID);
         });
         core::arch::asm!("sti", options(nomem, nostack));
     }
@@ -1077,7 +1139,9 @@ fn test_net() -> ! {
         Ok(s) => s,
         Err(e) => {
             serial::serial_println!("[TEST-NET ] FAIL socket(server): {:?}", e);
-            loop { task::scheduler::yield_now(); }
+            loop {
+                task::scheduler::yield_now();
+            }
         }
     };
     net::bind_fd(server_pid, 100, server_sid);
@@ -1088,7 +1152,9 @@ fn test_net() -> ! {
         Ok(s) => s,
         Err(e) => {
             serial::serial_println!("[TEST-NET ] FAIL socket(client): {:?}", e);
-            loop { task::scheduler::yield_now(); }
+            loop {
+                task::scheduler::yield_now();
+            }
         }
     };
     net::bind_fd(server_pid, 101, client_sid);
@@ -1097,7 +1163,9 @@ fn test_net() -> ! {
         Ok(()) => serial::serial_println!("[TEST-NET ] connect PASS"),
         Err(e) => {
             serial::serial_println!("[TEST-NET ] connect FAIL: {:?}", e);
-            loop { task::scheduler::yield_now(); }
+            loop {
+                task::scheduler::yield_now();
+            }
         }
     }
 
@@ -1105,7 +1173,9 @@ fn test_net() -> ! {
         Ok(s) => s,
         Err(e) => {
             serial::serial_println!("[TEST-NET ] accept FAIL: {:?}", e);
-            loop { task::scheduler::yield_now(); }
+            loop {
+                task::scheduler::yield_now();
+            }
         }
     };
     net::bind_fd(server_pid, 102, accepted_sid);
@@ -1123,7 +1193,10 @@ fn test_net() -> ! {
     match net::recv(server_pid, 102, &mut rx) {
         Ok(n) => {
             if &rx[..n] == payload {
-                serial::serial_println!("[TEST-NET ] recv PASS '{}')", core::str::from_utf8(&rx[..n]).unwrap_or("?"));
+                serial::serial_println!(
+                    "[TEST-NET ] recv PASS '{}')",
+                    core::str::from_utf8(&rx[..n]).unwrap_or("?")
+                );
             } else {
                 serial::serial_println!("[TEST-NET ] recv FAIL content mismatch");
             }
@@ -1149,7 +1222,10 @@ fn test_net() -> ! {
 /// guarantees data lands on disk within a bounded window.
 const FLUSHD_INTERVAL_TICKS: u64 = 5_000;
 fn flushd_task() -> ! {
-    serial::serial_println!("[ FLUSHD  ] task started, interval={} ticks", FLUSHD_INTERVAL_TICKS);
+    serial::serial_println!(
+        "[ FLUSHD  ] task started, interval={} ticks",
+        FLUSHD_INTERVAL_TICKS
+    );
     let mut last_run = interrupts::pit::ticks();
     let mut total_syncs: u64 = 0;
     loop {
@@ -1159,7 +1235,8 @@ fn flushd_task() -> ! {
             total_syncs += synced as u64;
             serial::serial_println!(
                 "[ FLUSHD  ] tick — synced {} mount(s) (cumulative {})",
-                synced, total_syncs,
+                synced,
+                total_syncs,
             );
             last_run = now;
         }
@@ -1189,7 +1266,9 @@ fn exit_qemu(code: u32) -> ! {
             options(nomem, nostack, preserves_flags),
         );
     }
-    loop { arch::halt(); }
+    loop {
+        arch::halt();
+    }
 }
 
 #[cfg(feature = "ci-smoke")]
@@ -1222,11 +1301,15 @@ fn run_ci_smoke_and_exit() -> ! {
     let started = arch::smp::started_count();
     if started == cpu_count {
         serial::serial_println!(
-            "[ SMOKE ] PASS smp::all_aps_started ({}/{})", started, cpu_count,
+            "[ SMOKE ] PASS smp::all_aps_started ({}/{})",
+            started,
+            cpu_count,
         );
     } else {
         serial::serial_println!(
-            "[ SMOKE ] FAIL smp::all_aps_started ({}/{})", started, cpu_count,
+            "[ SMOKE ] FAIL smp::all_aps_started ({}/{})",
+            started,
+            cpu_count,
         );
         all_pass = false;
     }
@@ -1242,7 +1325,9 @@ fn run_ci_smoke_and_exit() -> ! {
         if sc != cpu.apic_id {
             serial::serial_println!(
                 "[ SMOKE ] FAIL percpu::self_check apic_id={} expected={} got={}",
-                cpu.apic_id, cpu.apic_id, sc,
+                cpu.apic_id,
+                cpu.apic_id,
+                sc,
             );
             percpu_ok = false;
         }
@@ -1259,11 +1344,15 @@ fn run_ci_smoke_and_exit() -> ! {
     // IF=0 (kernel_main hasn't enabled IRQs yet), so the BSP timer is
     // armed but masked until we sti briefly. APs sti'd in ap_entry, so
     // they may already have ticks; the busy wait gives them more.
-    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
     for _ in 0..2_000_000u32 {
         core::hint::spin_loop();
     }
-    unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+    }
     let mut timer_ok = true;
     arch::smp::for_each_cpu::<(), _>(|cpu| {
         let slot = arch::percpu::peek(cpu.apic_id).expect("PerCpu slot");
@@ -1277,7 +1366,8 @@ fn run_ci_smoke_and_exit() -> ! {
         } else {
             serial::serial_println!(
                 "[ SMOKE ] INFO lapic_timer apic_id={} ticks={}",
-                cpu.apic_id, ticks,
+                cpu.apic_id,
+                ticks,
             );
         }
         None
@@ -1298,12 +1388,15 @@ fn run_ci_smoke_and_exit() -> ! {
     if bsp_md != bsp_hw || bsp_hw != bsp_cur {
         serial::serial_println!(
             "[ SMOKE ] FAIL lapic::bsp_id_consistent madt={} hw={} current={}",
-            bsp_md, bsp_hw, bsp_cur,
+            bsp_md,
+            bsp_hw,
+            bsp_cur,
         );
         all_pass = false;
     } else {
         serial::serial_println!(
-            "[ SMOKE ] PASS lapic::bsp_id_consistent (madt=hw=current={})", bsp_md,
+            "[ SMOKE ] PASS lapic::bsp_id_consistent (madt=hw=current={})",
+            bsp_md,
         );
     }
 
@@ -1319,12 +1412,12 @@ fn run_ci_smoke_and_exit() -> ! {
 
     // 2. VFS mount table topology.
     let mt = unsafe { vfs::mount::mount_table() };
-    check!("vfs::mount /",     mt.is_mounted("/"));
-    check!("vfs::mount /dev",  mt.is_mounted("/dev"));
-    check!("vfs::mount /tmp",  mt.is_mounted("/tmp"));
+    check!("vfs::mount /", mt.is_mounted("/"));
+    check!("vfs::mount /dev", mt.is_mounted("/dev"));
+    check!("vfs::mount /tmp", mt.is_mounted("/tmp"));
     check!("vfs::mount /proc", mt.is_mounted("/proc"));
-    check!("vfs::mount /var",  mt.is_mounted("/var"));
-    check!("vfs::mount /fat",  mt.is_mounted("/fat"));
+    check!("vfs::mount /var", mt.is_mounted("/var"));
+    check!("vfs::mount /fat", mt.is_mounted("/fat"));
     if has_sda {
         check!("vfs::mount /mnt", mt.is_mounted("/mnt"));
     }
@@ -1339,7 +1432,10 @@ fn run_ci_smoke_and_exit() -> ! {
         check!("racfs::write_file", wrote == payload.len());
         let mut buf = [0u8; 32];
         let read = racfs.read_file(ino, 0, &mut buf).unwrap_or(0);
-        check!("racfs::read_file", read == payload.len() && &buf[..read] == payload);
+        check!(
+            "racfs::read_file",
+            read == payload.len() && &buf[..read] == payload
+        );
         check!("racfs::unlink", racfs.unlink(0, "smoke.txt").is_ok());
     }
 
@@ -1357,7 +1453,9 @@ fn run_ci_smoke_and_exit() -> ! {
         let path = "/mnt/smoke-mnt.txt";
 
         // (a) Reach the concrete Racfs backing /mnt and create a fresh file.
-        let mnt_racfs = mt.entries().iter()
+        let mnt_racfs = mt
+            .entries()
+            .iter()
             .find(|m| m.path == "/mnt")
             .and_then(|m| m.fs.as_any().downcast_ref::<vfs::racfs::RacfsFilesystem>())
             .map(|fs| fs.inner());
@@ -1373,7 +1471,8 @@ fn run_ci_smoke_and_exit() -> ! {
             if wrote != payload.len() {
                 serial::serial_println!(
                     "[ SMOKE ] FAIL mnt::write_file wrote={} want={}",
-                    wrote, payload.len(),
+                    wrote,
+                    payload.len(),
                 );
                 subtest_pass = false;
             }
@@ -1384,31 +1483,26 @@ fn run_ci_smoke_and_exit() -> ! {
 
         // (b) Re-resolve the file from the path API as cat would.
         match mt.lookup_path(path) {
-            Ok((fs, ino)) => {
-                match fs.get_inode(ino) {
-                    Ok(inode) => {
-                        let mut buf = [0u8; 64];
-                        let n = inode.read(0, &mut buf).unwrap_or(0);
-                        if n != payload.len() || &buf[..n] != payload {
-                            serial::serial_println!(
-                                "[ SMOKE ] FAIL mnt::read_after_create n={} content={:?}",
-                                n, &buf[..n.min(buf.len())],
-                            );
-                            subtest_pass = false;
-                        }
-                    }
-                    Err(e) => {
+            Ok((fs, ino)) => match fs.get_inode(ino) {
+                Ok(inode) => {
+                    let mut buf = [0u8; 64];
+                    let n = inode.read(0, &mut buf).unwrap_or(0);
+                    if n != payload.len() || &buf[..n] != payload {
                         serial::serial_println!(
-                            "[ SMOKE ] FAIL mnt::get_inode {:?}", e,
+                            "[ SMOKE ] FAIL mnt::read_after_create n={} content={:?}",
+                            n,
+                            &buf[..n.min(buf.len())],
                         );
                         subtest_pass = false;
                     }
                 }
-            }
+                Err(e) => {
+                    serial::serial_println!("[ SMOKE ] FAIL mnt::get_inode {:?}", e,);
+                    subtest_pass = false;
+                }
+            },
             Err(e) => {
-                serial::serial_println!(
-                    "[ SMOKE ] FAIL mnt::lookup_after_create {:?}", e,
-                );
+                serial::serial_println!("[ SMOKE ] FAIL mnt::lookup_after_create {:?}", e,);
                 subtest_pass = false;
             }
         }
@@ -1437,16 +1531,27 @@ fn run_ci_smoke_and_exit() -> ! {
     }
 
     // 5. initramfs binaries we expect for userland tooling.
-    check!("initramfs::/sbin/init",   mt.lookup_path("/sbin/init").is_ok());
-    check!("initramfs::/bin/sh",      mt.lookup_path("/bin/sh").is_ok());
-    check!("initramfs::mkfs.racfs",   mt.lookup_path("/bin/mkfs.racfs").is_ok());
-    check!("initramfs::mkfs.fat32",   mt.lookup_path("/bin/mkfs.fat32").is_ok());
+    check!(
+        "initramfs::/sbin/init",
+        mt.lookup_path("/sbin/init").is_ok()
+    );
+    check!("initramfs::/bin/sh", mt.lookup_path("/bin/sh").is_ok());
+    check!(
+        "initramfs::mkfs.racfs",
+        mt.lookup_path("/bin/mkfs.racfs").is_ok()
+    );
+    check!(
+        "initramfs::mkfs.fat32",
+        mt.lookup_path("/bin/mkfs.fat32").is_ok()
+    );
 
     if all_pass {
         serial::serial_println!("[ SMOKE ] ALL PASS — exiting QEMU via isa-debug-exit (code 0x10)");
         exit_qemu(0x10);
     } else {
-        serial::serial_println!("[ SMOKE ] AT LEAST ONE FAILURE — exiting QEMU via isa-debug-exit (code 0x11)");
+        serial::serial_println!(
+            "[ SMOKE ] AT LEAST ONE FAILURE — exiting QEMU via isa-debug-exit (code 0x11)"
+        );
         exit_qemu(0x11);
     }
 }

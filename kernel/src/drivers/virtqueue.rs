@@ -29,7 +29,7 @@ pub const VRING_DESC_F_WRITE: u16 = 2;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct VirtqDesc {
-    pub addr: u64,   // guest physical address
+    pub addr: u64, // guest physical address
     pub len: u32,
     pub flags: u16,
     pub next: u16,
@@ -60,13 +60,13 @@ pub struct VirtqUsed {
 
 /// In-memory handle to a virtqueue. Pointers are physical and identity-mapped.
 pub struct Virtqueue {
-    base_phys: u64,        // 1st page (desc + avail)
-    used_phys: u64,        // 2nd page (used)
+    base_phys: u64, // 1st page (desc + avail)
+    used_phys: u64, // 2nd page (used)
     desc: *mut VirtqDesc,
     avail: *mut VirtqAvail,
     used: *mut VirtqUsed,
     pub size: u16,
-    pub free_head: u16,    // head of the free-descriptor linked list
+    pub free_head: u16, // head of the free-descriptor linked list
     pub num_free: u16,
     pub last_used_idx: u16,
 }
@@ -169,7 +169,9 @@ impl Virtqueue {
             };
             let last = (flags & VRING_DESC_F_NEXT) == 0;
             self.free_desc(cur);
-            if last { break; }
+            if last {
+                break;
+            }
             cur = next;
         }
     }
@@ -197,8 +199,12 @@ impl Virtqueue {
         for (i, &(addr, len, write)) in bufs.iter().enumerate() {
             let last = i + 1 == bufs.len();
             let mut flags = 0;
-            if write { flags |= VRING_DESC_F_WRITE; }
-            if !last { flags |= VRING_DESC_F_NEXT; }
+            if write {
+                flags |= VRING_DESC_F_WRITE;
+            }
+            if !last {
+                flags |= VRING_DESC_F_NEXT;
+            }
             // SAFETY: indices[i] is a freshly-allocated valid slot.
             unsafe {
                 let d = self.desc.add(indices[i] as usize);
@@ -242,7 +248,11 @@ impl Virtqueue {
     }
 
     #[inline]
-    pub fn base_phys(&self) -> u64 { self.base_phys }
+    pub fn base_phys(&self) -> u64 {
+        self.base_phys
+    }
     #[inline]
-    pub fn used_phys(&self) -> u64 { self.used_phys }
+    pub fn used_phys(&self) -> u64 {
+        self.used_phys
+    }
 }

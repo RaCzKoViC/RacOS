@@ -5,7 +5,11 @@ use libc_lite::{mkfs, print, println, write};
 
 fn cstr_len(p: *const u8) -> usize {
     let mut n = 0usize;
-    unsafe { while *p.add(n) != 0 { n += 1; } }
+    unsafe {
+        while *p.add(n) != 0 {
+            n += 1;
+        }
+    }
     n
 }
 
@@ -20,7 +24,9 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         return 1;
     }
     let arg_ptr = unsafe { *argv.add(1) };
-    if arg_ptr.is_null() { return 1; }
+    if arg_ptr.is_null() {
+        return 1;
+    }
     let len = cstr_len(arg_ptr);
     let device = unsafe { core::slice::from_raw_parts(arg_ptr, len) };
 
@@ -41,10 +47,19 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
             let mut digits = [0u8; 8];
             let mut i = 0;
             let mut t = v;
-            if t == 0 { digits[0] = b'0'; i = 1; }
-            while t > 0 { digits[i] = b'0' + (t % 10) as u8; t /= 10; i += 1; }
+            if t == 0 {
+                digits[0] = b'0';
+                i = 1;
+            }
+            while t > 0 {
+                digits[i] = b'0' + (t % 10) as u8;
+                t /= 10;
+                i += 1;
+            }
             let mut buf = [0u8; 8];
-            for j in 0..i { buf[j] = digits[i - 1 - j]; }
+            for j in 0..i {
+                buf[j] = digits[i - 1 - j];
+            }
             let _ = write(1, &buf[..i]);
             print(")\n");
             if e == -98 {

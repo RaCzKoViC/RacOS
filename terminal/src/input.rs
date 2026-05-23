@@ -16,7 +16,7 @@ pub struct KeyEvent {
 /// Key identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
-    Char(u8),       // ASCII character
+    Char(u8), // ASCII character
     Enter,
     Backspace,
     Tab,
@@ -31,7 +31,7 @@ pub enum Key {
     PageDown,
     Delete,
     Insert,
-    F(u8),          // F1-F12
+    F(u8), // F1-F12
 }
 
 /// Modifier flags.
@@ -56,11 +56,26 @@ pub fn encode_key(event: &KeyEvent) -> Vec<u8> {
                 out.push(c - b'A' + 1);
                 return out;
             }
-            Key::Char(b'[') => { out.push(0x1B); return out; } // ESC
-            Key::Char(b'\\') => { out.push(0x1C); return out; }
-            Key::Char(b']') => { out.push(0x1D); return out; }
-            Key::Char(b'^') => { out.push(0x1E); return out; }
-            Key::Char(b'_') => { out.push(0x1F); return out; }
+            Key::Char(b'[') => {
+                out.push(0x1B);
+                return out;
+            } // ESC
+            Key::Char(b'\\') => {
+                out.push(0x1C);
+                return out;
+            }
+            Key::Char(b']') => {
+                out.push(0x1D);
+                return out;
+            }
+            Key::Char(b'^') => {
+                out.push(0x1E);
+                return out;
+            }
+            Key::Char(b'_') => {
+                out.push(0x1F);
+                return out;
+            }
             _ => {}
         }
     }
@@ -76,33 +91,51 @@ pub fn encode_key(event: &KeyEvent) -> Vec<u8> {
         Key::Backspace => out.push(0x7F),
         Key::Tab => out.push(b'\t'),
         Key::Escape => out.push(0x1B),
-        Key::Up => { out.extend_from_slice(b"\x1B[A"); }
-        Key::Down => { out.extend_from_slice(b"\x1B[B"); }
-        Key::Right => { out.extend_from_slice(b"\x1B[C"); }
-        Key::Left => { out.extend_from_slice(b"\x1B[D"); }
-        Key::Home => { out.extend_from_slice(b"\x1B[H"); }
-        Key::End => { out.extend_from_slice(b"\x1B[F"); }
-        Key::PageUp => { out.extend_from_slice(b"\x1B[5~"); }
-        Key::PageDown => { out.extend_from_slice(b"\x1B[6~"); }
-        Key::Delete => { out.extend_from_slice(b"\x1B[3~"); }
-        Key::Insert => { out.extend_from_slice(b"\x1B[2~"); }
-        Key::F(n) => {
-            match n {
-                1 => out.extend_from_slice(b"\x1BOP"),
-                2 => out.extend_from_slice(b"\x1BOQ"),
-                3 => out.extend_from_slice(b"\x1BOR"),
-                4 => out.extend_from_slice(b"\x1BOS"),
-                5 => out.extend_from_slice(b"\x1B[15~"),
-                6 => out.extend_from_slice(b"\x1B[17~"),
-                7 => out.extend_from_slice(b"\x1B[18~"),
-                8 => out.extend_from_slice(b"\x1B[19~"),
-                9 => out.extend_from_slice(b"\x1B[20~"),
-                10 => out.extend_from_slice(b"\x1B[21~"),
-                11 => out.extend_from_slice(b"\x1B[23~"),
-                12 => out.extend_from_slice(b"\x1B[24~"),
-                _ => {}
-            }
+        Key::Up => {
+            out.extend_from_slice(b"\x1B[A");
         }
+        Key::Down => {
+            out.extend_from_slice(b"\x1B[B");
+        }
+        Key::Right => {
+            out.extend_from_slice(b"\x1B[C");
+        }
+        Key::Left => {
+            out.extend_from_slice(b"\x1B[D");
+        }
+        Key::Home => {
+            out.extend_from_slice(b"\x1B[H");
+        }
+        Key::End => {
+            out.extend_from_slice(b"\x1B[F");
+        }
+        Key::PageUp => {
+            out.extend_from_slice(b"\x1B[5~");
+        }
+        Key::PageDown => {
+            out.extend_from_slice(b"\x1B[6~");
+        }
+        Key::Delete => {
+            out.extend_from_slice(b"\x1B[3~");
+        }
+        Key::Insert => {
+            out.extend_from_slice(b"\x1B[2~");
+        }
+        Key::F(n) => match n {
+            1 => out.extend_from_slice(b"\x1BOP"),
+            2 => out.extend_from_slice(b"\x1BOQ"),
+            3 => out.extend_from_slice(b"\x1BOR"),
+            4 => out.extend_from_slice(b"\x1BOS"),
+            5 => out.extend_from_slice(b"\x1B[15~"),
+            6 => out.extend_from_slice(b"\x1B[17~"),
+            7 => out.extend_from_slice(b"\x1B[18~"),
+            8 => out.extend_from_slice(b"\x1B[19~"),
+            9 => out.extend_from_slice(b"\x1B[20~"),
+            10 => out.extend_from_slice(b"\x1B[21~"),
+            11 => out.extend_from_slice(b"\x1B[23~"),
+            12 => out.extend_from_slice(b"\x1B[24~"),
+            _ => {}
+        },
     }
 
     out

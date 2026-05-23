@@ -100,7 +100,7 @@ const EXECUTABLE: u8 = 0x08;
 const READ_WRITE: u8 = 0x02;
 
 // Granularity byte flags
-const LONG_MODE: u8 = 0x20;   // 64-bit code segment
+const LONG_MODE: u8 = 0x20; // 64-bit code segment
 const GRANULARITY_4K: u8 = 0x80;
 
 // TSS type: 0x89 = Present + 64-bit Available TSS
@@ -108,13 +108,19 @@ const TSS_PRESENT_TYPE: u8 = 0x89;
 
 /// GDT: 5 normal entries + 2 entries for TSS (16-byte descriptor) = 7 slots
 static mut GDT: [GdtEntry; 7] = [
-    GdtEntry::null(),                                                              // 0x00: Null
-    GdtEntry::new(PRESENT | DPL_RING0 | SEGMENT | EXECUTABLE | READ_WRITE, LONG_MODE | GRANULARITY_4K), // 0x08: Kernel code
-    GdtEntry::new(PRESENT | DPL_RING0 | SEGMENT | READ_WRITE, GRANULARITY_4K),     // 0x10: Kernel data
-    GdtEntry::new(PRESENT | DPL_RING3 | SEGMENT | READ_WRITE, GRANULARITY_4K),     // 0x18: User data (before user code for SYSRET)
-    GdtEntry::new(PRESENT | DPL_RING3 | SEGMENT | EXECUTABLE | READ_WRITE, LONG_MODE | GRANULARITY_4K), // 0x20: User code
-    GdtEntry::null(),                                                              // 0x28: TSS low (filled at runtime)
-    GdtEntry::null(),                                                              // 0x30: TSS high (filled at runtime)
+    GdtEntry::null(), // 0x00: Null
+    GdtEntry::new(
+        PRESENT | DPL_RING0 | SEGMENT | EXECUTABLE | READ_WRITE,
+        LONG_MODE | GRANULARITY_4K,
+    ), // 0x08: Kernel code
+    GdtEntry::new(PRESENT | DPL_RING0 | SEGMENT | READ_WRITE, GRANULARITY_4K), // 0x10: Kernel data
+    GdtEntry::new(PRESENT | DPL_RING3 | SEGMENT | READ_WRITE, GRANULARITY_4K), // 0x18: User data (before user code for SYSRET)
+    GdtEntry::new(
+        PRESENT | DPL_RING3 | SEGMENT | EXECUTABLE | READ_WRITE,
+        LONG_MODE | GRANULARITY_4K,
+    ), // 0x20: User code
+    GdtEntry::null(), // 0x28: TSS low (filled at runtime)
+    GdtEntry::null(), // 0x30: TSS high (filled at runtime)
 ];
 
 /// Global TSS instance.

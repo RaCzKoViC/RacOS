@@ -96,17 +96,33 @@ fn simple_regex_match(haystack: &[u8], pattern: &[u8], case_insensitive: bool) -
     let mut p_idx = 0;
 
     while h_idx < haystack.len() && p_idx < pattern.len() {
-        let h = if case_insensitive { to_lower(haystack[h_idx]) } else { haystack[h_idx] };
-        let p = if case_insensitive { to_lower(pattern[p_idx]) } else { pattern[p_idx] };
+        let h = if case_insensitive {
+            to_lower(haystack[h_idx])
+        } else {
+            haystack[h_idx]
+        };
+        let p = if case_insensitive {
+            to_lower(pattern[p_idx])
+        } else {
+            pattern[p_idx]
+        };
 
         match p {
             b'*' => {
                 // * matches zero or more of any char
                 if p_idx + 1 < pattern.len() {
-                    let next_p = if case_insensitive { to_lower(pattern[p_idx + 1]) } else { pattern[p_idx + 1] };
+                    let next_p = if case_insensitive {
+                        to_lower(pattern[p_idx + 1])
+                    } else {
+                        pattern[p_idx + 1]
+                    };
                     // Skip to next matching char
                     while h_idx < haystack.len() {
-                        let h_next = if case_insensitive { to_lower(haystack[h_idx]) } else { haystack[h_idx] };
+                        let h_next = if case_insensitive {
+                            to_lower(haystack[h_idx])
+                        } else {
+                            haystack[h_idx]
+                        };
                         if h_next == next_p {
                             break;
                         }
@@ -152,13 +168,17 @@ fn to_lower(b: u8) -> u8 {
 unsafe fn arg_name(argv: *const *const u8, i: usize) -> &'static [u8] {
     let ptr = *argv.add(i);
     let mut len = 0;
-    while *ptr.add(len) != 0 { len += 1; }
+    while *ptr.add(len) != 0 {
+        len += 1;
+    }
     core::slice::from_raw_parts(ptr, len)
 }
 
 unsafe fn arg_bytes(argv: *const *const u8, i: usize) -> &'static [u8] {
     let ptr = *argv.add(i);
     let mut len = 0;
-    while *ptr.add(len) != 0 { len += 1; }
+    while *ptr.add(len) != 0 {
+        len += 1;
+    }
     core::slice::from_raw_parts(ptr, len + 1)
 }

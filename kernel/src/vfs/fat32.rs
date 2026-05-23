@@ -13,32 +13,34 @@
 
 extern crate alloc;
 
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use alloc::string::String;
-use crate::vfs::inode::{InodeOps, VfsResult, VfsError, FileType, FileMode, InodeMetadata, DirEntry, InodeNum};
-use crate::vfs::mount::Filesystem;
 use crate::drivers::block::{BlockDevice, SECTOR_SIZE};
 use crate::sync::SpinLock;
+use crate::vfs::inode::{
+    DirEntry, FileMode, FileType, InodeMetadata, InodeNum, InodeOps, VfsError, VfsResult,
+};
+use crate::vfs::mount::Filesystem;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::mem::size_of;
 
-const FAT_ENTRY_MASK: u32      = 0x0FFF_FFFF;
-const FAT_ENTRY_FREE: u32      = 0x0000_0000;
-const FAT_ENTRY_EOC_MIN: u32   = 0x0FFF_FFF8;
-const FAT_ENTRY_EOC: u32       = 0x0FFF_FFFF;
-const FAT_ENTRY_BAD: u32       = 0x0FFF_FFF7;
+const FAT_ENTRY_MASK: u32 = 0x0FFF_FFFF;
+const FAT_ENTRY_FREE: u32 = 0x0000_0000;
+const FAT_ENTRY_EOC_MIN: u32 = 0x0FFF_FFF8;
+const FAT_ENTRY_EOC: u32 = 0x0FFF_FFFF;
+const FAT_ENTRY_BAD: u32 = 0x0FFF_FFF7;
 
 const ATTR_READ_ONLY: u8 = 0x01;
-const ATTR_HIDDEN:    u8 = 0x02;
-const ATTR_SYSTEM:    u8 = 0x04;
+const ATTR_HIDDEN: u8 = 0x02;
+const ATTR_SYSTEM: u8 = 0x04;
 const ATTR_VOLUME_ID: u8 = 0x08;
 const ATTR_DIRECTORY: u8 = 0x10;
-const ATTR_ARCHIVE:   u8 = 0x20;
-const ATTR_LFN:       u8 = ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID;
+const ATTR_ARCHIVE: u8 = 0x20;
+const ATTR_LFN: u8 = ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID;
 
 const DIR_ENTRY_SIZE: usize = 32;
-const DIR_END:        u8    = 0x00;
-const DIR_FREE:       u8    = 0xE5;
+const DIR_END: u8 = 0x00;
+const DIR_FREE: u8 = 0xE5;
 
 /// Maximum cluster we can track when scanning during alloc / FAT bookkeeping.
 /// Keeps a single linear scan reasonable for small images (< few hundred MiB).
@@ -96,22 +98,36 @@ pub struct FatDirEntry {
 }
 
 impl FatDirEntry {
-    pub fn is_end(&self) -> bool     { self.name[0] == DIR_END }
-    pub fn is_deleted(&self) -> bool { self.name[0] == DIR_FREE }
-    pub fn is_lfn(&self) -> bool     { (self.attr & ATTR_LFN) == ATTR_LFN }
-    pub fn is_volume(&self) -> bool  { self.attr & ATTR_VOLUME_ID != 0 }
-    pub fn is_dir(&self) -> bool     { self.attr & ATTR_DIRECTORY != 0 }
+    pub fn is_end(&self) -> bool {
+        self.name[0] == DIR_END
+    }
+    pub fn is_deleted(&self) -> bool {
+        self.name[0] == DIR_FREE
+    }
+    pub fn is_lfn(&self) -> bool {
+        (self.attr & ATTR_LFN) == ATTR_LFN
+    }
+    pub fn is_volume(&self) -> bool {
+        self.attr & ATTR_VOLUME_ID != 0
+    }
+    pub fn is_dir(&self) -> bool {
+        self.attr & ATTR_DIRECTORY != 0
+    }
 
     pub fn get_name(&self) -> String {
         let mut name = String::new();
         for &b in &self.name {
-            if b == b' ' { break; }
+            if b == b' ' {
+                break;
+            }
             name.push(b as char);
         }
         if self.ext[0] != b' ' {
             name.push('.');
             for &b in &self.ext {
-                if b == b' ' { break; }
+                if b == b' ' {
+                    break;
+                }
                 name.push(b as char);
             }
         }
@@ -123,7 +139,7 @@ impl FatDirEntry {
     }
 
     pub fn set_cluster(&mut self, cluster: u32) {
-        self.first_cluster_low  = (cluster & 0xFFFF) as u16;
+        self.first_cluster_low = (cluster & 0xFFFF) as u16;
         self.first_cluster_high = ((cluster >> 16) & 0xFFFF) as u16;
     }
 }
@@ -144,14 +160,18 @@ fn encode_short_name(name: &str) -> VfsResult<([u8; 8], [u8; 3])> {
     }
 
     let mut name_bytes = [b' '; 8];
-    let mut ext_bytes  = [b' '; 3];
+    let mut ext_bytes = [b' '; 3];
 
     for (i, ch) in base.bytes().enumerate() {
-        if !is_legal_short_char(ch) { return Err(VfsError::InvalidArgument); }
+        if !is_legal_short_char(ch) {
+            return Err(VfsError::InvalidArgument);
+        }
         name_bytes[i] = ascii_upper(ch);
     }
     for (i, ch) in ext.bytes().enumerate() {
-        if !is_legal_short_char(ch) { return Err(VfsError::InvalidArgument); }
+        if !is_legal_short_char(ch) {
+            return Err(VfsError::InvalidArgument);
+        }
         ext_bytes[i] = ascii_upper(ch);
     }
     // The very first byte can never legally be 0x00 or 0xE5 on a real entry —
@@ -173,7 +193,11 @@ fn is_legal_short_char(c: u8) -> bool {
 }
 
 fn ascii_upper(c: u8) -> u8 {
-    if (b'a'..=b'z').contains(&c) { c - 32 } else { c }
+    if (b'a'..=b'z').contains(&c) {
+        c - 32
+    } else {
+        c
+    }
 }
 
 pub struct Fat32Fs {
@@ -199,9 +223,12 @@ impl Fat32Fs {
     /// Mount an existing FAT32 by reading its BPB.
     pub fn new(device: Arc<dyn BlockDevice>) -> VfsResult<Arc<Self>> {
         let mut sector = [0u8; SECTOR_SIZE];
-        device.read_sector(0, &mut sector).map_err(|_| VfsError::IoError)?;
+        device
+            .read_sector(0, &mut sector)
+            .map_err(|_| VfsError::IoError)?;
 
-        let bpb: BpbFat32 = unsafe { core::ptr::read_unaligned(sector.as_ptr() as *const BpbFat32) };
+        let bpb: BpbFat32 =
+            unsafe { core::ptr::read_unaligned(sector.as_ptr() as *const BpbFat32) };
 
         if bpb.signature != 0x28 && bpb.signature != 0x29 {
             return Err(VfsError::InvalidArgument);
@@ -255,7 +282,10 @@ impl Fat32Fs {
 
     fn get_cached_metadata(&self, ino: InodeNum) -> Option<InodeMetadata> {
         let cache = self.metadata_cache.lock();
-        cache.iter().find(|(i, _)| *i == ino).map(|(_, m)| m.clone())
+        cache
+            .iter()
+            .find(|(i, _)| *i == ino)
+            .map(|(_, m)| m.clone())
     }
 
     fn remember_parent(&self, parent_cluster: u32, child_cluster: u32) {
@@ -269,7 +299,9 @@ impl Fat32Fs {
 
     fn get_parent(&self, child_cluster: u32) -> Option<u32> {
         let map = self.parent_map.lock();
-        map.iter().find(|(_, c)| *c == child_cluster).map(|(p, _)| *p)
+        map.iter()
+            .find(|(_, c)| *c == child_cluster)
+            .map(|(p, _)| *p)
     }
 
     fn cached_size(&self, ino: InodeNum) -> Option<u64> {
@@ -292,8 +324,11 @@ impl Fat32Fs {
         let fat_sector = self.fat_offset + (cluster as u64 * 4 / SECTOR_SIZE as u64);
         let offset = (cluster as usize * 4) % SECTOR_SIZE;
         let mut sector_data = [0u8; SECTOR_SIZE];
-        self.device.read_sector(fat_sector, &mut sector_data).map_err(|_| VfsError::IoError)?;
-        let entry = unsafe { core::ptr::read_unaligned(sector_data.as_ptr().add(offset) as *const u32) };
+        self.device
+            .read_sector(fat_sector, &mut sector_data)
+            .map_err(|_| VfsError::IoError)?;
+        let entry =
+            unsafe { core::ptr::read_unaligned(sector_data.as_ptr().add(offset) as *const u32) };
         Ok(entry & FAT_ENTRY_MASK)
     }
 
@@ -308,11 +343,17 @@ impl Fat32Fs {
         for fat_idx in 0..self.bpb.fat_count as u64 {
             let lba = self.fat_offset + fat_idx * fat_sectors + sec_within;
             let mut buf = [0u8; SECTOR_SIZE];
-            self.device.read_sector(lba, &mut buf).map_err(|_| VfsError::IoError)?;
+            self.device
+                .read_sector(lba, &mut buf)
+                .map_err(|_| VfsError::IoError)?;
             let old = unsafe { core::ptr::read_unaligned(buf.as_ptr().add(offset) as *const u32) };
             let new = (old & 0xF000_0000) | value;
-            unsafe { core::ptr::write_unaligned(buf.as_mut_ptr().add(offset) as *mut u32, new); }
-            self.device.write_sector(lba, &buf).map_err(|_| VfsError::IoError)?;
+            unsafe {
+                core::ptr::write_unaligned(buf.as_mut_ptr().add(offset) as *mut u32, new);
+            }
+            self.device
+                .write_sector(lba, &buf)
+                .map_err(|_| VfsError::IoError)?;
         }
         Ok(())
     }
@@ -330,7 +371,9 @@ impl Fat32Fs {
                 let zero = [0u8; SECTOR_SIZE];
                 let lba = self.cluster_to_lba(cluster);
                 for s in 0..self.bpb.sectors_per_cluster as u64 {
-                    self.device.write_sector(lba + s, &zero).map_err(|_| VfsError::IoError)?;
+                    self.device
+                        .write_sector(lba + s, &zero)
+                        .map_err(|_| VfsError::IoError)?;
                 }
                 return Ok(cluster);
             }
@@ -362,7 +405,9 @@ impl Fat32Fs {
     // ─── Read / write through cluster chains ───────────────────────────────
 
     pub fn read_chain(&self, start_cluster: u32, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
-        if start_cluster < 2 { return Ok(0); }
+        if start_cluster < 2 {
+            return Ok(0);
+        }
         let mut current_cluster = start_cluster;
         let mut bytes_read = 0;
         let cluster_size = self.cluster_size;
@@ -377,15 +422,17 @@ impl Fat32Fs {
 
         while skip_clusters > 0 {
             current_cluster = self.next_cluster(current_cluster)?;
-            if current_cluster < 2 || current_cluster >= FAT_ENTRY_EOC_MIN { return Ok(0); }
+            if current_cluster < 2 || current_cluster >= FAT_ENTRY_EOC_MIN {
+                return Ok(0);
+            }
             walked += 1;
-            if walked > max_walk { return Err(VfsError::IoError); }
+            if walked > max_walk {
+                return Err(VfsError::IoError);
+            }
             skip_clusters -= 1;
         }
 
-        while bytes_read < buf.len()
-            && current_cluster >= 2
-            && current_cluster < FAT_ENTRY_EOC_MIN
+        while bytes_read < buf.len() && current_cluster >= 2 && current_cluster < FAT_ENTRY_EOC_MIN
         {
             let cluster_lba = self.cluster_to_lba(current_cluster);
 
@@ -394,7 +441,8 @@ impl Fat32Fs {
                 let sector_offset = (cluster_offset % SECTOR_SIZE as u64) as usize;
 
                 let mut sector_data = [0u8; SECTOR_SIZE];
-                self.device.read_sector(cluster_lba + sector_in_cluster, &mut sector_data)
+                self.device
+                    .read_sector(cluster_lba + sector_in_cluster, &mut sector_data)
                     .map_err(|_| VfsError::IoError)?;
 
                 let remain_in_sector = SECTOR_SIZE - sector_offset;
@@ -409,11 +457,15 @@ impl Fat32Fs {
                 cluster_offset += to_copy as u64;
             }
 
-            if bytes_read >= buf.len() { break; }
+            if bytes_read >= buf.len() {
+                break;
+            }
             current_cluster = self.next_cluster(current_cluster)?;
             cluster_offset = 0;
             walked += 1;
-            if walked > max_walk { return Err(VfsError::IoError); }
+            if walked > max_walk {
+                return Err(VfsError::IoError);
+            }
         }
 
         Ok(bytes_read)
@@ -476,11 +528,15 @@ impl Fat32Fs {
 
             let mut sector_buf = [0u8; SECTOR_SIZE];
             if sector_offset != 0 || to_copy != SECTOR_SIZE {
-                self.device.read_sector(lba, &mut sector_buf).map_err(|_| VfsError::IoError)?;
+                self.device
+                    .read_sector(lba, &mut sector_buf)
+                    .map_err(|_| VfsError::IoError)?;
             }
             sector_buf[sector_offset..sector_offset + to_copy]
                 .copy_from_slice(&data[bytes_written..bytes_written + to_copy]);
-            self.device.write_sector(lba, &sector_buf).map_err(|_| VfsError::IoError)?;
+            self.device
+                .write_sector(lba, &sector_buf)
+                .map_err(|_| VfsError::IoError)?;
 
             bytes_written += to_copy;
             pos += to_copy as u64;
@@ -508,7 +564,9 @@ impl Fat32Fs {
             for s in 0..self.bpb.sectors_per_cluster as u64 {
                 let lba = cluster_lba + s;
                 let mut sector = [0u8; SECTOR_SIZE];
-                self.device.read_sector(lba, &mut sector).map_err(|_| VfsError::IoError)?;
+                self.device
+                    .read_sector(lba, &mut sector)
+                    .map_err(|_| VfsError::IoError)?;
                 for slot in 0..(SECTOR_SIZE / DIR_ENTRY_SIZE) {
                     let off = slot * DIR_ENTRY_SIZE;
                     let entry: FatDirEntry = unsafe {
@@ -524,7 +582,9 @@ impl Fat32Fs {
             }
             cluster = self.next_cluster(cluster)?;
             walked += 1;
-            if walked > max_walk { return Err(VfsError::IoError); }
+            if walked > max_walk {
+                return Err(VfsError::IoError);
+            }
         }
         Ok(None)
     }
@@ -541,7 +601,9 @@ impl Fat32Fs {
             for s in 0..self.bpb.sectors_per_cluster as u64 {
                 let lba = cluster_lba + s;
                 let mut sector = [0u8; SECTOR_SIZE];
-                self.device.read_sector(lba, &mut sector).map_err(|_| VfsError::IoError)?;
+                self.device
+                    .read_sector(lba, &mut sector)
+                    .map_err(|_| VfsError::IoError)?;
                 for slot in 0..(SECTOR_SIZE / DIR_ENTRY_SIZE) {
                     let off = slot * DIR_ENTRY_SIZE;
                     let first = sector[off];
@@ -553,7 +615,9 @@ impl Fat32Fs {
             last_cluster = cluster;
             cluster = self.next_cluster(cluster)?;
             walked += 1;
-            if walked > max_walk { return Err(VfsError::IoError); }
+            if walked > max_walk {
+                return Err(VfsError::IoError);
+            }
         }
         // Need to extend the dir chain with a fresh, zeroed cluster.
         let new_cluster = self.alloc_cluster()?;
@@ -563,20 +627,23 @@ impl Fat32Fs {
 
     fn write_dir_entry(&self, lba: u64, slot: usize, entry: &FatDirEntry) -> VfsResult<()> {
         let mut sector = [0u8; SECTOR_SIZE];
-        self.device.read_sector(lba, &mut sector).map_err(|_| VfsError::IoError)?;
+        self.device
+            .read_sector(lba, &mut sector)
+            .map_err(|_| VfsError::IoError)?;
         let off = slot * DIR_ENTRY_SIZE;
         unsafe {
-            core::ptr::write_unaligned(
-                sector.as_mut_ptr().add(off) as *mut FatDirEntry,
-                *entry,
-            );
+            core::ptr::write_unaligned(sector.as_mut_ptr().add(off) as *mut FatDirEntry, *entry);
         }
-        self.device.write_sector(lba, &sector).map_err(|_| VfsError::IoError)?;
+        self.device
+            .write_sector(lba, &sector)
+            .map_err(|_| VfsError::IoError)?;
         Ok(())
     }
 
     fn find_dir_entry(
-        &self, dir_cluster: u32, name: &str,
+        &self,
+        dir_cluster: u32,
+        name: &str,
     ) -> VfsResult<Option<(u64, usize, FatDirEntry)>> {
         let want_lower = name.to_ascii_uppercase();
         self.for_each_dir_slot(dir_cluster, |lba, slot, entry| {
@@ -591,7 +658,12 @@ impl Fat32Fs {
         })
     }
 
-    fn update_dir_entry_size(&self, dir_cluster: u32, file_cluster: u32, size: u32) -> VfsResult<()> {
+    fn update_dir_entry_size(
+        &self,
+        dir_cluster: u32,
+        file_cluster: u32,
+        size: u32,
+    ) -> VfsResult<()> {
         let result = self.for_each_dir_slot(dir_cluster, |lba, slot, entry| {
             if entry.is_deleted() || entry.is_lfn() || entry.is_volume() {
                 return None;
@@ -609,7 +681,11 @@ impl Fat32Fs {
     }
 
     fn update_dir_entry_cluster(
-        &self, dir_cluster: u32, name: &str, new_cluster: u32, new_size: u32,
+        &self,
+        dir_cluster: u32,
+        name: &str,
+        new_cluster: u32,
+        new_size: u32,
     ) -> VfsResult<()> {
         if let Some((lba, slot, mut entry)) = self.find_dir_entry(dir_cluster, name)? {
             entry.set_cluster(new_cluster);
@@ -678,10 +754,14 @@ impl Fat32Fs {
         // Build "." and ".." entries inside the new directory's cluster.
         let dot_name = *b".       ";
         let dotdot_name = *b"..      ";
-        let space_ext  = *b"   ";
+        let space_ext = *b"   ";
         let dot = Self::make_entry(dot_name, space_ext, ATTR_DIRECTORY, cluster, 0);
         // ".." stores 0 when the parent is the root cluster.
-        let parent_for_dotdot = if parent_cluster == self.bpb.root_cluster { 0 } else { parent_cluster };
+        let parent_for_dotdot = if parent_cluster == self.bpb.root_cluster {
+            0
+        } else {
+            parent_cluster
+        };
         let dotdot = Self::make_entry(dotdot_name, space_ext, ATTR_DIRECTORY, parent_for_dotdot, 0);
 
         let cluster_lba = self.cluster_to_lba(cluster);
@@ -706,27 +786,38 @@ impl Fat32Fs {
     /// Remove a file or empty subdirectory. Returns Err(IsADirectory) for
     /// non-empty dirs (kept as IsADirectory to avoid plumbing ENOTEMPTY).
     pub fn unlink(&self, parent_cluster: u32, name: &str) -> VfsResult<()> {
-        let (lba, slot, entry) = self.find_dir_entry(parent_cluster, name)?
+        let (lba, slot, entry) = self
+            .find_dir_entry(parent_cluster, name)?
             .ok_or(VfsError::NotFound)?;
 
         if entry.is_dir() {
             // Empty = only "." and ".." (or no entries at all).
             let mut non_special = 0u32;
             self.for_each_dir_slot(entry.get_cluster(), |_, _, e| {
-                if e.is_deleted() || e.is_lfn() { return None; }
+                if e.is_deleted() || e.is_lfn() {
+                    return None;
+                }
                 let n = e.get_name();
-                if n != "." && n != ".." { non_special += 1; }
+                if n != "." && n != ".." {
+                    non_special += 1;
+                }
                 None::<()>
             })?;
-            if non_special > 0 { return Err(VfsError::InvalidArgument); }
+            if non_special > 0 {
+                return Err(VfsError::InvalidArgument);
+            }
         }
 
         let cluster = entry.get_cluster();
         // Mark dir entry deleted in-place.
         let mut sector = [0u8; SECTOR_SIZE];
-        self.device.read_sector(lba, &mut sector).map_err(|_| VfsError::IoError)?;
+        self.device
+            .read_sector(lba, &mut sector)
+            .map_err(|_| VfsError::IoError)?;
         sector[slot * DIR_ENTRY_SIZE] = DIR_FREE;
-        self.device.write_sector(lba, &sector).map_err(|_| VfsError::IoError)?;
+        self.device
+            .write_sector(lba, &sector)
+            .map_err(|_| VfsError::IoError)?;
 
         // Free its cluster chain.
         if cluster >= 2 {
@@ -736,15 +827,28 @@ impl Fat32Fs {
     }
 
     pub fn lookup_in_dir(&self, parent_cluster: u32, name: &str) -> VfsResult<u32> {
-        let (_, _, entry) = self.find_dir_entry(parent_cluster, name)?
+        let (_, _, entry) = self
+            .find_dir_entry(parent_cluster, name)?
             .ok_or(VfsError::NotFound)?;
         let c = entry.get_cluster();
         // Cache metadata + size + parent so VFS walk-by-inode can resolve this
         // cluster later (Fat32Filesystem::get_inode reads from this cache).
-        let ft = if entry.is_dir() { FileType::Directory } else { FileType::Regular };
+        let ft = if entry.is_dir() {
+            FileType::Directory
+        } else {
+            FileType::Regular
+        };
         let mut meta = InodeMetadata::new(c as InodeNum, ft);
-        meta.mode = FileMode::new(if ft == FileType::Directory { 0o755 } else { 0o644 });
-        meta.size = if ft == FileType::Regular { entry.size as u64 } else { 0 };
+        meta.mode = FileMode::new(if ft == FileType::Directory {
+            0o755
+        } else {
+            0o644
+        });
+        meta.size = if ft == FileType::Regular {
+            entry.size as u64
+        } else {
+            0
+        };
         self.cache_metadata(c as InodeNum, meta);
         if !entry.is_dir() {
             self.set_cached_size(c as InodeNum, entry.size as u64);
@@ -776,7 +880,11 @@ pub struct FatInode {
 
 impl FatInode {
     pub fn new(fs: Arc<Fat32Fs>, cluster: u32, metadata: InodeMetadata) -> Self {
-        FatInode { fs, cluster, metadata }
+        FatInode {
+            fs,
+            cluster,
+            metadata,
+        }
     }
 }
 
@@ -787,10 +895,16 @@ impl InodeOps for FatInode {
         }
         // The cached size on the dir entry takes priority — it may have been
         // updated by another open handle.
-        let size = self.fs.cached_size(self.metadata.ino).unwrap_or(self.metadata.size);
-        if offset >= size { return Ok(0); }
+        let size = self
+            .fs
+            .cached_size(self.metadata.ino)
+            .unwrap_or(self.metadata.size);
+        if offset >= size {
+            return Ok(0);
+        }
         let to_read = (size - offset).min(buf.len() as u64) as usize;
-        self.fs.read_chain(self.cluster, offset, &mut buf[..to_read])
+        self.fs
+            .read_chain(self.cluster, offset, &mut buf[..to_read])
     }
 
     fn write(&self, offset: u64, buf: &[u8]) -> VfsResult<usize> {
@@ -799,7 +913,9 @@ impl InodeOps for FatInode {
         }
         let (new_head, n) = self.fs.write_chain(self.cluster, offset, buf)?;
         let new_size = (offset + n as u64).max(
-            self.fs.cached_size(self.metadata.ino).unwrap_or(self.metadata.size),
+            self.fs
+                .cached_size(self.metadata.ino)
+                .unwrap_or(self.metadata.size),
         );
         self.fs.set_cached_size(self.metadata.ino, new_size);
         if let Some(parent) = self.fs.get_parent(self.cluster) {
@@ -810,7 +926,9 @@ impl InodeOps for FatInode {
                 // the existing entry by old cluster; the new_head case only
                 // arises if cluster was 0, which create_file precludes.
             }
-            let _ = self.fs.update_dir_entry_size(parent, self.cluster, new_size as u32);
+            let _ = self
+                .fs
+                .update_dir_entry_size(parent, self.cluster, new_size as u32);
         }
         Ok(n)
     }
@@ -850,23 +968,41 @@ impl InodeOps for FatInode {
             if name == "." || name == ".." {
                 return None;
             }
-            let ft = if entry.is_dir() { FileType::Directory } else { FileType::Regular };
+            let ft = if entry.is_dir() {
+                FileType::Directory
+            } else {
+                FileType::Regular
+            };
             let ino = entry.get_cluster() as InodeNum;
             let mut meta = InodeMetadata::new(ino, ft);
-            meta.mode = FileMode::new(if ft == FileType::Directory { 0o755 } else { 0o644 });
-            meta.size = if ft == FileType::Regular { entry.size as u64 } else { 0 };
+            meta.mode = FileMode::new(if ft == FileType::Directory {
+                0o755
+            } else {
+                0o644
+            });
+            meta.size = if ft == FileType::Regular {
+                entry.size as u64
+            } else {
+                0
+            };
             self.fs.cache_metadata(ino, meta);
             if ft == FileType::Regular {
                 self.fs.set_cached_size(ino, entry.size as u64);
             }
             self.fs.remember_parent(self.cluster, entry.get_cluster());
-            entries.push(DirEntry { name, ino, file_type: ft });
+            entries.push(DirEntry {
+                name,
+                ino,
+                file_type: ft,
+            });
             None::<()>
         })?;
         Ok(entries)
     }
 
-    fn sync(&self) -> VfsResult<()> { Ok(()) }
+    fn sync(&self) -> VfsResult<()> {
+        Ok(())
+    }
 }
 
 pub struct Fat32Filesystem {
@@ -906,17 +1042,25 @@ impl Filesystem for Fat32Filesystem {
             meta.mode = FileMode::new(0o755);
             meta
         } else {
-            self.inner.get_cached_metadata(ino).ok_or(VfsError::NotFound)?
+            self.inner
+                .get_cached_metadata(ino)
+                .ok_or(VfsError::NotFound)?
         };
 
-        Ok(Arc::new(FatInode::new(self.inner.clone(), ino as u32, meta)))
+        Ok(Arc::new(FatInode::new(
+            self.inner.clone(),
+            ino as u32,
+            meta,
+        )))
     }
 
     fn name(&self) -> &str {
         "fat32"
     }
 
-    fn as_any(&self) -> &dyn core::any::Any { self }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
 // ─── In-kernel format helper ───────────────────────────────────────────────
@@ -941,13 +1085,18 @@ pub fn format_fat32(device: Arc<dyn BlockDevice>, label: &str) -> VfsResult<Arc<
     let mut sectors_per_fat: u32 = 1;
     for _ in 0..32 {
         let data_offset = reserved_sectors as u64 + fat_count as u64 * sectors_per_fat as u64;
-        if data_offset >= total_sectors { return Err(VfsError::NoSpace); }
+        if data_offset >= total_sectors {
+            return Err(VfsError::NoSpace);
+        }
         let data_sectors = total_sectors - data_offset;
         let clusters = (data_sectors / sectors_per_cluster as u64) as u32;
         // Each FAT must cover (clusters + 2) entries × 4 bytes.
         let needed_fat_bytes = (clusters + 2) as u64 * 4;
-        let needed_fat_sectors = ((needed_fat_bytes + SECTOR_SIZE as u64 - 1) / SECTOR_SIZE as u64) as u32;
-        if needed_fat_sectors <= sectors_per_fat { break; }
+        let needed_fat_sectors =
+            ((needed_fat_bytes + SECTOR_SIZE as u64 - 1) / SECTOR_SIZE as u64) as u32;
+        if needed_fat_sectors <= sectors_per_fat {
+            break;
+        }
         sectors_per_fat = needed_fat_sectors;
     }
 
@@ -990,13 +1139,19 @@ pub fn format_fat32(device: Arc<dyn BlockDevice>, label: &str) -> VfsResult<Arc<
 
     // Sector 0: boot sector with BPB + signature.
     let mut boot = [0u8; SECTOR_SIZE];
-    unsafe { core::ptr::write_unaligned(boot.as_mut_ptr() as *mut BpbFat32, bpb); }
+    unsafe {
+        core::ptr::write_unaligned(boot.as_mut_ptr() as *mut BpbFat32, bpb);
+    }
     boot[510] = 0x55;
     boot[511] = 0xAA;
-    device.write_sector(0, &boot).map_err(|_| VfsError::IoError)?;
+    device
+        .write_sector(0, &boot)
+        .map_err(|_| VfsError::IoError)?;
 
     // Backup boot sector.
-    device.write_sector(bpb.backup_boot_sector as u64, &boot).map_err(|_| VfsError::IoError)?;
+    device
+        .write_sector(bpb.backup_boot_sector as u64, &boot)
+        .map_err(|_| VfsError::IoError)?;
 
     // FSInfo (sector 1): lead 0x41615252, struc 0x61417272, free_count = 0xFFFFFFFF (unknown),
     // next_free = 0xFFFFFFFF, trail 0xAA550000.
@@ -1006,14 +1161,17 @@ pub fn format_fat32(device: Arc<dyn BlockDevice>, label: &str) -> VfsResult<Arc<
     fsinfo[488..492].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
     fsinfo[492..496].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
     fsinfo[508..512].copy_from_slice(&0xAA550000u32.to_le_bytes());
-    device.write_sector(1, &fsinfo).map_err(|_| VfsError::IoError)?;
+    device
+        .write_sector(1, &fsinfo)
+        .map_err(|_| VfsError::IoError)?;
 
     // Zero the FAT region.
     let zero = [0u8; SECTOR_SIZE];
     let fat_offset = reserved_sectors as u64;
     for fat_idx in 0..fat_count as u64 {
         for s in 0..sectors_per_fat as u64 {
-            device.write_sector(fat_offset + fat_idx * sectors_per_fat as u64 + s, &zero)
+            device
+                .write_sector(fat_offset + fat_idx * sectors_per_fat as u64 + s, &zero)
                 .map_err(|_| VfsError::IoError)?;
         }
     }
@@ -1024,7 +1182,8 @@ pub fn format_fat32(device: Arc<dyn BlockDevice>, label: &str) -> VfsResult<Arc<
     fat0[4..8].copy_from_slice(&FAT_ENTRY_EOC.to_le_bytes());
     fat0[8..12].copy_from_slice(&FAT_ENTRY_EOC.to_le_bytes()); // root cluster (#2) = EOC
     for fat_idx in 0..fat_count as u64 {
-        device.write_sector(fat_offset + fat_idx * sectors_per_fat as u64, &fat0)
+        device
+            .write_sector(fat_offset + fat_idx * sectors_per_fat as u64, &fat0)
             .map_err(|_| VfsError::IoError)?;
     }
 
@@ -1032,12 +1191,17 @@ pub fn format_fat32(device: Arc<dyn BlockDevice>, label: &str) -> VfsResult<Arc<
     let data_offset = fat_offset + fat_count as u64 * sectors_per_fat as u64;
     let root_lba = data_offset + (root_cluster as u64 - 2) * sectors_per_cluster as u64;
     for s in 0..sectors_per_cluster as u64 {
-        device.write_sector(root_lba + s, &zero).map_err(|_| VfsError::IoError)?;
+        device
+            .write_sector(root_lba + s, &zero)
+            .map_err(|_| VfsError::IoError)?;
     }
 
     crate::serial::serial_println!(
         "[ FAT32 ] Formatted '{}': {} total sectors, {} FAT sectors, root cluster {}",
-        device.name(), total_sectors, sectors_per_fat, root_cluster,
+        device.name(),
+        total_sectors,
+        sectors_per_fat,
+        root_cluster,
     );
 
     Fat32Fs::new(device)
@@ -1084,7 +1248,7 @@ pub fn smoke_test(fs: &Arc<Fat32Fs>) {
                 crate::serial::serial_println!("[ FAT32 ] FAIL create {}: {:?}", NAME, e);
                 return;
             }
-        }
+        },
         Err(e) => {
             crate::serial::serial_println!("[ FAT32 ] FAIL find {}: {:?}", NAME, e);
             return;
@@ -1095,7 +1259,8 @@ pub fn smoke_test(fs: &Arc<Fat32Fs>) {
     let mut buf = [0u8; 16];
     let size = fs.cached_size(file_cluster as InodeNum).unwrap_or(0);
     let n = if size > 0 {
-        fs.read_chain(file_cluster, 0, &mut buf[..size as usize]).unwrap_or(0)
+        fs.read_chain(file_cluster, 0, &mut buf[..size as usize])
+            .unwrap_or(0)
     } else {
         0
     };
@@ -1109,7 +1274,10 @@ pub fn smoke_test(fs: &Arc<Fat32Fs>) {
             fs.set_cached_size(file_cluster as InodeNum, w as u64);
             let _ = fs.update_dir_entry_size(test_cluster, file_cluster, w as u32);
             crate::serial::serial_println!(
-                "[ FAT32 ] boot-counter = {} (was {}, wrote {} bytes)", next, value, w,
+                "[ FAT32 ] boot-counter = {} (was {}, wrote {} bytes)",
+                next,
+                value,
+                w,
             );
         }
         Err(e) => crate::serial::serial_println!("[ FAT32 ] FAIL write: {:?}", e),
@@ -1117,7 +1285,9 @@ pub fn smoke_test(fs: &Arc<Fat32Fs>) {
 
     // 3. Read-back verification of the *just-written* value.
     let mut verify = [0u8; 16];
-    let vn = fs.read_chain(file_cluster, 0, &mut verify[..s.len()]).unwrap_or(0);
+    let vn = fs
+        .read_chain(file_cluster, 0, &mut verify[..s.len()])
+        .unwrap_or(0);
     if &verify[..vn] == s.as_bytes() {
         crate::serial::serial_println!("[ FAT32 ] read-back PASS: '{}'", s);
     } else {

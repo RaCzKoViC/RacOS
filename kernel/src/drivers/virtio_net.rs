@@ -36,7 +36,7 @@ const REG_QUEUE_SELECT: u16 = 0x0E;
 const REG_QUEUE_NOTIFY: u16 = 0x10;
 const REG_DEVICE_STATUS: u16 = 0x12;
 const REG_ISR_STATUS: u16 = 0x13;
-const REG_DEVICE_CONFIG: u16 = 0x14;   // MAC[6], status u16, ...
+const REG_DEVICE_CONFIG: u16 = 0x14; // MAC[6], status u16, ...
 
 // --- Device status bits ---
 const STATUS_ACKNOWLEDGE: u8 = 0x01;
@@ -70,7 +70,7 @@ pub struct VirtioNetHdr {
 }
 
 pub const VIRTIO_NET_HDR_LEN: usize = 10;
-pub const MTU_BYTES: usize = 1514;            // Ethernet II max payload incl. headers
+pub const MTU_BYTES: usize = 1514; // Ethernet II max payload incl. headers
 pub const RX_BUF_BYTES: usize = VIRTIO_NET_HDR_LEN + MTU_BYTES + 2; // tiny pad
 
 /// Owned RX buffer (one frame each, identity-mapped).
@@ -116,26 +116,38 @@ impl VirtioNet {
 
     fn bring_up(io_base: u16) -> Result<Self, VirtioNetError> {
         // 1. Reset.
-        unsafe { outb(io_base + REG_DEVICE_STATUS, 0); }
+        unsafe {
+            outb(io_base + REG_DEVICE_STATUS, 0);
+        }
 
         // 2/3. ACKNOWLEDGE | DRIVER.
         let mut status = STATUS_ACKNOWLEDGE;
-        unsafe { outb(io_base + REG_DEVICE_STATUS, status); }
+        unsafe {
+            outb(io_base + REG_DEVICE_STATUS, status);
+        }
         status |= STATUS_DRIVER;
-        unsafe { outb(io_base + REG_DEVICE_STATUS, status); }
+        unsafe {
+            outb(io_base + REG_DEVICE_STATUS, status);
+        }
 
         // 4. Feature negotiation — we only ask for VIRTIO_NET_F_MAC.
         let device_features = unsafe { inl(io_base + REG_DEVICE_FEATURES) };
         if device_features & VIRTIO_NET_F_MAC == 0 {
-            unsafe { outb(io_base + REG_DEVICE_STATUS, status | STATUS_FAILED); }
+            unsafe {
+                outb(io_base + REG_DEVICE_STATUS, status | STATUS_FAILED);
+            }
             return Err(VirtioNetError::FeatureNegotiation);
         }
-        unsafe { outl(io_base + REG_GUEST_FEATURES, VIRTIO_NET_F_MAC); }
+        unsafe {
+            outl(io_base + REG_GUEST_FEATURES, VIRTIO_NET_F_MAC);
+        }
 
         // 5. Read MAC from device-specific config.
         let mut mac = [0u8; 6];
         for i in 0..6 {
-            unsafe { mac[i] = inb(io_base + REG_DEVICE_CONFIG + i as u16); }
+            unsafe {
+                mac[i] = inb(io_base + REG_DEVICE_CONFIG + i as u16);
+            }
         }
 
         // 6. Set up RX and TX virtqueues.
@@ -146,7 +158,10 @@ impl VirtioNet {
         let mut rx_bufs = Vec::with_capacity(RX_BUF_COUNT);
         for _ in 0..RX_BUF_COUNT {
             let f = phys::alloc_frame().map_err(|_| VirtioNetError::QueueAlloc)?;
-            rx_bufs.push(RxBuf { phys: f.addr(), desc_head: 0 });
+            rx_bufs.push(RxBuf {
+                phys: f.addr(),
+                desc_head: 0,
+            });
         }
 
         // 8. Staging TX buffer.
@@ -165,29 +180,39 @@ impl VirtioNet {
         dev.post_initial_rx()?;
 
         // 10. DRIVER_OK.
-        unsafe { outb(io_base + REG_DEVICE_STATUS, status | STATUS_DRIVER_OK); }
+        unsafe {
+            outb(io_base + REG_DEVICE_STATUS, status | STATUS_DRIVER_OK);
+        }
         Ok(dev)
     }
 
     fn setup_queue(io_base: u16, idx: u16) -> Result<Virtqueue, VirtioNetError> {
         // Select queue.
-        unsafe { outw(io_base + REG_QUEUE_SELECT, idx); }
+        unsafe {
+            outw(io_base + REG_QUEUE_SELECT, idx);
+        }
         // Legacy I/O queue size is device-dictated and read-only. Our virtqueue
         // layout MUST match exactly or the device reads/writes outside it.
         let dev_size = unsafe { inw(io_base + REG_QUEUE_SIZE) };
         crate::serial::serial_println!(
-            "[ VIRTIO ] queue {} device-reported size={}", idx, dev_size,
+            "[ VIRTIO ] queue {} device-reported size={}",
+            idx,
+            dev_size,
         );
         if (dev_size as usize) != QUEUE_SIZE {
             crate::serial::serial_println!(
                 "[ VIRTIO ] queue {} size mismatch (device={}, driver={}); refusing",
-                idx, dev_size, QUEUE_SIZE,
+                idx,
+                dev_size,
+                QUEUE_SIZE,
             );
             return Err(VirtioNetError::QueueAlloc);
         }
         let vq = Virtqueue::new().map_err(|_| VirtioNetError::QueueAlloc)?;
         // Tell device where the queue lives. Legacy I/O uses PFN.
-        unsafe { outl(io_base + REG_QUEUE_ADDRESS, vq.pfn()); }
+        unsafe {
+            outl(io_base + REG_QUEUE_ADDRESS, vq.pfn());
+        }
         Ok(vq)
     }
 
@@ -196,7 +221,8 @@ impl VirtioNet {
         // — split with indices.
         for i in 0..self.rx_bufs.len() {
             let phys = self.rx_bufs[i].phys;
-            let head = self.rx
+            let head = self
+                .rx
                 .add_buf(&[(phys, RX_BUF_BYTES as u32, true)])
                 .map_err(|_| VirtioNetError::NoFreeDescriptor)?;
             self.rx_bufs[i].desc_head = head;
@@ -209,7 +235,9 @@ impl VirtioNet {
     #[inline]
     fn notify(&self, queue: u16) {
         // SAFETY: io_base belongs to this device's BAR0.
-        unsafe { outw(self.io_base + REG_QUEUE_NOTIFY, queue); }
+        unsafe {
+            outw(self.io_base + REG_QUEUE_NOTIFY, queue);
+        }
     }
 
     /// Send a single Ethernet frame. `payload` must include Ethernet header,
@@ -223,8 +251,12 @@ impl VirtioNet {
         // SAFETY: tx_buf_phys is a 4 KiB owned frame, identity-mapped.
         unsafe {
             let dst = self.tx_buf_phys as *mut u8;
-            core::ptr::write_bytes(dst, 0, VIRTIO_NET_HDR_LEN);          // zero header
-            core::ptr::copy_nonoverlapping(payload.as_ptr(), dst.add(VIRTIO_NET_HDR_LEN), payload.len());
+            core::ptr::write_bytes(dst, 0, VIRTIO_NET_HDR_LEN); // zero header
+            core::ptr::copy_nonoverlapping(
+                payload.as_ptr(),
+                dst.add(VIRTIO_NET_HDR_LEN),
+                payload.len(),
+            );
         }
 
         let total_len = (VIRTIO_NET_HDR_LEN + payload.len()) as u32;

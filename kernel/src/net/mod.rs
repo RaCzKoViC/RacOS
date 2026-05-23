@@ -7,14 +7,14 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-pub mod eth;
 pub mod arp;
-pub mod ipv4;
-pub mod icmp;
-pub mod udp;
 pub mod dns;
-pub mod tcp;
+pub mod eth;
+pub mod icmp;
+pub mod ipv4;
 pub mod stack;
+pub mod tcp;
+pub mod udp;
 
 pub const AF_INET: i32 = 2;
 pub const SOCK_STREAM: i32 = 1;
@@ -221,7 +221,11 @@ pub fn connect(pid: u32, fd: i32, port: u16) -> NetResult<()> {
         .sockets
         .iter()
         .enumerate()
-        .find(|(_, s)| s.as_ref().map(|x| x.listening && x.local_port == Some(port)).unwrap_or(false))
+        .find(|(_, s)| {
+            s.as_ref()
+                .map(|x| x.listening && x.local_port == Some(port))
+                .unwrap_or(false)
+        })
         .map(|(i, _)| i)
         .ok_or(NetError::ConnRefused)?;
 
@@ -386,13 +390,19 @@ pub fn bind_fd_tcp(pid: u32, fd: i32, conn_id: tcp::ConnId) {
 
 pub fn tcp_id_by_fd(pid: u32, fd: i32) -> Option<tcp::ConnId> {
     let st = state_mut();
-    st.tcp_bindings.iter().find(|b| b.pid == pid && b.fd == fd).map(|b| b.conn_id)
+    st.tcp_bindings
+        .iter()
+        .find(|b| b.pid == pid && b.fd == fd)
+        .map(|b| b.conn_id)
 }
 
 /// Remove a TCP binding (called from sys_close). Returns the conn id so the
 /// caller can issue tcp::close on it.
 pub fn close_fd_tcp(pid: u32, fd: i32) -> Option<tcp::ConnId> {
     let st = state_mut();
-    let idx = st.tcp_bindings.iter().position(|b| b.pid == pid && b.fd == fd)?;
+    let idx = st
+        .tcp_bindings
+        .iter()
+        .position(|b| b.pid == pid && b.fd == fd)?;
     Some(st.tcp_bindings.swap_remove(idx).conn_id)
 }

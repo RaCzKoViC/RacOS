@@ -32,7 +32,7 @@ pub enum Bar {
     /// 32- or 64-bit memory-mapped region.
     Mem { base: u64, prefetch: bool },
     /// I/O port range.
-    Io  { base: u16 },
+    Io { base: u16 },
     /// BAR slot is unused (raw value 0) or hidden behind a 64-bit pair.
     Unused,
 }
@@ -73,23 +73,42 @@ impl PciDevice {
         debug_assert!(idx < 6);
         let off = BAR_BASE + idx * 4;
         let lo = self.config_read_u32(off);
-        if lo == 0 { return Bar::Unused; }
+        if lo == 0 {
+            return Bar::Unused;
+        }
 
         if lo & 1 != 0 {
-            return Bar::Io { base: (lo & 0xFFFC) as u16 };
+            return Bar::Io {
+                base: (lo & 0xFFFC) as u16,
+            };
         }
 
         let kind = (lo >> 1) & 0x3;
         let prefetch = (lo >> 3) & 1 != 0;
         let base_lo = (lo & 0xFFFF_FFF0) as u64;
         match kind {
-            0x0 => Bar::Mem { base: base_lo, prefetch },                // 32-bit
-            0x2 => {                                                    // 64-bit
-                if idx >= 5 { return Bar::Mem { base: base_lo, prefetch }; }
+            0x0 => Bar::Mem {
+                base: base_lo,
+                prefetch,
+            }, // 32-bit
+            0x2 => {
+                // 64-bit
+                if idx >= 5 {
+                    return Bar::Mem {
+                        base: base_lo,
+                        prefetch,
+                    };
+                }
                 let hi = self.config_read_u32(off + 4) as u64;
-                Bar::Mem { base: base_lo | (hi << 32), prefetch }
+                Bar::Mem {
+                    base: base_lo | (hi << 32),
+                    prefetch,
+                }
             }
-            _ => Bar::Mem { base: base_lo, prefetch },                  // reserved
+            _ => Bar::Mem {
+                base: base_lo,
+                prefetch,
+            }, // reserved
         }
     }
 
@@ -118,18 +137,25 @@ pub fn enumerate_pci() -> alloc::vec::Vec<PciDevice> {
 
 fn check_device(bus: u8, slot: u8) -> Option<PciDevice> {
     let vendor_id = pci_read_u16(bus, slot, 0, 0);
-    if vendor_id == 0xFFFF { return None; }
+    if vendor_id == 0xFFFF {
+        return None;
+    }
 
     let device_id = pci_read_u16(bus, slot, 0, 2);
     let class_rev = pci_read_u32(bus, slot, 0, 0x08);
     let class_code = (class_rev >> 24) as u8;
-    let subclass  = (class_rev >> 16) as u8;
-    let prog_if   = (class_rev >> 8)  as u8;
+    let subclass = (class_rev >> 16) as u8;
+    let prog_if = (class_rev >> 8) as u8;
 
     Some(PciDevice {
-        bus, slot, func: 0,
-        vendor_id, device_id,
-        class_code, subclass, prog_if,
+        bus,
+        slot,
+        func: 0,
+        vendor_id,
+        device_id,
+        class_code,
+        subclass,
+        prog_if,
     })
 }
 

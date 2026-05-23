@@ -19,7 +19,11 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
             continue;
         }
         let mut arg_len = 0;
-        unsafe { while *arg_ptr.add(arg_len) != 0 { arg_len += 1; } }
+        unsafe {
+            while *arg_ptr.add(arg_len) != 0 {
+                arg_len += 1;
+            }
+        }
         let arg_bytes = unsafe { core::slice::from_raw_parts(arg_ptr, arg_len) };
 
         if arg_bytes.len() > 0 && arg_bytes[0] == b'-' {
@@ -29,8 +33,14 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
                     i += 1;
                     let pat_ptr = unsafe { *argv.add(i as usize) };
                     let mut pat_len = 0;
-                    unsafe { while *pat_ptr.add(pat_len) != 0 { pat_len += 1; } }
-                    if let Ok(s) = core::str::from_utf8(unsafe { core::slice::from_raw_parts(pat_ptr, pat_len) }) {
+                    unsafe {
+                        while *pat_ptr.add(pat_len) != 0 {
+                            pat_len += 1;
+                        }
+                    }
+                    if let Ok(s) = core::str::from_utf8(unsafe {
+                        core::slice::from_raw_parts(pat_ptr, pat_len)
+                    }) {
                         name_pattern = Some(s);
                     }
                 }
@@ -104,7 +114,8 @@ fn find_recursive(path: &str, name_pattern: Option<&str>) {
                                             pos += 1;
                                         }
 
-                                        let full_path = core::str::from_utf8(&full_path_buf[..pos]).unwrap_or("");
+                                        let full_path = core::str::from_utf8(&full_path_buf[..pos])
+                                            .unwrap_or("");
 
                                         // Match pattern if provided
                                         let matches = if let Some(pat) = name_pattern {
@@ -119,7 +130,8 @@ fn find_recursive(path: &str, name_pattern: Option<&str>) {
                                         }
 
                                         // Recurse into directories
-                                        if file_type == 2 { // DT_DIR
+                                        if file_type == 2 {
+                                            // DT_DIR
                                             find_recursive(full_path, name_pattern);
                                         }
                                     }

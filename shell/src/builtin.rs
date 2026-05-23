@@ -5,9 +5,9 @@
 
 extern crate alloc;
 
+use crate::expand::Env;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::expand::Env;
 
 /// Result of a builtin execution.
 pub enum BuiltinResult {
@@ -21,7 +21,25 @@ pub enum BuiltinResult {
 
 /// Check if a command name is a builtin.
 pub fn is_builtin(name: &str) -> bool {
-    matches!(name, "cd" | "pwd" | "exit" | "export" | "unset" | "set" | "true" | "false" | "jobs" | "fg" | "bg" | "test" | "[" | "read" | "type" | "kill" | "wait")
+    matches!(
+        name,
+        "cd" | "pwd"
+            | "exit"
+            | "export"
+            | "unset"
+            | "set"
+            | "true"
+            | "false"
+            | "jobs"
+            | "fg"
+            | "bg"
+            | "test"
+            | "["
+            | "read"
+            | "type"
+            | "kill"
+            | "wait"
+    )
 }
 
 /// Execute a builtin command.
@@ -363,15 +381,25 @@ fn file_is_dir(path: &str) -> bool {
 
 fn parse_i64(s: &str) -> i64 {
     let bytes = s.as_bytes();
-    if bytes.is_empty() { return 0; }
-    let (neg, start) = if bytes[0] == b'-' { (true, 1) } else { (false, 0) };
+    if bytes.is_empty() {
+        return 0;
+    }
+    let (neg, start) = if bytes[0] == b'-' {
+        (true, 1)
+    } else {
+        (false, 0)
+    };
     let mut r: i64 = 0;
     for &b in &bytes[start..] {
         if b.is_ascii_digit() {
             r = r.wrapping_mul(10).wrapping_add((b - b'0') as i64);
         }
     }
-    if neg { -r } else { r }
+    if neg {
+        -r
+    } else {
+        r
+    }
 }
 
 // ─────────────────────────────────────────────────
@@ -459,7 +487,7 @@ fn builtin_kill(args: &[String], write_fn: &dyn Fn(&[u8])) -> BuiltinResult {
         return BuiltinResult::Ok(1);
     }
 
-    let mut sig = 15i32;  // SIGTERM default
+    let mut sig = 15i32; // SIGTERM default
     let mut pid_str = args[1].as_str();
 
     // Check for signal flag (-N or -SIGname)

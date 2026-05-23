@@ -8,7 +8,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use super::inode::{InodeOps, InodeNum, VfsResult, VfsError, DirEntry};
+use super::inode::{DirEntry, InodeNum, InodeOps, VfsError, VfsResult};
 
 /// A filesystem driver that can provide inodes.
 pub trait Filesystem: Send + Sync + 'static {
@@ -40,9 +40,7 @@ pub struct MountTable {
 
 impl MountTable {
     pub fn new() -> Self {
-        MountTable {
-            mounts: Vec::new(),
-        }
+        MountTable { mounts: Vec::new() }
     }
 
     /// Mount a filesystem at the given path.
@@ -57,11 +55,7 @@ impl MountTable {
             existing.fs = fs;
             return;
         }
-        crate::serial::serial_println!(
-            "[   VFS   ] Mounting '{}' at {}",
-            fs.name(),
-            path
-        );
+        crate::serial::serial_println!("[   VFS   ] Mounting '{}' at {}", fs.name(), path);
         self.mounts.push(MountEntry {
             path: String::from(path),
             fs,
@@ -76,11 +70,7 @@ impl MountTable {
         if let Some(idx) = self.mounts.iter().position(|m| m.path == path) {
             let fs_name = String::from(self.mounts[idx].fs.name());
             self.mounts.remove(idx);
-            crate::serial::serial_println!(
-                "[   VFS   ] Unmounted '{}' from {}",
-                fs_name,
-                path
-            );
+            crate::serial::serial_println!("[   VFS   ] Unmounted '{}' from {}", fs_name, path);
             Ok(())
         } else {
             Err(VfsError::NotFound)
@@ -110,7 +100,9 @@ pub unsafe fn flush_all() -> usize {
     for entry in mt.mounts.iter() {
         let any = entry.fs.as_any();
         if let Some(racfs_fs) = any.downcast_ref::<super::racfs::RacfsFilesystem>() {
-            if racfs_fs.inner().sync().is_ok() { count += 1; }
+            if racfs_fs.inner().sync().is_ok() {
+                count += 1;
+            }
         }
     }
     count
@@ -133,8 +125,7 @@ impl MountTable {
             } else if path == mpath {
                 true
             } else {
-                path.starts_with(mpath)
-                    && path.as_bytes().get(mpath.len()).copied() == Some(b'/')
+                path.starts_with(mpath) && path.as_bytes().get(mpath.len()).copied() == Some(b'/')
             };
             if is_match {
                 let len = entry.path.len();

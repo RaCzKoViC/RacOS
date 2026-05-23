@@ -1,6 +1,6 @@
-use core::fmt;
 use crate::fb_console;
 use crate::serial;
+use core::fmt;
 
 #[macro_export]
 macro_rules! print {
@@ -16,10 +16,10 @@ macro_rules! println {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
-    
+
     // Write to Serial (Always)
     let _ = serial::SerialWriter.write_fmt(args);
-    
+
     // Write to Framebuffer Console (If available) without heap allocation.
     let _ = KernelWriter.write_fmt(args);
 }

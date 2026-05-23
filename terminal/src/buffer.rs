@@ -124,9 +124,22 @@ impl ScreenBuffer {
     }
 
     /// Put a character at (row, col) with current attributes.
-    pub fn put_char(&mut self, row: usize, col: usize, ch: char, fg: Color, bg: Color, attrs: CellAttrs) {
+    pub fn put_char(
+        &mut self,
+        row: usize,
+        col: usize,
+        ch: char,
+        fg: Color,
+        bg: Color,
+        attrs: CellAttrs,
+    ) {
         if row < self.rows && col < self.cols {
-            let cell = Cell { character: ch, fg, bg, attrs };
+            let cell = Cell {
+                character: ch,
+                fg,
+                bg,
+                attrs,
+            };
             self.set(row, col, cell);
         }
     }
@@ -271,7 +284,9 @@ impl ScreenBuffer {
 
     /// Insert n blank characters at (row, col), shifting existing chars right.
     pub fn insert_chars(&mut self, row: usize, col: usize, n: usize) {
-        if row >= self.rows || col >= self.cols { return; }
+        if row >= self.rows || col >= self.cols {
+            return;
+        }
         let cols = self.cols;
         let buf = self.grid_mut();
         let start = row * cols;
@@ -286,7 +301,9 @@ impl ScreenBuffer {
 
     /// Delete n characters at (row, col), shifting remaining chars left.
     pub fn delete_chars(&mut self, row: usize, col: usize, n: usize) {
-        if row >= self.rows || col >= self.cols { return; }
+        if row >= self.rows || col >= self.cols {
+            return;
+        }
         let cols = self.cols;
         let buf = self.grid_mut();
         let start = row * cols;
@@ -302,7 +319,9 @@ impl ScreenBuffer {
 
     /// Erase n characters starting at (row, col) without shifting.
     pub fn erase_chars(&mut self, row: usize, col: usize, n: usize) {
-        if row >= self.rows { return; }
+        if row >= self.rows {
+            return;
+        }
         let cols = self.cols;
         let buf = self.grid_mut();
         let start = row * cols;

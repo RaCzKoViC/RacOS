@@ -9,10 +9,12 @@
 // Unix domain sockets use the VFS for binding to a file path.
 // Once bound, they behave like pipes but with addressable endpoints.
 
-use alloc::sync::Arc;
-use alloc::collections::VecDeque;
 use crate::sync::SpinLock;
-use crate::vfs::inode::{InodeOps, FileType, InodeMetadata, VfsResult, VfsError, DirEntry, InodeNum, FileMode};
+use crate::vfs::inode::{
+    DirEntry, FileMode, FileType, InodeMetadata, InodeNum, InodeOps, VfsError, VfsResult,
+};
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -98,7 +100,7 @@ impl UnixSocketInode {
         Self {
             internal: Arc::new(SpinLock::new(UnixSocketInternal::new())),
             metadata: InodeMetadata {
-                ino: 0, 
+                ino: 0,
                 file_type: FileType::Socket,
                 mode: FileMode::new(0o777),
                 uid: 0,
@@ -118,7 +120,7 @@ impl UnixSocketInode {
 impl InodeOps for UnixSocketInode {
     fn read(&self, _offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
         let mut inner = self.internal.lock();
-        
+
         if inner.state == SocketState::Connected || inner.state == SocketState::Closed {
             if inner.receive_queue.is_empty() && inner.state == SocketState::Closed {
                 return Ok(0);
@@ -126,13 +128,13 @@ impl InodeOps for UnixSocketInode {
             let n = inner.receive_queue.read(buf);
             return Ok(n);
         }
-        
+
         Err(VfsError::NotImplemented)
     }
 
     fn write(&self, _offset: u64, buf: &[u8]) -> VfsResult<usize> {
         let inner = self.internal.lock();
-        
+
         if inner.state == SocketState::Connected {
             if let Some(ref peer_inner_locked) = inner.peer {
                 let mut peer_inner = peer_inner_locked.lock();
@@ -140,11 +142,11 @@ impl InodeOps for UnixSocketInode {
                 return Ok(n);
             }
         }
-        
+
         if inner.state == SocketState::Closed {
             return Err(VfsError::BrokenPipe);
         }
-        
+
         Err(VfsError::NotImplemented)
     }
 
@@ -152,4 +154,3 @@ impl InodeOps for UnixSocketInode {
         Ok(self.metadata.clone())
     }
 }
-

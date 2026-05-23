@@ -2,7 +2,7 @@
 //
 // Routes syscall numbers to handler functions per KERNEL_ABI.md §5.
 
-use super::error::{SyscallError, SyscallResult, result_to_raw};
+use super::error::{result_to_raw, SyscallError, SyscallResult};
 use super::handlers;
 
 /// Syscall numbers (KERNEL_ABI.md §5).
@@ -120,7 +120,14 @@ pub extern "C" fn syscall_dispatch(
         SYS_CLOSE => handlers::sys_close(arg1 as i32),
         SYS_STAT => handlers::sys_stat(arg1 as *const u8, arg2 as *mut u8),
         SYS_GETPID => handlers::sys_getpid(),
-        SYS_MMAP => handlers::sys_mmap(arg1, arg2 as usize, arg3 as u32, arg4 as u32, arg5 as i32, arg6),
+        SYS_MMAP => handlers::sys_mmap(
+            arg1,
+            arg2 as usize,
+            arg3 as u32,
+            arg4 as u32,
+            arg5 as i32,
+            arg6,
+        ),
         SYS_MUNMAP => handlers::sys_munmap(arg1, arg2 as usize),
         SYS_PIPE => handlers::sys_pipe(arg1 as *mut i32),
         SYS_DUP => handlers::sys_dup(arg1 as i32),
@@ -172,14 +179,36 @@ pub extern "C" fn syscall_dispatch(
         SYS_SEND => handlers::sys_send(arg1 as i32, arg2 as *const u8, arg3 as usize, arg4 as u32),
         SYS_RECV => handlers::sys_recv(arg1 as i32, arg2 as *mut u8, arg3 as usize, arg4 as u32),
         SYS_SHUTDOWN => handlers::sys_shutdown(arg1 as i32, arg2 as i32),
-        SYS_GETSOCKNAME => handlers::sys_getsockname(arg1 as i32, arg2 as *mut u8, arg3 as *mut u32),
-        SYS_GETPEERNAME => handlers::sys_getpeername(arg1 as i32, arg2 as *mut u8, arg3 as *mut u32),
-        SYS_SETSOCKOPT => handlers::sys_setsockopt(arg1 as i32, arg2 as i32, arg3 as i32, arg4 as *const u8, arg5 as u32),
-        SYS_GETSOCKOPT => handlers::sys_getsockopt(arg1 as i32, arg2 as i32, arg3 as i32, arg4 as *mut u8, arg5 as *mut u32),
+        SYS_GETSOCKNAME => {
+            handlers::sys_getsockname(arg1 as i32, arg2 as *mut u8, arg3 as *mut u32)
+        }
+        SYS_GETPEERNAME => {
+            handlers::sys_getpeername(arg1 as i32, arg2 as *mut u8, arg3 as *mut u32)
+        }
+        SYS_SETSOCKOPT => handlers::sys_setsockopt(
+            arg1 as i32,
+            arg2 as i32,
+            arg3 as i32,
+            arg4 as *const u8,
+            arg5 as u32,
+        ),
+        SYS_GETSOCKOPT => handlers::sys_getsockopt(
+            arg1 as i32,
+            arg2 as i32,
+            arg3 as i32,
+            arg4 as *mut u8,
+            arg5 as *mut u32,
+        ),
         SYS_WAITPID => handlers::sys_waitpid(arg1 as i32, arg2 as *mut i32, arg3 as u32),
         SYS_PIPE2 => handlers::sys_pipe2(arg1 as *mut i32, arg2 as u32),
         SYS_UNAME => handlers::sys_uname(arg1 as *mut u8),
-        SYS_MOUNT => handlers::sys_mount(arg1 as *const u8, arg2 as *const u8, arg3 as *const u8, arg4 as u64, arg5 as *const u8),
+        SYS_MOUNT => handlers::sys_mount(
+            arg1 as *const u8,
+            arg2 as *const u8,
+            arg3 as *const u8,
+            arg4 as u64,
+            arg5 as *const u8,
+        ),
         SYS_UMOUNT => handlers::sys_umount(arg1 as *const u8),
         SYS_MPROTECT => handlers::sys_mprotect(arg1, arg2 as usize, arg3 as u32),
         SYS_FSYNC => handlers::sys_fsync(arg1 as i32),
@@ -190,9 +219,22 @@ pub extern "C" fn syscall_dispatch(
         SYS_REBOOT => handlers::sys_reboot(arg1 as u32),
         SYS_HOSTNAME => handlers::sys_hostname(arg1 as *mut u8, arg2 as usize, arg3 as u32),
         SYS_GETRANDOM => handlers::sys_getrandom(arg1 as *mut u8, arg2 as usize, arg3 as u32),
-        SYS_CLONE => handlers::sys_clone(arg1 as u32, arg2 as *mut u8, arg3 as i32, arg4 as i32, arg5 as *mut u8),
-        SYS_GETHOSTBYNAME => handlers::sys_gethostbyname(arg1 as *const u8, arg2 as usize, arg3 as *mut u8),
-        SYS_MKFS => handlers::sys_mkfs(arg1 as *const u8, arg2 as usize, arg3 as *const u8, arg4 as usize),
+        SYS_CLONE => handlers::sys_clone(
+            arg1 as u32,
+            arg2 as *mut u8,
+            arg3 as i32,
+            arg4 as i32,
+            arg5 as *mut u8,
+        ),
+        SYS_GETHOSTBYNAME => {
+            handlers::sys_gethostbyname(arg1 as *const u8, arg2 as usize, arg3 as *mut u8)
+        }
+        SYS_MKFS => handlers::sys_mkfs(
+            arg1 as *const u8,
+            arg2 as usize,
+            arg3 as *const u8,
+            arg4 as usize,
+        ),
         SYS_SYNC => handlers::sys_sync(),
         SYS_PTHREAD_CREATE => handlers::sys_pthread_create(arg1, arg2),
         _ => Err(SyscallError::ENOSYS),

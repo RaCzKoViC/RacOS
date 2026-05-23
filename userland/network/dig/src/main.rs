@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use libc_lite::{gethostbyname, println, print, write};
+use libc_lite::{gethostbyname, print, println, write};
 
 fn print_u8(n: u8) {
     let mut digits = [0u8; 3];
@@ -26,7 +26,9 @@ fn print_u8(n: u8) {
 fn cstr_len(p: *const u8) -> usize {
     let mut n = 0usize;
     unsafe {
-        while *p.add(n) != 0 { n += 1; }
+        while *p.add(n) != 0 {
+            n += 1;
+        }
     }
     n
 }
@@ -41,7 +43,9 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     }
 
     let name_ptr = unsafe { *argv.add(1) };
-    if name_ptr.is_null() { return 1; }
+    if name_ptr.is_null() {
+        return 1;
+    }
     let len = cstr_len(name_ptr);
     let name = unsafe { core::slice::from_raw_parts(name_ptr, len) };
 
@@ -50,9 +54,12 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
             // Print: "<name> has address a.b.c.d"
             let _ = write(1, name);
             print(" has address ");
-            print_u8(ip[0]); print(".");
-            print_u8(ip[1]); print(".");
-            print_u8(ip[2]); print(".");
+            print_u8(ip[0]);
+            print(".");
+            print_u8(ip[1]);
+            print(".");
+            print_u8(ip[2]);
+            print(".");
             print_u8(ip[3]);
             print("\n");
             0

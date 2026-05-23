@@ -44,8 +44,8 @@ pub struct PerCpu {
 impl PerCpu {
     const fn empty() -> Self {
         PerCpu {
-            self_ptr:   AtomicU64::new(0),
-            apic_id:    AtomicU32::new(0),
+            self_ptr: AtomicU64::new(0),
+            apic_id: AtomicU32::new(0),
             self_check: AtomicU32::new(0),
             tick_count: AtomicU64::new(0),
         }
@@ -75,7 +75,7 @@ const MSR_GS_BASE: u32 = 0xC000_0101;
 
 #[inline]
 unsafe fn wrmsr(msr: u32, val: u64) {
-    let low  = val as u32;
+    let low = val as u32;
     let high = (val >> 32) as u32;
     core::arch::asm!(
         "wrmsr",
@@ -102,7 +102,9 @@ pub unsafe fn init_for_this_cpu(apic_id: u32) {
     // Seed apic_id + self_ptr in the slot before flipping GS so cross-CPU
     // readers (the BSP-side smoke) see a coherent view.
     (*slot_ptr).apic_id.store(apic_id, Ordering::SeqCst);
-    (*slot_ptr).self_ptr.store(slot_ptr as u64, Ordering::SeqCst);
+    (*slot_ptr)
+        .self_ptr
+        .store(slot_ptr as u64, Ordering::SeqCst);
 
     wrmsr(MSR_GS_BASE, slot_ptr as u64);
 
@@ -143,6 +145,10 @@ pub fn peek(apic_id: u32) -> Option<&'static PerCpu> {
 /// hands out sparse ids this will need a real mapping table.
 #[inline]
 fn slot_index_for(apic_id: u32) -> usize {
-    debug_assert!((apic_id as usize) < MAX_CPUS, "apic_id {} >= MAX_CPUS", apic_id);
+    debug_assert!(
+        (apic_id as usize) < MAX_CPUS,
+        "apic_id {} >= MAX_CPUS",
+        apic_id
+    );
     (apic_id as usize) & (MAX_CPUS - 1)
 }

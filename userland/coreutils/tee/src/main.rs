@@ -16,9 +16,15 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
             break;
         }
         let file_ptr = unsafe { *argv.add(i as usize) };
-        if file_ptr.is_null() { continue; }
+        if file_ptr.is_null() {
+            continue;
+        }
         let mut len = 0;
-        unsafe { while *file_ptr.add(len) != 0 { len += 1; } }
+        unsafe {
+            while *file_ptr.add(len) != 0 {
+                len += 1;
+            }
+        }
         let path = unsafe { core::slice::from_raw_parts(file_ptr, len + 1) };
         // O_WRONLY (0x0001) | O_CREAT (0x0040) | O_TRUNC (0x0200) = 0x0241.
         // The previous value 0x0601 was O_WRONLY|O_APPEND|O_TRUNC and

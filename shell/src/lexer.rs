@@ -248,12 +248,18 @@ impl<'a> Lexer<'a> {
                         }
                     } else if c == b'\'' {
                         // Inline single-quote in word
-                        if let TokenKind::SingleQuoted(s) = self.lex_single_quoted().unwrap_or(TokenKind::Word(String::new())) {
+                        if let TokenKind::SingleQuoted(s) = self
+                            .lex_single_quoted()
+                            .unwrap_or(TokenKind::Word(String::new()))
+                        {
                             word.push_str(&s);
                         }
                     } else if c == b'"' {
                         // Inline double-quote in word
-                        if let TokenKind::DoubleQuoted(s) = self.lex_double_quoted().unwrap_or(TokenKind::Word(String::new())) {
+                        if let TokenKind::DoubleQuoted(s) = self
+                            .lex_double_quoted()
+                            .unwrap_or(TokenKind::Word(String::new()))
+                        {
                             word.push_str(&s);
                         }
                     } else {
@@ -420,8 +426,14 @@ impl<'a> Lexer<'a> {
                 }
                 Ok(TokenKind::DollarVar(name))
             }
-            Some(ch) if ch == b'?' || ch == b'$' || ch == b'!' || ch == b'#'
-                || ch == b'0' || ch == b'@' || ch == b'*' =>
+            Some(ch)
+                if ch == b'?'
+                    || ch == b'$'
+                    || ch == b'!'
+                    || ch == b'#'
+                    || ch == b'0'
+                    || ch == b'@'
+                    || ch == b'*' =>
             {
                 let mut name = String::new();
                 name.push(self.advance().unwrap() as char);

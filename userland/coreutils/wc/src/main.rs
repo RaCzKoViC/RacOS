@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use libc_lite::{read, println, print};
+use libc_lite::{print, println, read};
 
 /// Print a u64 as decimal.
 fn print_num(mut n: u64) {

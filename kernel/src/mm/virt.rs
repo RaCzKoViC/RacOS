@@ -110,11 +110,26 @@ impl PageTable {
 pub struct VirtAddr(pub u64);
 
 impl VirtAddr {
-    #[inline] pub fn pml4_index(self) -> usize { ((self.0 >> 39) & 0x1FF) as usize }
-    #[inline] pub fn pdpt_index(self) -> usize { ((self.0 >> 30) & 0x1FF) as usize }
-    #[inline] pub fn pd_index(self) -> usize   { ((self.0 >> 21) & 0x1FF) as usize }
-    #[inline] pub fn pt_index(self) -> usize   { ((self.0 >> 12) & 0x1FF) as usize }
-    #[inline] pub fn offset(self) -> usize     { (self.0 & 0xFFF) as usize }
+    #[inline]
+    pub fn pml4_index(self) -> usize {
+        ((self.0 >> 39) & 0x1FF) as usize
+    }
+    #[inline]
+    pub fn pdpt_index(self) -> usize {
+        ((self.0 >> 30) & 0x1FF) as usize
+    }
+    #[inline]
+    pub fn pd_index(self) -> usize {
+        ((self.0 >> 21) & 0x1FF) as usize
+    }
+    #[inline]
+    pub fn pt_index(self) -> usize {
+        ((self.0 >> 12) & 0x1FF) as usize
+    }
+    #[inline]
+    pub fn offset(self) -> usize {
+        (self.0 & 0xFFF) as usize
+    }
 }
 
 /// Higher-half kernel base address.
@@ -137,7 +152,9 @@ pub fn virt_to_phys(virt: u64) -> u64 {
 pub fn read_cr3() -> u64 {
     let cr3: u64;
     // SAFETY: Reading CR3 is safe — it returns the current page table base.
-    unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+    }
     cr3
 }
 
@@ -154,7 +171,9 @@ pub unsafe fn write_cr3(pml4_phys: u64) {
 /// Invalidate a TLB entry for the given virtual address.
 pub fn invlpg(virt: u64) {
     // SAFETY: invlpg is safe — it only invalidates a cached translation.
-    unsafe { core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack)); }
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack));
+    }
 }
 
 /// Map a single 4 KiB page: virt → phys with given flags.
@@ -166,7 +185,12 @@ pub fn invlpg(virt: u64) {
 /// - `pml4_phys` must point to a valid PML4 table
 /// - Pages must be identity-mapped or accessible for writing
 /// - `phys_frame` must be a valid physical frame
-pub unsafe fn map_page(pml4_phys: u64, virt: VirtAddr, phys_frame: PhysFrame, page_flags: u64) -> Result<(), &'static str> {
+pub unsafe fn map_page(
+    pml4_phys: u64,
+    virt: VirtAddr,
+    phys_frame: PhysFrame,
+    page_flags: u64,
+) -> Result<(), &'static str> {
     let pml4 = &mut *(pml4_phys as *mut PageTable);
 
     // If mapping a user page, intermediate entries also need USER bit
@@ -209,19 +233,27 @@ pub unsafe fn unmap_page(pml4_phys: u64, virt: VirtAddr) -> Result<PhysFrame, &'
     let pml4 = &mut *(pml4_phys as *mut PageTable);
 
     let pdpt_entry = &pml4.entries[virt.pml4_index()];
-    if !pdpt_entry.is_present() { return Err("Not mapped (no PDPT)"); }
+    if !pdpt_entry.is_present() {
+        return Err("Not mapped (no PDPT)");
+    }
     let pdpt = &mut *(pdpt_entry.frame().ok_or("Corrupt PDPT entry")?.addr() as *mut PageTable);
 
     let pd_entry = &pdpt.entries[virt.pdpt_index()];
-    if !pd_entry.is_present() { return Err("Not mapped (no PD)"); }
+    if !pd_entry.is_present() {
+        return Err("Not mapped (no PD)");
+    }
     let pd = &mut *(pd_entry.frame().ok_or("Corrupt PD entry")?.addr() as *mut PageTable);
 
     let pt_entry = &pd.entries[virt.pd_index()];
-    if !pt_entry.is_present() { return Err("Not mapped (no PT)"); }
+    if !pt_entry.is_present() {
+        return Err("Not mapped (no PT)");
+    }
     let pt = &mut *(pt_entry.frame().ok_or("Corrupt PT entry")?.addr() as *mut PageTable);
 
     let pte = &mut pt.entries[virt.pt_index()];
-    if !pte.is_present() { return Err("Not mapped"); }
+    if !pte.is_present() {
+        return Err("Not mapped");
+    }
 
     let frame = pte.frame().ok_or("Corrupt PTE")?;
     pte.clear();
@@ -235,7 +267,11 @@ pub unsafe fn unmap_page(pml4_phys: u64, virt: VirtAddr) -> Result<PhysFrame, &'
 ///
 /// # Safety
 /// Called within map_page — page table memory must be identity-mapped.
-unsafe fn ensure_table(entry: &mut PageTableEntry, table_flags: u64, level: u8) -> Result<&mut PageTable, &'static str> {
+unsafe fn ensure_table(
+    entry: &mut PageTableEntry,
+    table_flags: u64,
+    level: u8,
+) -> Result<&mut PageTable, &'static str> {
     if !entry.is_present() {
         let frame = phys::alloc_frame().map_err(|_| "Out of frames for page table")?;
         // Zero the new page table
@@ -270,7 +306,11 @@ unsafe fn ensure_table(entry: &mut PageTableEntry, table_flags: u64, level: u8) 
 /// can coexist safely with existing identity-map huge pages.
 ///
 /// `level` is the level of `entry` as described in `ensure_table`.
-unsafe fn split_huge_entry(entry: &mut PageTableEntry, table_flags: u64, level: u8) -> Result<(), &'static str> {
+unsafe fn split_huge_entry(
+    entry: &mut PageTableEntry,
+    table_flags: u64,
+    level: u8,
+) -> Result<(), &'static str> {
     if entry.flags() & flags::HUGE_PAGE == 0 {
         return Ok(());
     }
@@ -295,10 +335,8 @@ unsafe fn split_huge_entry(entry: &mut PageTableEntry, table_flags: u64, level: 
             let step = 0x20_0000u64;
             for i in 0..512usize {
                 let phys = base_phys + (i as u64) * step;
-                new_table.entries[i].set(
-                    PhysFrame::containing(phys),
-                    child_flags | flags::HUGE_PAGE,
-                );
+                new_table.entries[i]
+                    .set(PhysFrame::containing(phys), child_flags | flags::HUGE_PAGE);
             }
         }
         // Split 2 MiB page (PD huge) into 512 x 4 KiB PT entries.
@@ -306,10 +344,7 @@ unsafe fn split_huge_entry(entry: &mut PageTableEntry, table_flags: u64, level: 
             let step = FRAME_SIZE as u64;
             for i in 0..512usize {
                 let phys = base_phys + (i as u64) * step;
-                new_table.entries[i].set(
-                    PhysFrame::containing(phys),
-                    child_flags,
-                );
+                new_table.entries[i].set(PhysFrame::containing(phys), child_flags);
             }
         }
         _ => return Err("Invalid level for huge-page split"),
@@ -402,7 +437,11 @@ pub fn create_user_page_table() -> Result<u64, &'static str> {
     let new_pml4_phys = alloc_page_table()?;
     let kernel_pml4_phys = unsafe {
         let cached = KERNEL_PML4_PHYS;
-        if cached != 0 { cached } else { read_cr3() & !0xFFF_u64 }
+        if cached != 0 {
+            cached
+        } else {
+            read_cr3() & !0xFFF_u64
+        }
     };
 
     // SAFETY: kernel_pml4_phys points to either the cached boot-time PML4 or
@@ -541,7 +580,11 @@ unsafe fn clone_table_level(src_table_phys: u64, level: u8) -> Result<u64, &'sta
         // Huge pages: copy the entire huge frame (not recursed).
         if src.entries[i].flags() & flags::HUGE_PAGE != 0 {
             if let Some(src_frame) = src.entries[i].frame() {
-                let huge_size = if level == 2 { 0x20_0000usize } else { 0x4000_0000usize }; // 2M or 1G
+                let huge_size = if level == 2 {
+                    0x20_0000usize
+                } else {
+                    0x4000_0000usize
+                }; // 2M or 1G
                 let dst_frame = phys::alloc_frame().map_err(|_| "OOM cloning huge page")?;
                 // For huge pages we'd need contiguous alloc; skip copy for safety.
                 // In practice the user-space doesn't use huge pages in this kernel.
@@ -565,10 +608,7 @@ unsafe fn clone_table_level(src_table_phys: u64, level: u8) -> Result<u64, &'sta
             // Intermediate: recurse.
             let src_child = src.entries[i].frame().ok_or("Corrupt entry in clone")?;
             let dst_child = clone_table_level(src_child.addr(), level - 1)?;
-            dst.entries[i].set(
-                PhysFrame::containing(dst_child),
-                src.entries[i].flags(),
-            );
+            dst.entries[i].set(PhysFrame::containing(dst_child), src.entries[i].flags());
         }
     }
 

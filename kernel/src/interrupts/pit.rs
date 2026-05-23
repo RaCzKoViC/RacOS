@@ -34,11 +34,13 @@ static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 /// real time. Same code path is a no-op on hardware without HPET (vendor
 /// reads as 0 or 0xFFFF and we bail).
 pub fn init() {
-    unsafe { disable_hpet_legacy(); }
+    unsafe {
+        disable_hpet_legacy();
+    }
 
     // Command: channel 0, lo/hi byte, rate generator (mode 2)
     let command: u8 = 0x34; // 00 11 010 0 = channel 0, lo/hi, mode 2, binary
-    // SAFETY: Writing PIT I/O ports to configure the timer.
+                            // SAFETY: Writing PIT I/O ports to configure the timer.
     unsafe {
         core::arch::asm!(
             "out dx, al",
@@ -127,6 +129,8 @@ unsafe fn disable_hpet_legacy() {
 
     crate::serial::serial_println!(
         "[  0.000290] RACORE: HPET disabled (vendor=0x{:X}, cfg 0x{:X} -> 0x{:X})",
-        vendor, cfg, new_cfg,
+        vendor,
+        cfg,
+        new_cfg,
     );
 }

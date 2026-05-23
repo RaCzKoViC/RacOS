@@ -10,14 +10,14 @@
 // - MountPoint: filesystem mount tracking
 // - Dentry: directory entry cache
 
-pub mod socket;
-pub mod fat32;
-pub mod inode;
-pub mod file;
-pub mod mount;
-pub mod procfs;
 pub mod devfs;
+pub mod fat32;
+pub mod file;
 pub mod initramfs;
+pub mod inode;
+pub mod mount;
 pub mod pipe;
-pub mod tmpfs;
+pub mod procfs;
 pub mod racfs;
+pub mod socket;
+pub mod tmpfs;

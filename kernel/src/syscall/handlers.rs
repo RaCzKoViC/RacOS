@@ -30,9 +30,7 @@ fn map_vfs_error(err: VfsError) -> SyscallError {
 /// downcast so that multiple mounts of the same FS (e.g. racfs on ram0 and
 /// racfs on sda) each return their *own* concrete backing instance, instead
 /// of a single global singleton.
-fn writable_store_from_mount(
-    mount: &crate::vfs::mount::MountEntry,
-) -> Option<WritableStore> {
+fn writable_store_from_mount(mount: &crate::vfs::mount::MountEntry) -> Option<WritableStore> {
     let any = mount.fs.as_any();
     if let Some(racfs_fs) = any.downcast_ref::<crate::vfs::racfs::RacfsFilesystem>() {
         return Some(WritableStore::Racfs(racfs_fs.inner()));
@@ -123,13 +121,17 @@ fn require_cap(cap: u8) -> Result<(), SyscallError> {
 
 /// SYSCALL 0x400: pthread_create(routine_ptr, arg_ptr)
 pub fn sys_pthread_create(routine: u64, arg: u64) -> SyscallResult {
-    crate::serial::serial_println!("[ SYSC ] pthread_create(routine: 0x{:X}, arg: 0x{:X})", routine, arg);
-    
+    crate::serial::serial_println!(
+        "[ SYSC ] pthread_create(routine: 0x{:X}, arg: 0x{:X})",
+        routine,
+        arg
+    );
+
     // SAFETY: cli/sti during scheduler access
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let sched = crate::task::scheduler::get_instance();
-        
+
         let res = crate::task::scheduler::with_current_task(|parent| {
             sched.spawn_thread(routine, arg, parent)
         });
@@ -146,8 +148,6 @@ pub fn sys_pthread_create(routine: u64, arg: u64) -> SyscallResult {
         }
     }
 }
-
-
 
 fn require_dac_access(
     meta: &crate::vfs::inode::InodeMetadata,
@@ -189,7 +189,12 @@ fn parse_sockaddr_in(addr: *const u8, len: u32) -> Result<(u16, u32), SyscallErr
     Ok((port, ip))
 }
 
-fn write_sockaddr_in(addr: *mut u8, len_ptr: *mut u32, port: u16, ip: u32) -> Result<(), SyscallError> {
+fn write_sockaddr_in(
+    addr: *mut u8,
+    len_ptr: *mut u32,
+    port: u16,
+    ip: u32,
+) -> Result<(), SyscallError> {
     if len_ptr.is_null() {
         return Ok(());
     }
@@ -214,7 +219,9 @@ fn write_sockaddr_in(addr: *mut u8, len_ptr: *mut u32, port: u16, ip: u32) -> Re
             core::ptr::copy_nonoverlapping(buf.as_ptr(), addr, out_len as usize);
         }
     }
-    unsafe { *len_ptr = out_len; }
+    unsafe {
+        *len_ptr = out_len;
+    }
     Ok(())
 }
 
@@ -244,63 +251,63 @@ fn alloc_fd_for_socket(sock_sid: usize) -> Result<i32, SyscallError> {
     }
 }
 
-    fn install_fd_exact(
-        fds: &mut crate::vfs::file::FdTable,
-        target_fd: i32,
-        file: alloc::sync::Arc<crate::vfs::file::OpenFile>,
-    ) -> Result<(), SyscallError> {
-        let _ = fds.close(target_fd);
-        let allocated = fds.alloc(file).map_err(map_vfs_error)?;
-        if allocated != target_fd {
-            fds.dup2(allocated, target_fd).map_err(map_vfs_error)?;
-            let _ = fds.close(allocated);
-        }
-        Ok(())
+fn install_fd_exact(
+    fds: &mut crate::vfs::file::FdTable,
+    target_fd: i32,
+    file: alloc::sync::Arc<crate::vfs::file::OpenFile>,
+) -> Result<(), SyscallError> {
+    let _ = fds.close(target_fd);
+    let allocated = fds.alloc(file).map_err(map_vfs_error)?;
+    if allocated != target_fd {
+        fds.dup2(allocated, target_fd).map_err(map_vfs_error)?;
+        let _ = fds.close(allocated);
+    }
+    Ok(())
+}
+
+fn ensure_console_stdio(fds: &mut crate::vfs::file::FdTable) {
+    let need_stdin = fds.get(0).is_err();
+    let need_stdout = fds.get(1).is_err();
+    let need_stderr = fds.get(2).is_err();
+
+    if !(need_stdin || need_stdout || need_stderr) {
+        return;
     }
 
-    fn ensure_console_stdio(fds: &mut crate::vfs::file::FdTable) {
-        let need_stdin = fds.get(0).is_err();
-        let need_stdout = fds.get(1).is_err();
-        let need_stderr = fds.get(2).is_err();
+    let (fs, ino) = match unsafe { crate::vfs::mount::mount_table().lookup_path("/dev/console") } {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let inode = match fs.get_inode(ino) {
+        Ok(i) => i,
+        Err(_) => return,
+    };
 
-        if !(need_stdin || need_stdout || need_stderr) {
-            return;
-        }
-
-        let (fs, ino) = match unsafe { crate::vfs::mount::mount_table().lookup_path("/dev/console") } {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        let inode = match fs.get_inode(ino) {
-            Ok(i) => i,
-            Err(_) => return,
-        };
-
-        if need_stdin {
-            let stdin = alloc::sync::Arc::new(crate::vfs::file::OpenFile::new(
-                ino,
-                inode.clone(),
-                crate::vfs::file::flags::O_RDONLY,
-            ));
-            let _ = install_fd_exact(fds, 0, stdin);
-        }
-        if need_stdout {
-            let stdout = alloc::sync::Arc::new(crate::vfs::file::OpenFile::new(
-                ino,
-                inode.clone(),
-                crate::vfs::file::flags::O_WRONLY,
-            ));
-            let _ = install_fd_exact(fds, 1, stdout);
-        }
-        if need_stderr {
-            let stderr = alloc::sync::Arc::new(crate::vfs::file::OpenFile::new(
-                ino,
-                inode,
-                crate::vfs::file::flags::O_WRONLY,
-            ));
-            let _ = install_fd_exact(fds, 2, stderr);
-        }
+    if need_stdin {
+        let stdin = alloc::sync::Arc::new(crate::vfs::file::OpenFile::new(
+            ino,
+            inode.clone(),
+            crate::vfs::file::flags::O_RDONLY,
+        ));
+        let _ = install_fd_exact(fds, 0, stdin);
     }
+    if need_stdout {
+        let stdout = alloc::sync::Arc::new(crate::vfs::file::OpenFile::new(
+            ino,
+            inode.clone(),
+            crate::vfs::file::flags::O_WRONLY,
+        ));
+        let _ = install_fd_exact(fds, 1, stdout);
+    }
+    if need_stderr {
+        let stderr = alloc::sync::Arc::new(crate::vfs::file::OpenFile::new(
+            ino,
+            inode,
+            crate::vfs::file::flags::O_WRONLY,
+        ));
+        let _ = install_fd_exact(fds, 2, stderr);
+    }
+}
 
 /// Maximum valid user-space address.
 /// Anything above this is kernel space.
@@ -351,7 +358,10 @@ fn validate_user_string(ptr: u64) -> Result<usize, SyscallError> {
 /// Read a null-terminated array of string pointers from user space.
 /// If argv_ptr == 0, returns a single-element vec with just the path.
 /// Maximum 64 arguments, each max 4096 bytes.
-fn collect_user_argv(path: &str, argv_ptr: u64) -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, SyscallError> {
+fn collect_user_argv(
+    path: &str,
+    argv_ptr: u64,
+) -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, SyscallError> {
     const MAX_ARGS: usize = 64;
 
     if argv_ptr == 0 {
@@ -408,12 +418,10 @@ pub fn deliver_pending_signals() {
                 sys_exit(-1);
             }
             SignalAction::Ignore => {}
-            SignalAction::Stop => {
-                unsafe {
-                    core::arch::asm!("cli", options(nomem, nostack));
-                    crate::task::scheduler::block_and_reschedule();
-                }
-            }
+            SignalAction::Stop => unsafe {
+                core::arch::asm!("cli", options(nomem, nostack));
+                crate::task::scheduler::block_and_reschedule();
+            },
             SignalAction::Continue => {
                 // Task is already running; nothing to do.
             }
@@ -431,11 +439,15 @@ pub fn sys_exit(status: i32) -> ! {
 
     // Mark task as zombie and schedule away
     // TODO: proper process cleanup (release address space, fds, signal parent)
-    unsafe { crate::task::scheduler::exit_current(status); }
+    unsafe {
+        crate::task::scheduler::exit_current(status);
+    }
 
     // Should not reach here — exit_current never returns
     loop {
-        unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("cli; hlt", options(nomem, nostack));
+        }
     }
 }
 
@@ -509,14 +521,13 @@ pub fn sys_open(path: *const u8, flags: u32, _mode: u32) -> SyscallResult {
             .map_err(|_| SyscallError::EINVAL)?
     };
 
-    let lookup_result = unsafe {
-        crate::vfs::mount::mount_table()
-            .lookup_path(path_str)
-    };
+    let lookup_result = unsafe { crate::vfs::mount::mount_table().lookup_path(path_str) };
 
     let (fs, ino, created) = match lookup_result {
         Ok(pair) => (pair.0, pair.1, false),
-        Err(crate::vfs::inode::VfsError::NotFound) if flags & crate::vfs::file::flags::O_CREAT != 0 => {
+        Err(crate::vfs::inode::VfsError::NotFound)
+            if flags & crate::vfs::file::flags::O_CREAT != 0 =>
+        {
             let mt = unsafe { crate::vfs::mount::mount_table() };
             let (mount, remainder) = mt.resolve(path_str).ok_or(SyscallError::ENOENT)?;
             let store = writable_store_from_mount(mount).ok_or(SyscallError::EACCES)?;
@@ -535,7 +546,11 @@ pub fn sys_open(path: *const u8, flags: u32, _mode: u32) -> SyscallResult {
     let mut meta = inode.metadata().map_err(map_vfs_error)?;
     if created {
         let creds = current_creds();
-        let base_mode = if (_mode & 0o7777) != 0 { _mode & 0o7777 } else { 0o666 };
+        let base_mode = if (_mode & 0o7777) != 0 {
+            _mode & 0o7777
+        } else {
+            0o666
+        };
         meta.mode = crate::vfs::inode::FileMode::new(base_mode & !current_umask());
         meta.uid = creds.euid;
         meta.gid = creds.egid;
@@ -612,8 +627,8 @@ pub fn sys_mmap(
     fd: i32,
     _offset: u64,
 ) -> SyscallResult {
-    use crate::mm::{phys, virt};
     use crate::mm::virt::flags as vf;
+    use crate::mm::{phys, virt};
 
     const MAP_ANONYMOUS: u32 = 0x20;
 
@@ -646,16 +661,15 @@ pub fn sys_mmap(
     let pt = crate::task::scheduler::current_page_table_phys();
     if pt != 0 {
         // Map into the user process page table.
-        let virt_addr = if addr != 0 { addr } else {
+        let virt_addr = if addr != 0 {
+            addr
+        } else {
             // Simple bump allocator for anonymous maps in user space.
             // Use a region just below the user stack (well-separated).
             static MMAP_BUMP: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0x0000_7FF0_0000_0000);
             let alloc_size = (pages * 0x1000) as u64;
-            let prev = MMAP_BUMP.fetch_sub(
-                alloc_size,
-                core::sync::atomic::Ordering::Relaxed,
-            );
+            let prev = MMAP_BUMP.fetch_sub(alloc_size, core::sync::atomic::Ordering::Relaxed);
             let v = prev - alloc_size;
             // Guard: prevent underflow into low memory / kernel space
             if v < 0x0000_1000_0000_0000 || v > prev {
@@ -663,7 +677,9 @@ pub fn sys_mmap(
                 MMAP_BUMP.fetch_add(alloc_size, core::sync::atomic::Ordering::Relaxed);
                 // Free the allocated frames
                 for i in 0..pages {
-                    let _ = phys::free_frame(phys::PhysFrame::containing(phys_addr + (i * 0x1000) as u64));
+                    let _ = phys::free_frame(phys::PhysFrame::containing(
+                        phys_addr + (i * 0x1000) as u64,
+                    ));
                 }
                 return Err(SyscallError::ENOMEM);
             }
@@ -671,11 +687,18 @@ pub fn sys_mmap(
         };
 
         if let Err(_) = unsafe {
-            virt::map_range(pt, virt_addr, phys_addr, (pages * 0x1000) as u64, vf::USER_DATA)
+            virt::map_range(
+                pt,
+                virt_addr,
+                phys_addr,
+                (pages * 0x1000) as u64,
+                vf::USER_DATA,
+            )
         } {
             // Mapping failed — free frames and report error.
             for i in 0..pages {
-                let _ = phys::free_frame(phys::PhysFrame::containing(phys_addr + (i * 0x1000) as u64));
+                let _ =
+                    phys::free_frame(phys::PhysFrame::containing(phys_addr + (i * 0x1000) as u64));
             }
             return Err(SyscallError::ENOMEM);
         }
@@ -783,7 +806,9 @@ pub fn sys_dup2(oldfd: i32, newfd: i32) -> SyscallResult {
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {
-            fds.dup2(oldfd, newfd).map(|fd| fd as i64).map_err(map_vfs_error)
+            fds.dup2(oldfd, newfd)
+                .map(|fd| fd as i64)
+                .map_err(map_vfs_error)
         })
         .unwrap_or(Err(SyscallError::EBADF));
         core::arch::asm!("sti", options(nomem, nostack));
@@ -954,8 +979,7 @@ pub fn sys_spawn(path: *const u8, _argv: u64, _envp: u64) -> SyscallResult {
 
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
-        let pid = crate::task::scheduler::spawn_user(process)
-            .map_err(|_| SyscallError::EAGAIN)?;
+        let pid = crate::task::scheduler::spawn_user(process).map_err(|_| SyscallError::EAGAIN)?;
         core::arch::asm!("sti", options(nomem, nostack));
         Ok(pid as i64)
     }
@@ -1077,15 +1101,18 @@ pub fn sys_kill(pid: i32, sig: i32) -> SyscallResult {
     if pid <= 0 {
         return Err(SyscallError::EINVAL);
     }
-    let signal = crate::task::signal::Signal::from_u8(sig as u8)
-        .ok_or(SyscallError::EINVAL)?;
+    let signal = crate::task::signal::Signal::from_u8(sig as u8).ok_or(SyscallError::EINVAL)?;
     let found = unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let r = crate::task::scheduler::send_signal_to(pid as u32, signal);
         core::arch::asm!("sti", options(nomem, nostack));
         r
     };
-    if found { Ok(0) } else { Err(SyscallError::ESRCH) }
+    if found {
+        Ok(0)
+    } else {
+        Err(SyscallError::ESRCH)
+    }
 }
 
 // ─────────────────────────────────────────────────
@@ -1130,8 +1157,12 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> SyscallResult {
 /// If `pid` is 0, use the calling process. If `pgid` is 0, use `pid` as pgid.
 pub fn sys_setpgid(mut pid: u32, mut pgid: u32) -> SyscallResult {
     let current = crate::task::scheduler::current_pid();
-    if pid == 0 { pid = current; }
-    if pgid == 0 { pgid = pid; }
+    if pid == 0 {
+        pid = current;
+    }
+    if pgid == 0 {
+        pgid = pid;
+    }
 
     let found = unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
@@ -1139,7 +1170,11 @@ pub fn sys_setpgid(mut pid: u32, mut pgid: u32) -> SyscallResult {
         core::arch::asm!("sti", options(nomem, nostack));
         r
     };
-    if found { Ok(0) } else { Err(SyscallError::ESRCH) }
+    if found {
+        Ok(0)
+    } else {
+        Err(SyscallError::ESRCH)
+    }
 }
 
 // ─────────────────────────────────────────────────
@@ -1148,7 +1183,9 @@ pub fn sys_setpgid(mut pid: u32, mut pgid: u32) -> SyscallResult {
 
 /// Get the process group ID of a process. If `pid` is 0, use the calling process.
 pub fn sys_getpgid(mut pid: u32) -> SyscallResult {
-    if pid == 0 { pid = crate::task::scheduler::current_pid(); }
+    if pid == 0 {
+        pid = crate::task::scheduler::current_pid();
+    }
     let result = unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let r = crate::task::scheduler::get_pgid(pid);
@@ -1291,7 +1328,9 @@ pub fn sys_ioctl(fd: i32, request: u32, arg: u64) -> SyscallResult {
             // Get foreground process group
             validate_user_ptr(arg, 4)?;
             let pgid = crate::task::scheduler::current_pgid();
-            unsafe { *(arg as *mut u32) = pgid; }
+            unsafe {
+                *(arg as *mut u32) = pgid;
+            }
             Ok(0)
         }
         TIOCSPGRP => {
@@ -1304,12 +1343,17 @@ pub fn sys_ioctl(fd: i32, request: u32, arg: u64) -> SyscallResult {
         }
         _ => {
             // Try VFS-level ioctl
-            if fd < 0 { return Err(SyscallError::EBADF); }
+            if fd < 0 {
+                return Err(SyscallError::EBADF);
+            }
             unsafe {
                 core::arch::asm!("cli", options(nomem, nostack));
                 let result = crate::task::scheduler::with_current_fd_table(|fds| {
                     let file = fds.get(fd).map_err(map_vfs_error)?;
-                    file.inode.ioctl(request as u64, arg).map(|v| v as i64).map_err(map_vfs_error)
+                    file.inode
+                        .ioctl(request as u64, arg)
+                        .map(|v| v as i64)
+                        .map_err(map_vfs_error)
                 })
                 .unwrap_or(Err(SyscallError::EBADF));
                 core::arch::asm!("sti", options(nomem, nostack));
@@ -1393,11 +1437,7 @@ pub fn sys_getdents(fd: i32, buf: *mut u8, buf_size: usize) -> SyscallResult {
         unsafe {
             // ino: u64
             let dst = buf.add(offset);
-            core::ptr::copy_nonoverlapping(
-                &entry.ino as *const u64 as *const u8,
-                dst,
-                8,
-            );
+            core::ptr::copy_nonoverlapping(&entry.ino as *const u64 as *const u8, dst, 8);
             // file_type: u8
             *dst.add(8) = entry.file_type as u8;
             // name_len: u8
@@ -1437,7 +1477,11 @@ pub fn sys_mkdir(path: *const u8, _mode: u32) -> SyscallResult {
     if let Ok(new_inode) = mount.fs.get_inode(new_ino) {
         if let Ok(mut meta) = new_inode.metadata() {
             let creds = current_creds();
-            let base_mode = if (_mode & 0o7777) != 0 { _mode & 0o7777 } else { 0o777 };
+            let base_mode = if (_mode & 0o7777) != 0 {
+                _mode & 0o7777
+            } else {
+                0o777
+            };
             meta.mode = crate::vfs::inode::FileMode::new(base_mode & !current_umask());
             meta.uid = creds.euid;
             meta.gid = creds.egid;
@@ -1463,14 +1507,12 @@ pub fn sys_unlink(path: *const u8) -> SyscallResult {
     let (mount, remainder) = mt.resolve(path_str).ok_or(SyscallError::ENOENT)?;
     let store = writable_store_from_mount(mount).ok_or(SyscallError::EACCES)?;
 
-    let (parent_ino, leaf) = store.split_parent_leaf(remainder)
-        .map_err(map_vfs_error)?;
+    let (parent_ino, leaf) = store.split_parent_leaf(remainder).map_err(map_vfs_error)?;
     let parent_inode = mount.fs.get_inode(parent_ino).map_err(map_vfs_error)?;
     let parent_meta = parent_inode.metadata().map_err(map_vfs_error)?;
     require_dac_access(&parent_meta, crate::security::dac::Access::Write)?;
     require_dac_access(&parent_meta, crate::security::dac::Access::Execute)?;
-    store.unlink(parent_ino, leaf)
-        .map_err(map_vfs_error)?;
+    store.unlink(parent_ino, leaf).map_err(map_vfs_error)?;
     Ok(0)
 }
 
@@ -1504,8 +1546,8 @@ pub fn sys_fork() -> SyscallResult {
 
         // Allocate child kernel stack + guard page. See process::from_elf
         // for the layout invariant the scheduler's guard check relies on.
-        let total_pages = crate::task::task::KERNEL_STACK_PAGES
-            + crate::task::task::KERNEL_STACK_GUARD_PAGES;
+        let total_pages =
+            crate::task::task::KERNEL_STACK_PAGES + crate::task::task::KERNEL_STACK_GUARD_PAGES;
         let child_alloc_frame = match crate::mm::phys::alloc_contiguous(total_pages) {
             Ok(f) => f,
             Err(_) => {
@@ -1517,8 +1559,7 @@ pub fn sys_fork() -> SyscallResult {
         let child_alloc_base = child_alloc_frame.addr();
         let child_stack_base = child_alloc_base
             + (crate::task::task::KERNEL_STACK_GUARD_PAGES * crate::mm::phys::FRAME_SIZE) as u64;
-        let child_stack_top =
-            child_stack_base + crate::task::task::KERNEL_STACK_SIZE as u64;
+        let child_stack_top = child_stack_base + crate::task::task::KERNEL_STACK_SIZE as u64;
 
         // Guard page sentinel + zero usable stack.
         core::ptr::write_bytes(
@@ -1599,11 +1640,9 @@ pub fn sys_fork() -> SyscallResult {
                 let total_pages = crate::task::task::KERNEL_STACK_PAGES
                     + crate::task::task::KERNEL_STACK_GUARD_PAGES;
                 for i in 0..total_pages {
-                    let addr = child_alloc_base
-                        + (i * crate::mm::phys::FRAME_SIZE) as u64;
-                    let _ = crate::mm::phys::free_frame(
-                        crate::mm::phys::PhysFrame::containing(addr),
-                    );
+                    let addr = child_alloc_base + (i * crate::mm::phys::FRAME_SIZE) as u64;
+                    let _ =
+                        crate::mm::phys::free_frame(crate::mm::phys::PhysFrame::containing(addr));
                 }
                 core::arch::asm!("sti", options(nomem, nostack));
                 Err(SyscallError::EAGAIN)
@@ -1621,18 +1660,18 @@ pub fn sys_fork() -> SyscallResult {
 #[unsafe(naked)]
 unsafe extern "C" fn fork_child_return() {
     core::arch::naked_asm!(
-        "xor eax, eax",   // RAX = 0 (fork return for child)
-        "sti",            // Re-enable interrupts
-        "add rsp, 8",     // Skip arg6 (r9)
+        "xor eax, eax", // RAX = 0 (fork return for child)
+        "sti",          // Re-enable interrupts
+        "add rsp, 8",   // Skip arg6 (r9)
         "pop r15",
         "pop r14",
         "pop r13",
         "pop r12",
         "pop rbx",
         "pop rbp",
-        "pop rcx",        // User RIP
-        "pop r11",        // User RFLAGS
-        "pop rsp",        // User RSP
+        "pop rcx", // User RIP
+        "pop r11", // User RFLAGS
+        "pop rsp", // User RSP
         "swapgs",
         "sysretq",
     );
@@ -1643,7 +1682,7 @@ unsafe extern "C" fn fork_child_return() {
 // ─────────────────────────────────────────────────
 
 /// Clone flags for sys_clone.
-pub const CLONE_VM: u32 = 0x00000100;     // Share address space
+pub const CLONE_VM: u32 = 0x00000100; // Share address space
 pub const CLONE_THREAD: u32 = 0x00010000; // Thread group
 
 /// Clone the current process.
@@ -1675,8 +1714,8 @@ pub fn sys_clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8)
         };
 
         // Allocate child kernel stack + guard page.
-        let total_pages = crate::task::task::KERNEL_STACK_PAGES
-            + crate::task::task::KERNEL_STACK_GUARD_PAGES;
+        let total_pages =
+            crate::task::task::KERNEL_STACK_PAGES + crate::task::task::KERNEL_STACK_GUARD_PAGES;
         let child_alloc_frame = match crate::mm::phys::alloc_contiguous(total_pages) {
             Ok(f) => f,
             Err(_) => {
@@ -1690,8 +1729,7 @@ pub fn sys_clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8)
         let child_alloc_base = child_alloc_frame.addr();
         let child_stack_base = child_alloc_base
             + (crate::task::task::KERNEL_STACK_GUARD_PAGES * crate::mm::phys::FRAME_SIZE) as u64;
-        let child_stack_top =
-            child_stack_base + crate::task::task::KERNEL_STACK_SIZE as u64;
+        let child_stack_top = child_stack_base + crate::task::task::KERNEL_STACK_SIZE as u64;
 
         // Guard sentinel + zero usable stack.
         core::ptr::write_bytes(
@@ -1767,7 +1805,11 @@ pub fn sys_clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8)
 
         let child_task = crate::task::task::Task {
             pid: child_pid,
-            parent_pid: if flags & CLONE_THREAD != 0 { parent_pid } else { parent_pid },
+            parent_pid: if flags & CLONE_THREAD != 0 {
+                parent_pid
+            } else {
+                parent_pid
+            },
             state: crate::task::task::TaskState::Created,
             context: ctx,
             kernel_stack_base: child_stack_base,
@@ -1798,11 +1840,9 @@ pub fn sys_clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8)
                 let total_pages = crate::task::task::KERNEL_STACK_PAGES
                     + crate::task::task::KERNEL_STACK_GUARD_PAGES;
                 for i in 0..total_pages {
-                    let addr = child_alloc_base
-                        + (i * crate::mm::phys::FRAME_SIZE) as u64;
-                    let _ = crate::mm::phys::free_frame(
-                        crate::mm::phys::PhysFrame::containing(addr),
-                    );
+                    let addr = child_alloc_base + (i * crate::mm::phys::FRAME_SIZE) as u64;
+                    let _ =
+                        crate::mm::phys::free_frame(crate::mm::phys::PhysFrame::containing(addr));
                 }
                 core::arch::asm!("sti", options(nomem, nostack));
                 Err(SyscallError::EAGAIN)
@@ -1820,18 +1860,18 @@ pub fn sys_clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8)
 #[unsafe(naked)]
 unsafe extern "C" fn clone_child_return() {
     core::arch::naked_asm!(
-        "xor eax, eax",   // RAX = 0 (clone return for child)
-        "sti",            // Re-enable interrupts
-        "add rsp, 8",     // Skip arg6 (r9)
+        "xor eax, eax", // RAX = 0 (clone return for child)
+        "sti",          // Re-enable interrupts
+        "add rsp, 8",   // Skip arg6 (r9)
         "pop r15",
         "pop r14",
         "pop r13",
         "pop r12",
         "pop rbx",
         "pop rbp",
-        "pop rcx",        // User RIP
-        "pop r11",        // User RFLAGS
-        "pop rsp",        // User RSP
+        "pop rcx", // User RIP
+        "pop r11", // User RFLAGS
+        "pop rsp", // User RSP
         "swapgs",
         "sysretq",
     );
@@ -1844,7 +1884,7 @@ unsafe extern "C" fn clone_child_return() {
 /// Kernel representation of a signal action.
 #[repr(C)]
 pub struct KSigAction {
-    pub handler: u64,   // SIG_DFL=0, SIG_IGN=1, or function pointer
+    pub handler: u64, // SIG_DFL=0, SIG_IGN=1, or function pointer
     pub flags: u32,
     pub mask: u32,
 }
@@ -1873,10 +1913,9 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SyscallRes
 
         // Read old action
         if !oldact.is_null() {
-            let old = crate::task::scheduler::with_current_task(|t| {
-                t.signals.get_handler(signum as u8)
-            })
-            .unwrap_or(0);
+            let old =
+                crate::task::scheduler::with_current_task(|t| t.signals.get_handler(signum as u8))
+                    .unwrap_or(0);
             let old_sa = KSigAction {
                 handler: old,
                 flags: 0,
@@ -1953,10 +1992,9 @@ pub fn sys_poll(fds_ptr: *mut u8, nfds: u32, timeout_ms: i32) -> SyscallResult {
                 continue;
             }
 
-            let fd_ok = crate::task::scheduler::with_current_fd_table(|fdt| {
-                fdt.get(pfd.fd).is_ok()
-            })
-            .unwrap_or(false);
+            let fd_ok =
+                crate::task::scheduler::with_current_fd_table(|fdt| fdt.get(pfd.fd).is_ok())
+                    .unwrap_or(false);
 
             if !fd_ok {
                 pfd.revents = POLLNVAL;
@@ -2169,22 +2207,29 @@ pub fn sys_lseek(fd: i32, offset: i64, whence: i32) -> SyscallResult {
 
             let new_offset = match whence {
                 SEEK_SET => {
-                    if offset < 0 { return Err(SyscallError::EINVAL); }
+                    if offset < 0 {
+                        return Err(SyscallError::EINVAL);
+                    }
                     offset as u64
                 }
                 SEEK_CUR => {
                     let r = current as i64 + offset;
-                    if r < 0 { return Err(SyscallError::EINVAL); }
+                    if r < 0 {
+                        return Err(SyscallError::EINVAL);
+                    }
                     r as u64
                 }
                 SEEK_END => {
                     let r = size as i64 + offset;
-                    if r < 0 { return Err(SyscallError::EINVAL); }
+                    if r < 0 {
+                        return Err(SyscallError::EINVAL);
+                    }
                     r as u64
                 }
                 _ => return Err(SyscallError::EINVAL),
             };
-            file.offset.store(new_offset, core::sync::atomic::Ordering::Relaxed);
+            file.offset
+                .store(new_offset, core::sync::atomic::Ordering::Relaxed);
             Ok(new_offset as i64)
         })
         .unwrap_or(Err(SyscallError::EBADF));
@@ -2337,9 +2382,7 @@ pub fn sys_rename(old: *const u8, new: *const u8) -> SyscallResult {
     require_dac_access(&old_parent_meta, crate::security::dac::Access::Execute)?;
 
     // Read old file content
-    let (fs, ino) = {
-        mt.lookup_path(old_str).map_err(|_| SyscallError::ENOENT)?
-    };
+    let (fs, ino) = { mt.lookup_path(old_str).map_err(|_| SyscallError::ENOENT)? };
     let inode = fs.get_inode(ino).map_err(map_vfs_error)?;
     let meta = inode.metadata().map_err(map_vfs_error)?;
     require_dac_access(&meta, crate::security::dac::Access::Read)?;
@@ -2355,11 +2398,12 @@ pub fn sys_rename(old: *const u8, new: *const u8) -> SyscallResult {
         let new_parent_meta = new_parent_inode.metadata().map_err(map_vfs_error)?;
         require_dac_access(&new_parent_meta, crate::security::dac::Access::Write)?;
         require_dac_access(&new_parent_meta, crate::security::dac::Access::Execute)?;
-        let _new_ino = store.create_file(new_parent, new_leaf).map_err(map_vfs_error)?;
+        let _new_ino = store
+            .create_file(new_parent, new_leaf)
+            .map_err(map_vfs_error)?;
         // Write via mount table lookup for the new path
-        let (new_fs, new_ino_found) = {
-            mt.lookup_path(new_str).map_err(|_| SyscallError::ENOENT)?
-        };
+        let (new_fs, new_ino_found) =
+            { mt.lookup_path(new_str).map_err(|_| SyscallError::ENOENT)? };
         let new_inode = new_fs.get_inode(new_ino_found).map_err(map_vfs_error)?;
         new_inode.write(0, &buf).map_err(map_vfs_error)?;
 
@@ -2383,17 +2427,15 @@ pub fn sys_fcntl(fd: i32, cmd: i32, _arg: u64) -> SyscallResult {
     const F_DUPFD: i32 = 0;
 
     match cmd {
-        F_DUPFD => {
-            unsafe {
-                core::arch::asm!("cli", options(nomem, nostack));
-                let result = crate::task::scheduler::with_current_fd_table(|fds| {
-                    fds.dup(fd).map(|fd| fd as i64).map_err(map_vfs_error)
-                })
-                .unwrap_or(Err(SyscallError::EBADF));
-                core::arch::asm!("sti", options(nomem, nostack));
-                result
-            }
-        }
+        F_DUPFD => unsafe {
+            core::arch::asm!("cli", options(nomem, nostack));
+            let result = crate::task::scheduler::with_current_fd_table(|fds| {
+                fds.dup(fd).map(|fd| fd as i64).map_err(map_vfs_error)
+            })
+            .unwrap_or(Err(SyscallError::EBADF));
+            core::arch::asm!("sti", options(nomem, nostack));
+            result
+        },
         F_GETFD | F_GETFL => Ok(0),
         F_SETFD | F_SETFL => Ok(0),
         _ => Err(SyscallError::EINVAL),
@@ -2459,16 +2501,22 @@ pub fn sys_connect(fd: i32, addr: *const u8, len: u32) -> SyscallResult {
     }
 
     // Real TCP. Resolve next-hop MAC (gateway for off-subnet).
-    let ip_bytes = [(ip >> 24) as u8, (ip >> 16) as u8, (ip >> 8) as u8, ip as u8];
-    let peer_mac = crate::net::stack::next_hop_mac(ip_bytes)
-        .ok_or(SyscallError::ECONNREFUSED)?;
+    let ip_bytes = [
+        (ip >> 24) as u8,
+        (ip >> 16) as u8,
+        (ip >> 8) as u8,
+        ip as u8,
+    ];
+    let peer_mac = crate::net::stack::next_hop_mac(ip_bytes).ok_or(SyscallError::ECONNREFUSED)?;
     let conn_id = crate::net::tcp::connect(ip_bytes, port, peer_mac)
         .map_err(|_| SyscallError::ECONNREFUSED)?;
 
     // Synchronous wait for the handshake to complete (timer IRQ drains RX
     // and feeds the state machine in the meantime). Re-enable interrupts —
     // SYSCALL entry zeroed IF, but we must let PIT fire to make progress.
-    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
     let start = crate::interrupts::pit::ticks();
     let outcome: Result<(), SyscallError> = loop {
         match crate::net::tcp::state(conn_id) {
@@ -2483,7 +2531,9 @@ pub fn sys_connect(fd: i32, addr: *const u8, len: u32) -> SyscallResult {
             }
         }
     };
-    unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+    }
     outcome?;
     crate::net::bind_fd_tcp(pid, fd, conn_id);
     Ok(0)
@@ -2508,11 +2558,15 @@ pub fn sys_recv(fd: i32, buf: *mut u8, len: usize, _flags: u32) -> SyscallResult
     if let Some(conn_id) = crate::net::tcp_id_by_fd(pid, fd) {
         // Block until something arrives, EOF is observed, or 5 s elapse.
         // PIT must be running so timer_handler drains the NIC RX queue.
-        unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("sti", options(nomem, nostack));
+        }
         let start = crate::interrupts::pit::ticks();
         let result: SyscallResult = loop {
             let n = crate::net::tcp::read(conn_id, out);
-            if n > 0 { break Ok(n as i64); }
+            if n > 0 {
+                break Ok(n as i64);
+            }
             match crate::net::tcp::state(conn_id) {
                 None
                 | Some(crate::net::tcp::State::Closed)
@@ -2527,7 +2581,9 @@ pub fn sys_recv(fd: i32, buf: *mut u8, len: usize, _flags: u32) -> SyscallResult
             crate::net::stack::poll();
             core::hint::spin_loop();
         };
-        unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("cli", options(nomem, nostack));
+        }
         return result;
     }
     let n = crate::net::recv(pid, fd, out).map_err(map_net_error)?;
@@ -2535,14 +2591,18 @@ pub fn sys_recv(fd: i32, buf: *mut u8, len: usize, _flags: u32) -> SyscallResult
 }
 
 pub fn sys_gethostbyname(name_ptr: *const u8, name_len: usize, ip_out: *mut u8) -> SyscallResult {
-    if name_len == 0 || name_len > 253 { return Err(SyscallError::EINVAL); }
+    if name_len == 0 || name_len > 253 {
+        return Err(SyscallError::EINVAL);
+    }
     validate_user_ptr(name_ptr as u64, name_len)?;
     validate_user_ptr(ip_out as u64, 4)?;
     let bytes = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
     let name = core::str::from_utf8(bytes).map_err(|_| SyscallError::EINVAL)?;
     match crate::net::stack::resolve(name) {
         Some(ip) => {
-            unsafe { core::ptr::copy_nonoverlapping(ip.as_ptr(), ip_out, 4); }
+            unsafe {
+                core::ptr::copy_nonoverlapping(ip.as_ptr(), ip_out, 4);
+            }
             Ok(0)
         }
         None => Err(SyscallError::ETIMEDOUT),
@@ -2569,11 +2629,23 @@ pub fn sys_getpeername(fd: i32, addr: *mut u8, len: *mut u32) -> SyscallResult {
     Ok(0)
 }
 
-pub fn sys_setsockopt(_fd: i32, _level: i32, _optname: i32, _optval: *const u8, _optlen: u32) -> SyscallResult {
+pub fn sys_setsockopt(
+    _fd: i32,
+    _level: i32,
+    _optname: i32,
+    _optval: *const u8,
+    _optlen: u32,
+) -> SyscallResult {
     Ok(0)
 }
 
-pub fn sys_getsockopt(_fd: i32, _level: i32, _optname: i32, _optval: *mut u8, _optlen: *mut u32) -> SyscallResult {
+pub fn sys_getsockopt(
+    _fd: i32,
+    _level: i32,
+    _optname: i32,
+    _optval: *mut u8,
+    _optlen: *mut u32,
+) -> SyscallResult {
     crate::serial::serial_println!(
         "[ SYSC ] getsockopt() not implemented yet: fd={}, level={}, opt={}",
         _fd,
@@ -2635,7 +2707,13 @@ pub fn sys_uname(buf: *mut u8) -> SyscallResult {
 // Syscall 66-67: mount/umount
 // ─────────────────────────────────────────────────
 
-pub fn sys_mount(src: *const u8, target: *const u8, fstype: *const u8, _flags: u64, _data: *const u8) -> SyscallResult {
+pub fn sys_mount(
+    src: *const u8,
+    target: *const u8,
+    fstype: *const u8,
+    _flags: u64,
+    _data: *const u8,
+) -> SyscallResult {
     require_cap(crate::security::capability::CAP_SYS_ADMIN)?;
 
     let src_str = if src.is_null() {
@@ -2765,8 +2843,10 @@ pub fn sys_umount(target: *const u8) -> SyscallResult {
 /// is currently only "racfs". Refuses if the device backs an active mount —
 /// the caller must `umount` first.
 pub fn sys_mkfs(
-    src: *const u8, src_len: usize,
-    fstype: *const u8, fstype_len: usize,
+    src: *const u8,
+    src_len: usize,
+    fstype: *const u8,
+    fstype_len: usize,
 ) -> SyscallResult {
     require_cap(crate::security::capability::CAP_SYS_ADMIN)?;
 
@@ -2791,10 +2871,10 @@ pub fn sys_mkfs(
     // mounts ram0 at /var and sda at /mnt by convention.
     let mt = unsafe { crate::vfs::mount::mount_table() };
     let busy_path = match dev_name {
-        "sda"  => Some("/mnt"),
+        "sda" => Some("/mnt"),
         "ram0" => Some("/var"),
         "ram1" => Some("/fat"),
-        _      => None,
+        _ => None,
     };
     if let Some(path) = busy_path {
         if mt.is_mounted(path) {
@@ -2805,16 +2885,12 @@ pub fn sys_mkfs(
     let dev = crate::drivers::block::find(dev_name).ok_or(SyscallError::ENOENT)?;
 
     match fstype_str {
-        "racfs" => {
-            crate::vfs::racfs::Racfs::format_and_new(dev)
-                .map(|_| 0i64)
-                .map_err(|_| SyscallError::EIO)
-        }
-        "fat" | "fat32" => {
-            crate::vfs::fat32::format_fat32(dev, "RACOS")
-                .map(|_| 0i64)
-                .map_err(|_| SyscallError::EIO)
-        }
+        "racfs" => crate::vfs::racfs::Racfs::format_and_new(dev)
+            .map(|_| 0i64)
+            .map_err(|_| SyscallError::EIO),
+        "fat" | "fat32" => crate::vfs::fat32::format_fat32(dev, "RACOS")
+            .map(|_| 0i64)
+            .map_err(|_| SyscallError::EIO),
         _ => Err(SyscallError::EINVAL),
     }
 }
@@ -2860,7 +2936,9 @@ pub fn sys_fsync(fd: i32) -> SyscallResult {
         result
     }
 }
-pub fn sys_ftruncate(_fd: i32, _length: u64) -> SyscallResult { Ok(0) }
+pub fn sys_ftruncate(_fd: i32, _length: u64) -> SyscallResult {
+    Ok(0)
+}
 
 // ─────────────────────────────────────────────────
 // Syscalls 71-72: writev, readv
@@ -2887,9 +2965,8 @@ pub fn sys_writev(fd: i32, iov_ptr: *const u8, iovcnt: i32) -> SyscallResult {
             continue;
         }
         validate_user_ptr(iov.iov_base, iov.iov_len as usize)?;
-        let buf = unsafe {
-            core::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len as usize)
-        };
+        let buf =
+            unsafe { core::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len as usize) };
         match sys_write(fd, buf.as_ptr(), buf.len()) {
             Ok(n) => total += n,
             Err(e) => {
@@ -2967,7 +3044,9 @@ pub fn sys_reboot(cmd: u32) -> SyscallResult {
                 );
             }
             loop {
-                unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+                unsafe {
+                    core::arch::asm!("hlt", options(nomem, nostack));
+                }
             }
         }
         REBOOT_RESTART => {
@@ -2982,7 +3061,9 @@ pub fn sys_reboot(cmd: u32) -> SyscallResult {
                 core::arch::asm!("int3", options(nomem, nostack));
             }
             loop {
-                unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+                unsafe {
+                    core::arch::asm!("hlt", options(nomem, nostack));
+                }
             }
         }
         _ => Err(SyscallError::EINVAL),
@@ -2995,7 +3076,11 @@ pub fn sys_reboot(cmd: u32) -> SyscallResult {
 
 static mut HOSTNAME: [u8; 256] = {
     let mut buf = [0u8; 256];
-    buf[0] = b'r'; buf[1] = b'a'; buf[2] = b'c'; buf[3] = b'o'; buf[4] = b's';
+    buf[0] = b'r';
+    buf[1] = b'a';
+    buf[2] = b'c';
+    buf[3] = b'o';
+    buf[4] = b's';
     buf
 };
 static mut HOSTNAME_LEN: usize = 5;
@@ -3053,7 +3138,9 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> SyscallResult {
         .wrapping_add(pid);
     unsafe {
         for i in 0..len {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *buf.add(i) = (state >> 33) as u8;
         }
     }
@@ -3068,14 +3155,29 @@ mod tests {
     #[test]
     fn test_map_vfs_error() {
         assert_eq!(map_vfs_error(VfsError::NotFound), SyscallError::ENOENT);
-        assert_eq!(map_vfs_error(VfsError::PermissionDenied), SyscallError::EACCES);
-        assert_eq!(map_vfs_error(VfsError::NotADirectory), SyscallError::ENOTDIR);
+        assert_eq!(
+            map_vfs_error(VfsError::PermissionDenied),
+            SyscallError::EACCES
+        );
+        assert_eq!(
+            map_vfs_error(VfsError::NotADirectory),
+            SyscallError::ENOTDIR
+        );
         assert_eq!(map_vfs_error(VfsError::IsADirectory), SyscallError::EISDIR);
         assert_eq!(map_vfs_error(VfsError::AlreadyExists), SyscallError::EEXIST);
         assert_eq!(map_vfs_error(VfsError::NoSpace), SyscallError::ENOSPC);
-        assert_eq!(map_vfs_error(VfsError::InvalidArgument), SyscallError::EINVAL);
-        assert_eq!(map_vfs_error(VfsError::BadFileDescriptor), SyscallError::EBADF);
-        assert_eq!(map_vfs_error(VfsError::TooManyOpenFiles), SyscallError::EMFILE);
+        assert_eq!(
+            map_vfs_error(VfsError::InvalidArgument),
+            SyscallError::EINVAL
+        );
+        assert_eq!(
+            map_vfs_error(VfsError::BadFileDescriptor),
+            SyscallError::EBADF
+        );
+        assert_eq!(
+            map_vfs_error(VfsError::TooManyOpenFiles),
+            SyscallError::EMFILE
+        );
         assert_eq!(map_vfs_error(VfsError::BrokenPipe), SyscallError::EIO);
         assert_eq!(map_vfs_error(VfsError::WouldBlock), SyscallError::EAGAIN);
         assert_eq!(map_vfs_error(VfsError::IoError), SyscallError::EIO);

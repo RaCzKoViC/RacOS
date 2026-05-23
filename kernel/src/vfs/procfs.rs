@@ -50,9 +50,15 @@ const INO_MOUNTS: InodeNum = 8;
 const INO_DISKSTATS: InodeNum = 9;
 const INO_CACHESTATS: InodeNum = 10;
 
-fn pid_dir_ino(pid: u32) -> InodeNum { 1000 + pid as u64 * 10 }
-fn pid_status_ino(pid: u32) -> InodeNum { 1000 + pid as u64 * 10 + 1 }
-fn pid_cmdline_ino(pid: u32) -> InodeNum { 1000 + pid as u64 * 10 + 2 }
+fn pid_dir_ino(pid: u32) -> InodeNum {
+    1000 + pid as u64 * 10
+}
+fn pid_status_ino(pid: u32) -> InodeNum {
+    1000 + pid as u64 * 10 + 1
+}
+fn pid_cmdline_ino(pid: u32) -> InodeNum {
+    1000 + pid as u64 * 10 + 2
+}
 
 fn ino_to_pid(ino: InodeNum) -> Option<u32> {
     if ino >= 1000 {
@@ -63,7 +69,11 @@ fn ino_to_pid(ino: InodeNum) -> Option<u32> {
 }
 
 fn ino_subfile(ino: InodeNum) -> u64 {
-    if ino >= 1000 { (ino - 1000) % 10 } else { 0 }
+    if ino >= 1000 {
+        (ino - 1000) % 10
+    } else {
+        0
+    }
 }
 
 /// The procfs "filesystem".
@@ -115,16 +125,56 @@ impl InodeOps for ProcRootInode {
     }
     fn readdir(&self) -> VfsResult<Vec<DirEntry>> {
         let mut entries = Vec::new();
-        entries.push(DirEntry { name: String::from("uptime"), ino: INO_UPTIME, file_type: FileType::Regular });
-        entries.push(DirEntry { name: String::from("meminfo"), ino: INO_MEMINFO, file_type: FileType::Regular });
-        entries.push(DirEntry { name: String::from("version"), ino: INO_VERSION, file_type: FileType::Regular });
-        entries.push(DirEntry { name: String::from("cpuinfo"), ino: INO_CPUINFO, file_type: FileType::Regular });
-        entries.push(DirEntry { name: String::from("stat"), ino: INO_STAT, file_type: FileType::Regular });
-        entries.push(DirEntry { name: String::from("loadavg"), ino: INO_LOADAVG, file_type: FileType::Regular });
-        entries.push(DirEntry { name: String::from("self"), ino: INO_SELF, file_type: FileType::Directory });
-        entries.push(DirEntry { name: String::from("mounts"), ino: INO_MOUNTS, file_type: FileType::Regular });
-        entries.push(DirEntry { name: String::from("diskstats"), ino: INO_DISKSTATS, file_type: FileType::Regular });
-        entries.push(DirEntry { name: String::from("cachestats"), ino: INO_CACHESTATS, file_type: FileType::Regular });
+        entries.push(DirEntry {
+            name: String::from("uptime"),
+            ino: INO_UPTIME,
+            file_type: FileType::Regular,
+        });
+        entries.push(DirEntry {
+            name: String::from("meminfo"),
+            ino: INO_MEMINFO,
+            file_type: FileType::Regular,
+        });
+        entries.push(DirEntry {
+            name: String::from("version"),
+            ino: INO_VERSION,
+            file_type: FileType::Regular,
+        });
+        entries.push(DirEntry {
+            name: String::from("cpuinfo"),
+            ino: INO_CPUINFO,
+            file_type: FileType::Regular,
+        });
+        entries.push(DirEntry {
+            name: String::from("stat"),
+            ino: INO_STAT,
+            file_type: FileType::Regular,
+        });
+        entries.push(DirEntry {
+            name: String::from("loadavg"),
+            ino: INO_LOADAVG,
+            file_type: FileType::Regular,
+        });
+        entries.push(DirEntry {
+            name: String::from("self"),
+            ino: INO_SELF,
+            file_type: FileType::Directory,
+        });
+        entries.push(DirEntry {
+            name: String::from("mounts"),
+            ino: INO_MOUNTS,
+            file_type: FileType::Regular,
+        });
+        entries.push(DirEntry {
+            name: String::from("diskstats"),
+            ino: INO_DISKSTATS,
+            file_type: FileType::Regular,
+        });
+        entries.push(DirEntry {
+            name: String::from("cachestats"),
+            ino: INO_CACHESTATS,
+            file_type: FileType::Regular,
+        });
         // Add entries for known PIDs
         // We scan the scheduler for live tasks
         Ok(entries)
@@ -168,12 +218,18 @@ impl ProcFileInode {
                 let ticks = ms / 10; // ~100Hz ticks
                 format!(
                     "cpu  {} {} {} {} 0 0 0 0 0 0\nprocesses {}\n",
-                    ticks / 4, ticks / 4, ticks / 4, ticks / 4,
+                    ticks / 4,
+                    ticks / 4,
+                    ticks / 4,
+                    ticks / 4,
                     crate::task::scheduler::current_pid(),
                 )
             }
             INO_LOADAVG => {
-                format!("0.00 0.00 0.00 1/1 {}\n", crate::task::scheduler::current_pid())
+                format!(
+                    "0.00 0.00 0.00 1/1 {}\n",
+                    crate::task::scheduler::current_pid()
+                )
             }
             INO_MOUNTS => {
                 // device mountpoint fstype options 0 0
@@ -184,7 +240,11 @@ impl ProcFileInode {
                         let dev = match m.fs.name() {
                             "racfs" => {
                                 // Distinguish ram0 racfs (/var) from sda racfs (/mnt) by path.
-                                if m.path == "/mnt" { "/dev/sda" } else { "/dev/ram0" }
+                                if m.path == "/mnt" {
+                                    "/dev/sda"
+                                } else {
+                                    "/dev/ram0"
+                                }
                             }
                             "initramfs" => "initramfs",
                             "tmpfs" => "tmpfs",
@@ -198,17 +258,21 @@ impl ProcFileInode {
                 out
             }
             INO_CACHESTATS => {
-                let mut out = String::from("# mount hits misses cached_entries dirty_entries hit_rate%\n");
+                let mut out =
+                    String::from("# mount hits misses cached_entries dirty_entries hit_rate%\n");
                 unsafe {
                     let mt = super::mount::mount_table();
                     for m in mt.entries() {
                         let any = m.fs.as_any();
-                        if let Some(racfs_fs) = any.downcast_ref::<super::racfs::RacfsFilesystem>() {
+                        if let Some(racfs_fs) = any.downcast_ref::<super::racfs::RacfsFilesystem>()
+                        {
                             let (hits, misses, entries, dirty) = racfs_fs.inner().cache_stats();
                             let total = hits + misses;
                             let pct = if total > 0 { (hits * 100) / total } else { 0 };
-                            out.push_str(&format!("{} {} {} {} {} {}\n",
-                                m.path, hits, misses, entries, dirty, pct));
+                            out.push_str(&format!(
+                                "{} {} {} {} {} {}\n",
+                                m.path, hits, misses, entries, dirty, pct
+                            ));
                         }
                     }
                 }
@@ -223,11 +287,14 @@ impl ProcFileInode {
                     let mt = super::mount::mount_table();
                     for m in mt.entries() {
                         let any = m.fs.as_any();
-                        if let Some(racfs_fs) = any.downcast_ref::<super::racfs::RacfsFilesystem>() {
+                        if let Some(racfs_fs) = any.downcast_ref::<super::racfs::RacfsFilesystem>()
+                        {
                             let (tb, fb, ti, fi) = racfs_fs.inner().stats();
                             let used = tb.saturating_sub(fb);
-                            out.push_str(&format!("{} {} {} {} {} {}\n",
-                                m.path, tb, used, fb, ti, fi));
+                            out.push_str(&format!(
+                                "{} {} {} {} {} {}\n",
+                                m.path, tb, used, fb, ti, fi
+                            ));
                         } else {
                             out.push_str(&format!("{} 0 0 0 0 0\n", m.path));
                         }
@@ -289,8 +356,16 @@ impl InodeOps for ProcPidDirInode {
     }
     fn readdir(&self) -> VfsResult<Vec<DirEntry>> {
         Ok(alloc::vec![
-            DirEntry { name: String::from("status"), ino: pid_status_ino(self.pid), file_type: FileType::Regular },
-            DirEntry { name: String::from("cmdline"), ino: pid_cmdline_ino(self.pid), file_type: FileType::Regular },
+            DirEntry {
+                name: String::from("status"),
+                ino: pid_status_ino(self.pid),
+                file_type: FileType::Regular
+            },
+            DirEntry {
+                name: String::from("cmdline"),
+                ino: pid_cmdline_ino(self.pid),
+                file_type: FileType::Regular
+            },
         ])
     }
 }
@@ -311,7 +386,9 @@ impl ProcPidFileInode {
                 unsafe {
                     core::arch::asm!("cli", options(nomem, nostack));
                     let info = crate::task::scheduler::with_task_by_pid(self.pid, |t| {
-                        let name = String::from(core::str::from_utf8(&t.name[..t.name_len]).unwrap_or("?"));
+                        let name = String::from(
+                            core::str::from_utf8(&t.name[..t.name_len]).unwrap_or("?"),
+                        );
                         let state = match t.state {
                             crate::task::task::TaskState::Created => "created",
                             crate::task::task::TaskState::Ready => "ready",
@@ -326,10 +403,7 @@ impl ProcPidFileInode {
                     if let Some((name, state, ppid)) = info {
                         format!(
                             "Name:\t{}\nState:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t0\nGid:\t0\n",
-                            name,
-                            state,
-                            self.pid,
-                            ppid,
+                            name, state, self.pid, ppid,
                         )
                     } else {
                         String::from("")
@@ -394,11 +468,8 @@ impl Filesystem for ProcFilesystem {
     fn get_inode(&self, ino: InodeNum) -> VfsResult<Arc<dyn InodeOps>> {
         match ino {
             INO_ROOT => Ok(Arc::new(ProcRootInode)),
-            INO_UPTIME | INO_MEMINFO | INO_VERSION | INO_CPUINFO
-            | INO_STAT | INO_LOADAVG | INO_MOUNTS | INO_DISKSTATS
-            | INO_CACHESTATS => {
-                Ok(Arc::new(ProcFileInode { ino }))
-            }
+            INO_UPTIME | INO_MEMINFO | INO_VERSION | INO_CPUINFO | INO_STAT | INO_LOADAVG
+            | INO_MOUNTS | INO_DISKSTATS | INO_CACHESTATS => Ok(Arc::new(ProcFileInode { ino })),
             INO_SELF => {
                 let pid = crate::task::scheduler::current_pid();
                 Ok(Arc::new(ProcPidDirInode { pid }))
@@ -422,5 +493,7 @@ impl Filesystem for ProcFilesystem {
         "proc"
     }
 
-    fn as_any(&self) -> &dyn core::any::Any { self }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }

@@ -17,14 +17,14 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Signal {
-    SIGHUP  =  1,
-    SIGINT  =  2,
-    SIGQUIT =  3,
-    SIGILL  =  4,
-    SIGTRAP =  5,
-    SIGABRT =  6,
-    SIGFPE  =  8,
-    SIGKILL =  9,
+    SIGHUP = 1,
+    SIGINT = 2,
+    SIGQUIT = 3,
+    SIGILL = 4,
+    SIGTRAP = 5,
+    SIGABRT = 6,
+    SIGFPE = 8,
+    SIGKILL = 9,
     SIGSEGV = 11,
     SIGPIPE = 13,
     SIGALRM = 14,
@@ -42,14 +42,14 @@ impl Signal {
     /// Convert from raw u8.
     pub fn from_u8(n: u8) -> Option<Self> {
         match n {
-             1 => Some(Self::SIGHUP),
-             2 => Some(Self::SIGINT),
-             3 => Some(Self::SIGQUIT),
-             4 => Some(Self::SIGILL),
-             5 => Some(Self::SIGTRAP),
-             6 => Some(Self::SIGABRT),
-             8 => Some(Self::SIGFPE),
-             9 => Some(Self::SIGKILL),
+            1 => Some(Self::SIGHUP),
+            2 => Some(Self::SIGINT),
+            3 => Some(Self::SIGQUIT),
+            4 => Some(Self::SIGILL),
+            5 => Some(Self::SIGTRAP),
+            6 => Some(Self::SIGABRT),
+            8 => Some(Self::SIGFPE),
+            9 => Some(Self::SIGKILL),
             11 => Some(Self::SIGSEGV),
             13 => Some(Self::SIGPIPE),
             14 => Some(Self::SIGALRM),
@@ -61,7 +61,7 @@ impl Signal {
             21 => Some(Self::SIGTTIN),
             22 => Some(Self::SIGTTOU),
             28 => Some(Self::SIGWINCH),
-            _  => None,
+            _ => None,
         }
     }
 
@@ -90,7 +90,11 @@ pub struct SignalState {
 
 impl SignalState {
     pub const fn new() -> Self {
-        SignalState { pending: 0, blocked: 0, handlers: [0; 32] }
+        SignalState {
+            pending: 0,
+            blocked: 0,
+            handlers: [0; 32],
+        }
     }
 
     /// Post a signal to this process.
@@ -137,7 +141,9 @@ impl SignalState {
     pub fn default_action(sig: Signal) -> SignalAction {
         match sig {
             Signal::SIGCHLD | Signal::SIGCONT | Signal::SIGWINCH => SignalAction::Ignore,
-            Signal::SIGSTOP | Signal::SIGTSTP | Signal::SIGTTIN | Signal::SIGTTOU => SignalAction::Stop,
+            Signal::SIGSTOP | Signal::SIGTSTP | Signal::SIGTTIN | Signal::SIGTTOU => {
+                SignalAction::Stop
+            }
             _ => SignalAction::Terminate,
         }
     }

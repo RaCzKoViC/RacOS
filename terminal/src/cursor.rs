@@ -153,7 +153,11 @@ impl Cursor {
     /// Set scroll region (1-indexed, inclusive).
     pub fn set_scroll_region(&mut self, top: usize, bottom: usize) {
         let top = top.saturating_sub(1);
-        let bottom = if bottom == 0 { self.max_rows } else { bottom.min(self.max_rows) };
+        let bottom = if bottom == 0 {
+            self.max_rows
+        } else {
+            bottom.min(self.max_rows)
+        };
         if top < bottom {
             self.scroll_top = top;
             self.scroll_bottom = bottom;

@@ -20,22 +20,42 @@ pub struct UdpHeader {
 
 impl UdpHeader {
     pub fn parse(msg: &[u8]) -> Option<(Self, &[u8])> {
-        if msg.len() < UDP_HDR_LEN { return None; }
+        if msg.len() < UDP_HDR_LEN {
+            return None;
+        }
         let src_port = u16::from_be_bytes([msg[0], msg[1]]);
         let dst_port = u16::from_be_bytes([msg[2], msg[3]]);
         let length = u16::from_be_bytes([msg[4], msg[5]]);
         let checksum = u16::from_be_bytes([msg[6], msg[7]]);
         let payload_end = (length as usize).min(msg.len());
-        let payload = if payload_end > UDP_HDR_LEN { &msg[UDP_HDR_LEN..payload_end] } else { &[] };
-        Some((UdpHeader { src_port, dst_port, length, checksum }, payload))
+        let payload = if payload_end > UDP_HDR_LEN {
+            &msg[UDP_HDR_LEN..payload_end]
+        } else {
+            &[]
+        };
+        Some((
+            UdpHeader {
+                src_port,
+                dst_port,
+                length,
+                checksum,
+            },
+            payload,
+        ))
     }
 }
 
 /// Write a UDP header into `out[0..8]` and compute the checksum over the
 /// pseudo-header + header + payload (payload is expected to already live
 /// at `out[8..8+payload_len]`).
-pub fn write(out: &mut [u8], src_ip: &[u8; 4], dst_ip: &[u8; 4],
-             src_port: u16, dst_port: u16, payload_len: usize) {
+pub fn write(
+    out: &mut [u8],
+    src_ip: &[u8; 4],
+    dst_ip: &[u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload_len: usize,
+) {
     debug_assert!(out.len() >= UDP_HDR_LEN + payload_len);
     let total_len = (UDP_HDR_LEN + payload_len) as u16;
 
@@ -61,7 +81,9 @@ pub fn write(out: &mut [u8], src_ip: &[u8; 4], dst_ip: &[u8; 4],
     let mut csum = !(sum as u16);
     // RFC 768: a transmitted zero checksum is converted to 0xFFFF so it is
     // distinguishable from "no checksum computed".
-    if csum == 0 { csum = 0xFFFF; }
+    if csum == 0 {
+        csum = 0xFFFF;
+    }
     out[6..8].copy_from_slice(&csum.to_be_bytes());
 }
 

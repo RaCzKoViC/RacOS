@@ -29,7 +29,7 @@ const TRAMPOLINE_VECTOR: u8 = (TRAMPOLINE_PHYS >> 12) as u8;
 /// Per-AP stack: 16 KiB (4 frames) is plenty for the early idle loop and
 /// any IRQ that fires before we hand the AP a real task stack later.
 const AP_STACK_FRAMES: usize = 4;
-const AP_STACK_BYTES: usize  = AP_STACK_FRAMES * FRAME_SIZE;
+const AP_STACK_BYTES: usize = AP_STACK_FRAMES * FRAME_SIZE;
 
 // ── Trampoline blob (real -> protected -> long mode) ──────────────────────
 //
@@ -39,7 +39,8 @@ const AP_STACK_BYTES: usize  = AP_STACK_FRAMES * FRAME_SIZE;
 // slots (cr3_value / ap_stack_top / ap_entry_addr) are written by the
 // BSP between IPIs.
 
-core::arch::global_asm!(r#"
+core::arch::global_asm!(
+    r#"
 .section .rodata.ap_trampoline, "a"
 .global ap_trampoline_start
 .global ap_trampoline_end
@@ -175,12 +176,13 @@ ap_trampoline_entry_off:
     .quad 0
 
 ap_trampoline_end:
-"#);
+"#
+);
 
 extern "C" {
     static ap_trampoline_start: u8;
-    static ap_trampoline_end:   u8;
-    static ap_trampoline_cr3_off:   u8;
+    static ap_trampoline_end: u8;
+    static ap_trampoline_cr3_off: u8;
     static ap_trampoline_stack_off: u8;
     static ap_trampoline_entry_off: u8;
 }
@@ -197,7 +199,9 @@ extern "C" {
 pub unsafe fn bring_up_all() -> usize {
     let total = smp::cpu_count();
     if total <= 1 {
-        crate::serial::serial_println!("[  0.000720] RACORE: AP bring-up - single CPU, nothing to do");
+        crate::serial::serial_println!(
+            "[  0.000720] RACORE: AP bring-up - single CPU, nothing to do"
+        );
         return 0;
     }
 
@@ -209,21 +213,27 @@ pub unsafe fn bring_up_all() -> usize {
 
     let mut booted = 0usize;
     smp::for_each_cpu::<(), _>(|cpu| {
-        if cpu.is_bsp { return None; }
-        if cpu.started.load(Ordering::SeqCst) { return None; }
+        if cpu.is_bsp {
+            return None;
+        }
+        if cpu.started.load(Ordering::SeqCst) {
+            return None;
+        }
 
         match bring_up_one(cpu.apic_id, cr3) {
             Ok(()) => {
                 crate::serial::serial_println!(
                     "[  0.000730] RACORE: AP apic_id={} alive (BSP was apic_id={})",
-                    cpu.apic_id, bsp_apic,
+                    cpu.apic_id,
+                    bsp_apic,
                 );
                 booted += 1;
             }
             Err(why) => {
                 crate::serial::serial_println!(
                     "[  0.000730] RACORE: AP apic_id={} FAILED to start: {}",
-                    cpu.apic_id, why,
+                    cpu.apic_id,
+                    why,
                 );
             }
         }
@@ -295,7 +305,7 @@ unsafe fn bring_up_one(apic_id: u32, cr3: u64) -> Result<(), &'static str> {
     let stack_top = frame.addr() + AP_STACK_BYTES as u64;
 
     // Write per-AP parameters into the trampoline page.
-    *slot_addr(&ap_trampoline_cr3_off)   = cr3;
+    *slot_addr(&ap_trampoline_cr3_off) = cr3;
     *slot_addr(&ap_trampoline_stack_off) = stack_top;
     *slot_addr(&ap_trampoline_entry_off) = ap_entry as u64;
     // Make sure the writes are visible before the AP starts spinning.
@@ -358,8 +368,8 @@ fn busy_wait_us(us: u32) {
 unsafe fn enable_lapic_for_this_ap() {
     const LAPIC_BASE: u64 = 0xFEE0_0000;
     const SVR_OFFSET: usize = 0x0F0;
-    const SVR_ENABLE: u32   = 1 << 8;
-    const SPURIOUS:   u32   = 0xFF;
+    const SVR_ENABLE: u32 = 1 << 8;
+    const SPURIOUS: u32 = 0xFF;
     let svr = (LAPIC_BASE as *mut u8).add(SVR_OFFSET) as *mut u32;
     let cur = core::ptr::read_volatile(svr);
     core::ptr::write_volatile(svr, cur | SVR_ENABLE | SPURIOUS);

@@ -10,10 +10,10 @@ extern crate alloc;
 extern crate libc_lite;
 
 use alloc::string::String;
+use racsh::exec;
+use racsh::expand::Env;
 use racsh::lexer::Lexer;
 use racsh::parser::Parser;
-use racsh::expand::Env;
-use racsh::exec;
 use racsh::readline::{self, History};
 
 #[no_mangle]

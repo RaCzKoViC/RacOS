@@ -22,13 +22,19 @@ pub struct Ipv4Header {
 impl Ipv4Header {
     /// Parse a 20-byte IPv4 header (no options). Returns header + payload slice.
     pub fn parse(packet: &[u8]) -> Option<(Self, &[u8])> {
-        if packet.len() < IPV4_HDR_LEN { return None; }
+        if packet.len() < IPV4_HDR_LEN {
+            return None;
+        }
         let ver_ihl = packet[0];
         let version = ver_ihl >> 4;
         let ihl = ver_ihl & 0x0F;
-        if version != 4 || ihl < 5 { return None; }
+        if version != 4 || ihl < 5 {
+            return None;
+        }
         let header_len = (ihl as usize) * 4;
-        if packet.len() < header_len { return None; }
+        if packet.len() < header_len {
+            return None;
+        }
 
         let total_len = u16::from_be_bytes([packet[2], packet[3]]);
         let identification = u16::from_be_bytes([packet[4], packet[5]]);
@@ -49,21 +55,38 @@ impl Ipv4Header {
             &[]
         };
         Some((
-            Ipv4Header { ihl, total_len, identification, flags_fragment, ttl, protocol, checksum, src, dst },
+            Ipv4Header {
+                ihl,
+                total_len,
+                identification,
+                flags_fragment,
+                ttl,
+                protocol,
+                checksum,
+                src,
+                dst,
+            },
             payload,
         ))
     }
 
     /// Write a 20-byte IPv4 header at the start of `out`, computing the checksum.
-    pub fn write(out: &mut [u8], src: &[u8; 4], dst: &[u8; 4], protocol: u8, payload_len: usize, id: u16) {
+    pub fn write(
+        out: &mut [u8],
+        src: &[u8; 4],
+        dst: &[u8; 4],
+        protocol: u8,
+        payload_len: usize,
+        id: u16,
+    ) {
         debug_assert!(out.len() >= IPV4_HDR_LEN);
-        out[0] = 0x45;                                  // version 4, IHL 5 (20 bytes)
-        out[1] = 0;                                     // DSCP/ECN = 0
+        out[0] = 0x45; // version 4, IHL 5 (20 bytes)
+        out[1] = 0; // DSCP/ECN = 0
         let total = (IPV4_HDR_LEN + payload_len) as u16;
         out[2..4].copy_from_slice(&total.to_be_bytes());
         out[4..6].copy_from_slice(&id.to_be_bytes());
         out[6..8].copy_from_slice(&0u16.to_be_bytes()); // flags + fragment offset
-        out[8] = 64;                                    // TTL
+        out[8] = 64; // TTL
         out[9] = protocol;
         out[10..12].copy_from_slice(&0u16.to_be_bytes()); // checksum placeholder
         out[12..16].copy_from_slice(src);

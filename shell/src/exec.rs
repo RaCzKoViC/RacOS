@@ -6,11 +6,11 @@
 
 extern crate alloc;
 
+use crate::ast::{Assignment, AstNode, Redirect, RedirectOp, SequenceOp, Word};
+use crate::builtin::{self, BuiltinResult};
+use crate::expand::{self, Env};
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::ast::{AstNode, Assignment, Redirect, RedirectOp, SequenceOp, Word};
-use crate::expand::{self, Env};
-use crate::builtin::{self, BuiltinResult};
 
 // ─────────────────────────────────────────────────
 // Job table
@@ -96,14 +96,20 @@ pub fn execute(node: &AstNode, env: &mut Env) -> i32 {
             status
         }
 
-        AstNode::SimpleCommand { assignments, words, redirects } => {
-            exec_simple(assignments, words, redirects, env)
-        }
+        AstNode::SimpleCommand {
+            assignments,
+            words,
+            redirects,
+        } => exec_simple(assignments, words, redirects, env),
 
         AstNode::Pipeline { commands, negated } => {
             let status = exec_pipeline(commands, env);
             if *negated {
-                if status == 0 { 1 } else { 0 }
+                if status == 0 {
+                    1
+                } else {
+                    0
+                }
             } else {
                 status
             }
@@ -152,7 +158,12 @@ pub fn execute(node: &AstNode, env: &mut Env) -> i32 {
             }
         }
 
-        AstNode::If { condition, then_body, elif_parts, else_body } => {
+        AstNode::If {
+            condition,
+            then_body,
+            elif_parts,
+            else_body,
+        } => {
             let cond = execute(condition, env);
             env.last_status = cond;
             if cond == 0 {
@@ -188,7 +199,8 @@ pub fn execute(node: &AstNode, env: &mut Env) -> i32 {
 
         AstNode::For { var, words, body } => {
             let items: Vec<String> = if let Some(word_list) = words {
-                word_list.iter()
+                word_list
+                    .iter()
                     .flat_map(|w| expand::expand_word_list(w, env))
                     .collect()
             } else {
@@ -227,9 +239,7 @@ pub fn execute(node: &AstNode, env: &mut Env) -> i32 {
             execute(body, env)
         }
 
-        AstNode::BraceGroup { body, redirects: _ } => {
-            execute(body, env)
-        }
+        AstNode::BraceGroup { body, redirects: _ } => execute(body, env),
 
         AstNode::FunctionDef { name: _, body: _ } => {
             // TODO: function table
@@ -255,7 +265,8 @@ fn exec_simple(
     }
 
     // Expand all words with glob expansion support
-    let expanded: Vec<String> = words.iter()
+    let expanded: Vec<String> = words
+        .iter()
         .flat_map(|w| expand::expand_word_list(w, env))
         .collect();
 
@@ -385,14 +396,27 @@ fn apply_redirects(redirects: &[Redirect], env: &Env) -> Result<Vec<(i32, i32)>,
         let _ = libc_lite::write(2, target.as_bytes());
         let _ = libc_lite::write(2, b": cannot open (errno ");
         // Errors come back negative from libc_lite; print the absolute value.
-        let v = if errno < 0 { (-errno) as u64 } else { errno as u64 };
+        let v = if errno < 0 {
+            (-errno) as u64
+        } else {
+            errno as u64
+        };
         let mut digits = [0u8; 8];
         let mut i = 0usize;
         let mut t = v;
-        if t == 0 { digits[0] = b'0'; i = 1; }
-        while t > 0 { digits[i] = b'0' + (t % 10) as u8; t /= 10; i += 1; }
+        if t == 0 {
+            digits[0] = b'0';
+            i = 1;
+        }
+        while t > 0 {
+            digits[i] = b'0' + (t % 10) as u8;
+            t /= 10;
+            i += 1;
+        }
         let mut buf = [0u8; 8];
-        for j in 0..i { buf[j] = digits[i - 1 - j]; }
+        for j in 0..i {
+            buf[j] = digits[i - 1 - j];
+        }
         let _ = libc_lite::write(2, &buf[..i]);
         let _ = libc_lite::write(2, b")\n");
     }
@@ -433,7 +457,8 @@ fn apply_redirects(redirects: &[Redirect], env: &Env) -> Result<Vec<(i32, i32)>,
                 path_buf.extend_from_slice(target.as_bytes());
                 path_buf.push(0);
 
-                match libc_lite::open(&path_buf, 0, 0) { // O_RDONLY
+                match libc_lite::open(&path_buf, 0, 0) {
+                    // O_RDONLY
                     Ok(new_fd) => {
                         if let Ok(saved_fd) = libc_lite::dup(fd) {
                             saved.push((fd, saved_fd));
@@ -494,7 +519,12 @@ fn parse_fd(s: &str) -> Option<i32> {
 /// Execute a command in the background (spawn without waiting).
 fn exec_background(node: &AstNode, env: &mut Env) {
     // For SimpleCommand with external commands, spawn without waiting
-    if let AstNode::SimpleCommand { assignments: _, words, redirects: _ } = node {
+    if let AstNode::SimpleCommand {
+        assignments: _,
+        words,
+        redirects: _,
+    } = node
+    {
         let expanded: Vec<String> = words.iter().map(|w| expand::expand_word(w, env)).collect();
         if expanded.is_empty() || expanded[0].is_empty() {
             return;
@@ -584,15 +614,25 @@ fn exec_pipeline(commands: &[AstNode], env: &mut Env) -> i32 {
 
         // For external commands in the pipeline, we need to set up
         // redirections and spawn the process
-        if let AstNode::SimpleCommand { assignments: _, words, redirects } = cmd {
-            let expanded: Vec<String> = words.iter()
+        if let AstNode::SimpleCommand {
+            assignments: _,
+            words,
+            redirects,
+        } = cmd
+        {
+            let expanded: Vec<String> = words
+                .iter()
                 .flat_map(|w| expand::expand_word_list(w, env))
                 .collect();
 
             if expanded.is_empty() || expanded[0].is_empty() {
-                if let Some(rd) = prev_read_fd { let _ = libc_lite::close(rd); }
+                if let Some(rd) = prev_read_fd {
+                    let _ = libc_lite::close(rd);
+                }
                 prev_read_fd = if !is_last { Some(pipe_fds[0]) } else { None };
-                if !is_last { let _ = libc_lite::close(pipe_fds[1]); }
+                if !is_last {
+                    let _ = libc_lite::close(pipe_fds[1]);
+                }
                 continue;
             }
 
@@ -606,7 +646,9 @@ fn exec_pipeline(commands: &[AstNode], env: &mut Env) -> i32 {
                     let _ = libc_lite::dup2(read_fd, 0);
                     let _ = libc_lite::close(read_fd);
                     saved
-                } else { None };
+                } else {
+                    None
+                };
 
                 // Set up stdout to current pipe
                 let saved_stdout = if !is_last {
@@ -614,12 +656,20 @@ fn exec_pipeline(commands: &[AstNode], env: &mut Env) -> i32 {
                     let _ = libc_lite::dup2(pipe_fds[1], 1);
                     let _ = libc_lite::close(pipe_fds[1]);
                     saved
-                } else { None };
+                } else {
+                    None
+                };
 
                 let _ = execute(cmd, env);
 
-                if let Some(fd) = saved_stdout { let _ = libc_lite::dup2(fd, 1); let _ = libc_lite::close(fd); }
-                if let Some(fd) = saved_stdin { let _ = libc_lite::dup2(fd, 0); let _ = libc_lite::close(fd); }
+                if let Some(fd) = saved_stdout {
+                    let _ = libc_lite::dup2(fd, 1);
+                    let _ = libc_lite::close(fd);
+                }
+                if let Some(fd) = saved_stdin {
+                    let _ = libc_lite::dup2(fd, 0);
+                    let _ = libc_lite::close(fd);
+                }
             } else {
                 // External command — spawn with pipes
                 let cmd_name = &expanded[0];
@@ -647,7 +697,9 @@ fn exec_pipeline(commands: &[AstNode], env: &mut Env) -> i32 {
                         let _ = libc_lite::dup2(read_fd, 0);
                         let _ = libc_lite::close(read_fd);
                         saved
-                    } else { None };
+                    } else {
+                        None
+                    };
 
                     // Redirect stdout to current pipe
                     let saved_stdout = if !is_last {
@@ -655,19 +707,26 @@ fn exec_pipeline(commands: &[AstNode], env: &mut Env) -> i32 {
                         let _ = libc_lite::dup2(pipe_fds[1], 1);
                         let _ = libc_lite::close(pipe_fds[1]);
                         saved
-                    } else { None };
+                    } else {
+                        None
+                    };
 
                     // Apply redirects from the command. If they fail, skip
                     // the spawn — silent drop would let a failed `>` look
                     // like success.
                     let saved_redirects = match apply_redirects(redirects, env) {
                         Ok(s) => Some(s),
-                        Err(s) => { restore_fds(&s); None }
+                        Err(s) => {
+                            restore_fds(&s);
+                            None
+                        }
                     };
 
                     if let Some(saved_redirects) = saved_redirects {
                         match libc_lite::spawn_args(&path_buf, &argv_ptrs) {
-                            Ok(pid) => { child_pids.push(pid); }
+                            Ok(pid) => {
+                                child_pids.push(pid);
+                            }
                             Err(_) => {
                                 let _ = libc_lite::write(2, b"racsh: ");
                                 let _ = libc_lite::write(2, cmd_name.as_bytes());
@@ -676,14 +735,24 @@ fn exec_pipeline(commands: &[AstNode], env: &mut Env) -> i32 {
                         }
                         restore_fds(&saved_redirects);
                     }
-                    if let Some(fd) = saved_stdout { let _ = libc_lite::dup2(fd, 1); let _ = libc_lite::close(fd); }
-                    if let Some(fd) = saved_stdin { let _ = libc_lite::dup2(fd, 0); let _ = libc_lite::close(fd); }
+                    if let Some(fd) = saved_stdout {
+                        let _ = libc_lite::dup2(fd, 1);
+                        let _ = libc_lite::close(fd);
+                    }
+                    if let Some(fd) = saved_stdin {
+                        let _ = libc_lite::dup2(fd, 0);
+                        let _ = libc_lite::close(fd);
+                    }
                 } else {
                     let _ = libc_lite::write(2, b"racsh: ");
                     let _ = libc_lite::write(2, cmd_name.as_bytes());
                     let _ = libc_lite::write(2, b": command not found\n");
-                    if let Some(rd) = prev_read_fd.take() { let _ = libc_lite::close(rd); }
-                    if !is_last { let _ = libc_lite::close(pipe_fds[1]); }
+                    if let Some(rd) = prev_read_fd.take() {
+                        let _ = libc_lite::close(rd);
+                    }
+                    if !is_last {
+                        let _ = libc_lite::close(pipe_fds[1]);
+                    }
                 }
             }
         } else {
@@ -693,19 +762,29 @@ fn exec_pipeline(commands: &[AstNode], env: &mut Env) -> i32 {
                 let _ = libc_lite::dup2(read_fd, 0);
                 let _ = libc_lite::close(read_fd);
                 saved
-            } else { None };
+            } else {
+                None
+            };
 
             let saved_stdout = if !is_last {
                 let saved = libc_lite::dup(1).ok();
                 let _ = libc_lite::dup2(pipe_fds[1], 1);
                 let _ = libc_lite::close(pipe_fds[1]);
                 saved
-            } else { None };
+            } else {
+                None
+            };
 
             let _ = execute(cmd, env);
 
-            if let Some(fd) = saved_stdout { let _ = libc_lite::dup2(fd, 1); let _ = libc_lite::close(fd); }
-            if let Some(fd) = saved_stdin { let _ = libc_lite::dup2(fd, 0); let _ = libc_lite::close(fd); }
+            if let Some(fd) = saved_stdout {
+                let _ = libc_lite::dup2(fd, 1);
+                let _ = libc_lite::close(fd);
+            }
+            if let Some(fd) = saved_stdin {
+                let _ = libc_lite::dup2(fd, 0);
+                let _ = libc_lite::close(fd);
+            }
         }
 
         // Save the read end for the next command

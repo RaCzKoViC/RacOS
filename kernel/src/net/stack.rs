@@ -26,12 +26,12 @@ pub const NETMASK: [u8; 4] = [255, 255, 255, 0];
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DemoStage {
     Idle,
-    AwaitGatewayArp,    // sent ARP for 10.0.2.2; waiting on reply
-    AwaitIcmpReply,     // sent ICMP echo; waiting on reply
-    AwaitDnsArp,        // sent ARP for 10.0.2.3; waiting on reply
-    AwaitDnsReply,      // sent DNS query; waiting on UDP response
+    AwaitGatewayArp,     // sent ARP for 10.0.2.2; waiting on reply
+    AwaitIcmpReply,      // sent ICMP echo; waiting on reply
+    AwaitDnsArp,         // sent ARP for 10.0.2.3; waiting on reply
+    AwaitDnsReply,       // sent DNS query; waiting on UDP response
     AwaitTcpEstablished, // sent SYN; waiting on SYN+ACK
-    AwaitHttpResponse,  // sent HTTP GET; waiting on bytes
+    AwaitHttpResponse,   // sent HTTP GET; waiting on bytes
     Done,
 }
 
@@ -145,8 +145,11 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     {
         let mut s = STACK.lock();
         s.query_pending = Some(DnsQueryState {
-            id, src_port,
-            completed: false, resolved_ip: [0; 4], failed: false,
+            id,
+            src_port,
+            completed: false,
+            resolved_ip: [0; 4],
+            failed: false,
         });
     }
 
@@ -164,17 +167,30 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     eth::write_header(&mut buf, &dns_mac, &our_mac, eth::ETHERTYPE_IPV4);
     let udp_off = eth::ETH_HDR_LEN + ipv4::IPV4_HDR_LEN;
     buf[udp_off + udp::UDP_HDR_LEN..udp_off + udp_len].copy_from_slice(&payload[..qlen]);
-    udp::write(&mut buf[udp_off..udp_off + udp_len], &OUR_IP, &DNS_IP, src_port, dns::PORT, qlen);
+    udp::write(
+        &mut buf[udp_off..udp_off + udp_len],
+        &OUR_IP,
+        &DNS_IP,
+        src_port,
+        dns::PORT,
+        qlen,
+    );
     ipv4::Ipv4Header::write(
         &mut buf[eth::ETH_HDR_LEN..eth::ETH_HDR_LEN + ipv4::IPV4_HDR_LEN],
-        &OUR_IP, &DNS_IP, ipv4::PROTO_UDP, udp_len, ip_id,
+        &OUR_IP,
+        &DNS_IP,
+        ipv4::PROTO_UDP,
+        udp_len,
+        ip_id,
     );
     transmit(&buf[..frame_len]);
 
     // Wait up to 3 seconds for the reply (or 1 retransmission).
     // The SYSCALL path enters with IF=0 (SFMASK clears it). Enable interrupts
     // for the duration of the wait so the PIT can fire and poll the NIC.
-    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
     let start = crate::interrupts::pit::ticks();
     let mut retransmitted = false;
     let result = loop {
@@ -185,11 +201,19 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
             let s = STACK.lock();
             s.query_pending
         };
-        let Some(q) = snapshot else { break None; };
-        if q.completed && !q.failed { break Some(q.resolved_ip); }
-        if q.failed { break None; }
+        let Some(q) = snapshot else {
+            break None;
+        };
+        if q.completed && !q.failed {
+            break Some(q.resolved_ip);
+        }
+        if q.failed {
+            break None;
+        }
 
-        if elapsed > 3000 { break None; }
+        if elapsed > 3000 {
+            break None;
+        }
         if !retransmitted && elapsed > 1000 {
             retransmitted = true;
             transmit(&buf[..frame_len]);
@@ -198,7 +222,9 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
         poll();
         core::hint::spin_loop();
     };
-    unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+    }
 
     // Clear pending state on timeout.
     if result.is_none() {
@@ -217,7 +243,11 @@ pub fn send_arp_request(target_ip: [u8; 4]) {
     }
     crate::serial::serial_println!(
         "[ NETSTACK ] ARP: who-has {}.{}.{}.{}? request out ({} B)",
-        target_ip[0], target_ip[1], target_ip[2], target_ip[3], buf.len(),
+        target_ip[0],
+        target_ip[1],
+        target_ip[2],
+        target_ip[3],
+        buf.len(),
     );
     transmit(&buf);
 }
@@ -243,7 +273,9 @@ pub fn send_icmp_echo(dst_ip: [u8; 4], payload: &[u8]) -> bool {
     let icmp_len = icmp::ICMP_HDR_LEN + payload.len();
     let ip_len = ipv4::IPV4_HDR_LEN + icmp_len;
     let frame_len = eth::ETH_HDR_LEN + ip_len;
-    if frame_len > 1500 { return false; }
+    if frame_len > 1500 {
+        return false;
+    }
 
     let mut buf = [0u8; 128];
     eth::write_header(&mut buf, &dst_mac, &src_mac, eth::ETHERTYPE_IPV4);
@@ -251,12 +283,22 @@ pub fn send_icmp_echo(dst_ip: [u8; 4], payload: &[u8]) -> bool {
     // ICMP first (payload then header — write_echo needs payload in place for checksum).
     let icmp_off = eth::ETH_HDR_LEN + ipv4::IPV4_HDR_LEN;
     buf[icmp_off + icmp::ICMP_HDR_LEN..icmp_off + icmp_len].copy_from_slice(payload);
-    icmp::write_echo(&mut buf[icmp_off..icmp_off + icmp_len], icmp::TYPE_ECHO_REQUEST, 0x1234, seq, payload.len());
+    icmp::write_echo(
+        &mut buf[icmp_off..icmp_off + icmp_len],
+        icmp::TYPE_ECHO_REQUEST,
+        0x1234,
+        seq,
+        payload.len(),
+    );
 
     // IPv4 last (checksum covers header only).
     ipv4::Ipv4Header::write(
         &mut buf[eth::ETH_HDR_LEN..eth::ETH_HDR_LEN + ipv4::IPV4_HDR_LEN],
-        &OUR_IP, &dst_ip, ipv4::PROTO_ICMP, icmp_len, ip_id,
+        &OUR_IP,
+        &dst_ip,
+        ipv4::PROTO_ICMP,
+        icmp_len,
+        ip_id,
     );
 
     transmit(&buf[..frame_len]);
@@ -280,7 +322,9 @@ pub fn send_udp(dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) -
     let udp_len = udp::UDP_HDR_LEN + payload.len();
     let ip_len = ipv4::IPV4_HDR_LEN + udp_len;
     let frame_len = eth::ETH_HDR_LEN + ip_len;
-    if frame_len > 1500 { return false; }
+    if frame_len > 1500 {
+        return false;
+    }
 
     let (dst_mac, src_mac, ip_id) = {
         let mut s = STACK.lock();
@@ -298,12 +342,23 @@ pub fn send_udp(dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) -
     // UDP (payload first so checksum covers it).
     let udp_off = eth::ETH_HDR_LEN + ipv4::IPV4_HDR_LEN;
     buf[udp_off + udp::UDP_HDR_LEN..udp_off + udp_len].copy_from_slice(payload);
-    udp::write(&mut buf[udp_off..udp_off + udp_len], &OUR_IP, &dst_ip, src_port, dst_port, payload.len());
+    udp::write(
+        &mut buf[udp_off..udp_off + udp_len],
+        &OUR_IP,
+        &dst_ip,
+        src_port,
+        dst_port,
+        payload.len(),
+    );
 
     // IPv4 header.
     ipv4::Ipv4Header::write(
         &mut buf[eth::ETH_HDR_LEN..eth::ETH_HDR_LEN + ipv4::IPV4_HDR_LEN],
-        &OUR_IP, &dst_ip, ipv4::PROTO_UDP, udp_len, ip_id,
+        &OUR_IP,
+        &dst_ip,
+        ipv4::PROTO_UDP,
+        udp_len,
+        ip_id,
     );
 
     transmit(&buf[..frame_len]);
@@ -331,7 +386,13 @@ fn send_dns_query(name: &'static str) -> bool {
     }
     crate::serial::serial_println!(
         "[ NETSTACK ] DNS: query A {} -> {}.{}.{}.{}:{} ({} B)",
-        name, DNS_IP[0], DNS_IP[1], DNS_IP[2], DNS_IP[3], dns::PORT, qlen,
+        name,
+        DNS_IP[0],
+        DNS_IP[1],
+        DNS_IP[2],
+        DNS_IP[3],
+        dns::PORT,
+        qlen,
     );
     true
 }
@@ -349,20 +410,28 @@ pub fn poll() {
     let mut buf = [0u8; 1600];
     loop {
         let n = {
-            let Some(mut nic) = drivers::NIC.try_lock() else { return; };
+            let Some(mut nic) = drivers::NIC.try_lock() else {
+                return;
+            };
             match nic.as_mut() {
                 Some(n) => n.poll_rx(&mut buf),
                 None => return,
             }
         };
-        let Some(len) = n else { return; };
-        if len == 0 { return; }
+        let Some(len) = n else {
+            return;
+        };
+        if len == 0 {
+            return;
+        }
         on_frame(&buf[..len]);
     }
 }
 
 fn on_frame(frame: &[u8]) {
-    let Some((eth_hdr, payload)) = eth::EthHeader::parse(frame) else { return; };
+    let Some((eth_hdr, payload)) = eth::EthHeader::parse(frame) else {
+        return;
+    };
     crate::serial::serial_println!(
         "[ NETSTACK ] RX frame {} B, ethertype=0x{:04X}, src={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         frame.len(), eth_hdr.ethertype,
@@ -377,7 +446,9 @@ fn on_frame(frame: &[u8]) {
 }
 
 fn handle_arp(payload: &[u8]) {
-    let Some(pkt) = arp::ArpPacket::parse(payload) else { return; };
+    let Some(pkt) = arp::ArpPacket::parse(payload) else {
+        return;
+    };
 
     // Learn from any ARP we see. Decide demo follow-up based on which address resolved.
     let next: DemoFollowup = {
@@ -426,7 +497,9 @@ fn handle_arp(payload: &[u8]) {
                 crate::serial::serial_println!("[ NETSTACK ] ICMP: sent echo request to gateway");
             }
         }
-        DemoFollowup::SendDns(name) => { let _ = send_dns_query(name); }
+        DemoFollowup::SendDns(name) => {
+            let _ = send_dns_query(name);
+        }
         DemoFollowup::None => {}
     }
 }
@@ -438,8 +511,12 @@ enum DemoFollowup {
 }
 
 fn handle_ipv4(payload: &[u8]) {
-    let Some((hdr, ip_payload)) = ipv4::Ipv4Header::parse(payload) else { return; };
-    if hdr.dst != OUR_IP { return; }
+    let Some((hdr, ip_payload)) = ipv4::Ipv4Header::parse(payload) else {
+        return;
+    };
+    if hdr.dst != OUR_IP {
+        return;
+    }
     match hdr.protocol {
         ipv4::PROTO_ICMP => handle_icmp(&hdr, ip_payload),
         ipv4::PROTO_UDP => handle_udp(&hdr, ip_payload),
@@ -449,17 +526,29 @@ fn handle_ipv4(payload: &[u8]) {
 }
 
 fn handle_udp(ip: &ipv4::Ipv4Header, payload: &[u8]) {
-    let Some((hdr, data)) = udp::UdpHeader::parse(payload) else { return; };
+    let Some((hdr, data)) = udp::UdpHeader::parse(payload) else {
+        return;
+    };
     crate::serial::serial_println!(
         "[ NETSTACK ] UDP: {}.{}.{}.{}:{} -> :{}, {} B payload",
-        ip.src[0], ip.src[1], ip.src[2], ip.src[3], hdr.src_port, hdr.dst_port, data.len(),
+        ip.src[0],
+        ip.src[1],
+        ip.src[2],
+        ip.src[3],
+        hdr.src_port,
+        hdr.dst_port,
+        data.len(),
     );
 
     // Userland gethostbyname() reply matching. Takes precedence over the demo.
     let userland_match = {
         let s = STACK.lock();
         match s.query_pending {
-            Some(q) if ip.src == DNS_IP && hdr.src_port == dns::PORT && hdr.dst_port == q.src_port => Some(q),
+            Some(q)
+                if ip.src == DNS_IP && hdr.src_port == dns::PORT && hdr.dst_port == q.src_port =>
+            {
+                Some(q)
+            }
             _ => None,
         }
     };
@@ -472,8 +561,14 @@ fn handle_udp(ip: &ipv4::Ipv4Header, payload: &[u8]) {
             }
         }
         match dns::parse_first_a(data) {
-            Ok(ip4) => { state.resolved_ip = ip4; state.completed = true; }
-            Err(_)  => { state.failed = true; state.completed = true; }
+            Ok(ip4) => {
+                state.resolved_ip = ip4;
+                state.completed = true;
+            }
+            Err(_) => {
+                state.failed = true;
+                state.completed = true;
+            }
         }
         let mut s = STACK.lock();
         s.query_pending = Some(state);
@@ -494,7 +589,11 @@ fn handle_udp(ip: &ipv4::Ipv4Header, payload: &[u8]) {
         if data.len() >= 2 {
             let rid = u16::from_be_bytes([data[0], data[1]]);
             if rid != expected_id {
-                crate::serial::serial_println!("[ NETSTACK ] DNS: id mismatch (got {:04x}, want {:04x})", rid, expected_id);
+                crate::serial::serial_println!(
+                    "[ NETSTACK ] DNS: id mismatch (got {:04x}, want {:04x})",
+                    rid,
+                    expected_id
+                );
                 return;
             }
         }
@@ -502,7 +601,11 @@ fn handle_udp(ip: &ipv4::Ipv4Header, payload: &[u8]) {
             Ok(ip4) => {
                 crate::serial::serial_println!(
                     "[ NETSTACK ] DNS: {} is at {}.{}.{}.{}",
-                    query, ip4[0], ip4[1], ip4[2], ip4[3],
+                    query,
+                    ip4[0],
+                    ip4[1],
+                    ip4[2],
+                    ip4[3],
                 );
                 {
                     let mut s = STACK.lock();
@@ -513,7 +616,9 @@ fn handle_udp(ip: &ipv4::Ipv4Header, payload: &[u8]) {
                 let peer_mac = match next_hop_mac(ip4) {
                     Some(m) => m,
                     None => {
-                        crate::serial::serial_println!("[ NETSTACK ] TCP: no MAC for next hop, aborting demo");
+                        crate::serial::serial_println!(
+                            "[ NETSTACK ] TCP: no MAC for next hop, aborting demo"
+                        );
                         let mut s = STACK.lock();
                         s.demo = DemoStage::Done;
                         return;
@@ -545,13 +650,16 @@ pub fn on_tcp_established(id: tcp::ConnId) {
         let s = STACK.lock();
         s.demo == DemoStage::AwaitTcpEstablished && s.http_conn == Some(id)
     };
-    if !interested { return; }
+    if !interested {
+        return;
+    }
 
     let request: &[u8] = b"GET / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
     match tcp::send(id, request) {
         Ok(()) => {
             crate::serial::serial_println!(
-                "[ NETSTACK ] HTTP: GET sent ({} B), waiting for response", request.len(),
+                "[ NETSTACK ] HTTP: GET sent ({} B), waiting for response",
+                request.len(),
             );
             let mut s = STACK.lock();
             s.demo = DemoStage::AwaitHttpResponse;
@@ -571,20 +679,29 @@ pub fn on_tcp_data(id: tcp::ConnId) {
         let s = STACK.lock();
         s.demo == DemoStage::AwaitHttpResponse && s.http_conn == Some(id)
     };
-    if !interested { return; }
+    if !interested {
+        return;
+    }
 
     let mut buf = [0u8; 512];
     let n = tcp::read(id, &mut buf);
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
 
     // Extract first line (HTTP status).
     let mut end = n;
     for (i, w) in buf[..n].windows(2).enumerate() {
-        if w == b"\r\n" { end = i; break; }
+        if w == b"\r\n" {
+            end = i;
+            break;
+        }
     }
     let line = core::str::from_utf8(&buf[..end]).unwrap_or("<non-utf8>");
     crate::serial::serial_println!(
-        "[ NETSTACK ] HTTP: status line: {}  ({} B in this chunk)", line, n,
+        "[ NETSTACK ] HTTP: status line: {}  ({} B in this chunk)",
+        line,
+        n,
     );
 
     // Demo done — close gracefully. Further data on the connection is dropped.
@@ -606,7 +723,9 @@ pub fn on_tcp_closed(id: tcp::ConnId) {
 }
 
 fn handle_icmp(ip: &ipv4::Ipv4Header, msg: &[u8]) {
-    let Some((t, _code, id, seq, payload)) = icmp::parse(msg) else { return; };
+    let Some((t, _code, id, seq, payload)) = icmp::parse(msg) else {
+        return;
+    };
     match t {
         icmp::TYPE_ECHO_REPLY => {
             let advance_to_dns = {
@@ -632,14 +751,18 @@ fn handle_icmp(ip: &ipv4::Ipv4Header, msg: &[u8]) {
             // Respond to anyone pinging us.
             let mut out = [0u8; 128];
             let icmp_len = icmp::ICMP_HDR_LEN + payload.len();
-            if eth::ETH_HDR_LEN + ipv4::IPV4_HDR_LEN + icmp_len > out.len() { return; }
+            if eth::ETH_HDR_LEN + ipv4::IPV4_HDR_LEN + icmp_len > out.len() {
+                return;
+            }
 
             // Need peer MAC: look up in cache (must have been learned).
             let dst_mac = {
                 let s = STACK.lock();
                 s.arp_cache.lookup(ip.src)
             };
-            let Some(dst_mac) = dst_mac else { return; };
+            let Some(dst_mac) = dst_mac else {
+                return;
+            };
 
             let (src_mac, ip_id) = {
                 let mut s = STACK.lock();
@@ -650,10 +773,20 @@ fn handle_icmp(ip: &ipv4::Ipv4Header, msg: &[u8]) {
             eth::write_header(&mut out, &dst_mac, &src_mac, eth::ETHERTYPE_IPV4);
             let icmp_off = eth::ETH_HDR_LEN + ipv4::IPV4_HDR_LEN;
             out[icmp_off + icmp::ICMP_HDR_LEN..icmp_off + icmp_len].copy_from_slice(payload);
-            icmp::write_echo(&mut out[icmp_off..icmp_off + icmp_len], icmp::TYPE_ECHO_REPLY, id, seq, payload.len());
+            icmp::write_echo(
+                &mut out[icmp_off..icmp_off + icmp_len],
+                icmp::TYPE_ECHO_REPLY,
+                id,
+                seq,
+                payload.len(),
+            );
             ipv4::Ipv4Header::write(
                 &mut out[eth::ETH_HDR_LEN..eth::ETH_HDR_LEN + ipv4::IPV4_HDR_LEN],
-                &OUR_IP, &ip.src, ipv4::PROTO_ICMP, icmp_len, ip_id,
+                &OUR_IP,
+                &ip.src,
+                ipv4::PROTO_ICMP,
+                icmp_len,
+                ip_id,
             );
             transmit(&out[..eth::ETH_HDR_LEN + ipv4::IPV4_HDR_LEN + icmp_len]);
         }

@@ -3,13 +3,13 @@
 // This module provides the arch layer for x86_64:
 // GDT, IDT, boot entry point, and CPU primitives.
 
+pub mod acpi;
+pub mod ap;
 pub mod gdt;
 pub mod idt;
-pub mod acpi;
-pub mod smp;
 pub mod lapic;
-pub mod ap;
 pub mod percpu;
+pub mod smp;
 
 // Kernel entry point — assembly stub that sets up the stack and calls kernel_main
 core::arch::global_asm!(

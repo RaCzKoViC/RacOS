@@ -6,13 +6,13 @@ use alloc::boxed::Box;
 
 use crate::sync::SpinLock;
 
+pub mod ahci;
 pub mod block;
 pub mod cache;
-pub mod ps2_keyboard;
-pub mod ahci;
 pub mod pci;
-pub mod virtqueue;
+pub mod ps2_keyboard;
 pub mod virtio_net;
+pub mod virtqueue;
 
 /// Global handle to the first probed virtio-net device.
 /// `None` until `init()` runs and finds the device.
@@ -51,8 +51,12 @@ pub fn init() {
     // Bring up AHCI (Phase F step 1). Failure here is non-fatal — the system
     // still boots on the RAM disk.
     match ahci::init(&pci_devices) {
-        Ok(())  => crate::serial::serial_println!("[  0.001300] DRIVERS: AHCI initialized, sda registered"),
-        Err(e)  => crate::serial::serial_println!("[  0.001300] DRIVERS: AHCI init skipped: {:?}", e),
+        Ok(()) => {
+            crate::serial::serial_println!("[  0.001300] DRIVERS: AHCI initialized, sda registered")
+        }
+        Err(e) => {
+            crate::serial::serial_println!("[  0.001300] DRIVERS: AHCI init skipped: {:?}", e)
+        }
     }
 }
 
@@ -61,7 +65,9 @@ pub fn init() {
 /// no SATA disk is registered.
 pub fn ahci_self_test() {
     use block::SECTOR_SIZE;
-    let Some(dev) = block::find("sda") else { return; };
+    let Some(dev) = block::find("sda") else {
+        return;
+    };
     let marker = b"RACOS-AHCI-PhaseF";
     let mut buf = [0u8; SECTOR_SIZE];
     match dev.read_sector(1, &mut buf) {
@@ -78,14 +84,13 @@ pub fn ahci_self_test() {
                         "[  0.001320] DRIVERS: AHCI first-boot marker written to LBA 1"
                     ),
                     Err(e) => crate::serial::serial_println!(
-                        "[  0.001320] DRIVERS: AHCI write failed: {:?}", e
+                        "[  0.001320] DRIVERS: AHCI write failed: {:?}",
+                        e
                     ),
                 }
             }
         }
-        Err(e) => crate::serial::serial_println!(
-            "[  0.001320] DRIVERS: AHCI read failed: {:?}", e
-        ),
+        Err(e) => crate::serial::serial_println!("[  0.001320] DRIVERS: AHCI read failed: {:?}", e),
     }
 }
 
@@ -93,7 +98,9 @@ pub fn ahci_self_test() {
 /// frame and reports the result. No-op if the NIC is absent.
 pub fn nic_self_test() {
     let mut guard = NIC.lock();
-    let Some(nic) = guard.as_mut() else { return; };
+    let Some(nic) = guard.as_mut() else {
+        return;
+    };
 
     // Minimal Ethernet II header: dst broadcast, src MAC, ethertype 0x88B5
     // (IEEE local experimental — won't confuse a real network stack on the host).
@@ -108,10 +115,11 @@ pub fn nic_self_test() {
 
     match nic.send_frame(&frame) {
         Ok(()) => crate::serial::serial_println!(
-            "[  0.001230] DRIVERS: NIC self-test OK ({} bytes sent)", frame.len()
+            "[  0.001230] DRIVERS: NIC self-test OK ({} bytes sent)",
+            frame.len()
         ),
-        Err(e) => crate::serial::serial_println!(
-            "[  0.001230] DRIVERS: NIC self-test failed: {:?}", e
-        ),
+        Err(e) => {
+            crate::serial::serial_println!("[  0.001230] DRIVERS: NIC self-test failed: {:?}", e)
+        }
     }
 }

@@ -24,31 +24,31 @@ const PCI_PROG_IF_AHCI: u8 = 0x01;
 // --- HBA memory register offsets ---
 const HBA_CAP: usize = 0x00;
 const HBA_GHC: usize = 0x04;
-const HBA_PI:  usize = 0x0C;
+const HBA_PI: usize = 0x0C;
 const HBA_PORT_BASE: usize = 0x100;
 const HBA_PORT_STRIDE: usize = 0x80;
 
-const GHC_AE:  u32 = 1 << 31; // AHCI enable
-const GHC_HR:  u32 = 1 << 0;  // HBA reset
+const GHC_AE: u32 = 1 << 31; // AHCI enable
+const GHC_HR: u32 = 1 << 0; // HBA reset
 
 // --- Per-port register offsets (relative to port base) ---
-const P_CLB:  usize = 0x00;
+const P_CLB: usize = 0x00;
 const P_CLBU: usize = 0x04;
-const P_FB:   usize = 0x08;
-const P_FBU:  usize = 0x0C;
-const P_IS:   usize = 0x10;
-const P_IE:   usize = 0x14;
-const P_CMD:  usize = 0x18;
-const P_TFD:  usize = 0x20;
-const P_SIG:  usize = 0x24;
+const P_FB: usize = 0x08;
+const P_FBU: usize = 0x0C;
+const P_IS: usize = 0x10;
+const P_IE: usize = 0x14;
+const P_CMD: usize = 0x18;
+const P_TFD: usize = 0x20;
+const P_SIG: usize = 0x24;
 const P_SSTS: usize = 0x28;
 const P_SERR: usize = 0x30;
-const P_CI:   usize = 0x38;
+const P_CI: usize = 0x38;
 
-const PORT_CMD_ST:  u32 = 1 << 0;
+const PORT_CMD_ST: u32 = 1 << 0;
 const PORT_CMD_FRE: u32 = 1 << 4;
-const PORT_CMD_FR:  u32 = 1 << 14;
-const PORT_CMD_CR:  u32 = 1 << 15;
+const PORT_CMD_FR: u32 = 1 << 14;
+const PORT_CMD_CR: u32 = 1 << 15;
 
 const SIG_ATA: u32 = 0x0000_0101;
 
@@ -57,9 +57,9 @@ const TFD_DRQ: u32 = 1 << 3;
 const TFD_BSY: u32 = 1 << 7;
 
 // --- ATA commands ---
-const ATA_CMD_READ_DMA_EXT:  u8 = 0x25;
+const ATA_CMD_READ_DMA_EXT: u8 = 0x25;
 const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
-const ATA_CMD_IDENTIFY:      u8 = 0xEC;
+const ATA_CMD_IDENTIFY: u8 = 0xEC;
 
 // --- FIS types ---
 const FIS_TYPE_REG_H2D: u8 = 0x27;
@@ -72,16 +72,16 @@ struct CmdHeader {
     flags: u16,
     prdtl: u16,
     prdbc: u32,
-    ctba:  u32,
+    ctba: u32,
     ctbau: u32,
-    _rsv:  [u32; 4],
+    _rsv: [u32; 4],
 }
 
 #[repr(C)]
 struct PrdtEntry {
-    dba:   u32,
-    dbau:  u32,
-    _rsv:  u32,
+    dba: u32,
+    dbau: u32,
+    _rsv: u32,
     /// bits[21:0] = byte count - 1, bit 31 = interrupt-on-completion
     dbc_i: u32,
 }
@@ -148,11 +148,14 @@ pub enum AhciError {
 /// Locate an AHCI controller, initialize it, and register the first attached
 /// SATA disk under the block subsystem as "sda".
 pub fn init(pci_devices: &[PciDevice]) -> Result<(), AhciError> {
-    let pci = pci_devices.iter().find(|d| {
-        d.class_code == PCI_CLASS_MASS_STORAGE
-            && d.subclass == PCI_SUBCLASS_SATA
-            && d.prog_if == PCI_PROG_IF_AHCI
-    }).ok_or(AhciError::NoController)?;
+    let pci = pci_devices
+        .iter()
+        .find(|d| {
+            d.class_code == PCI_CLASS_MASS_STORAGE
+                && d.subclass == PCI_SUBCLASS_SATA
+                && d.prog_if == PCI_PROG_IF_AHCI
+        })
+        .ok_or(AhciError::NoController)?;
 
     pci.enable_bus_master();
 
@@ -163,7 +166,10 @@ pub fn init(pci_devices: &[PciDevice]) -> Result<(), AhciError> {
 
     crate::serial::serial_println!(
         "[ AHCI ] controller at PCI {:02x}:{:02x}.{:01x} ABAR=0x{:08X}",
-        pci.bus, pci.slot, pci.func, abar as u64,
+        pci.bus,
+        pci.slot,
+        pci.func,
+        abar as u64,
     );
 
     // Bring HBA into AHCI mode.
@@ -176,7 +182,9 @@ pub fn init(pci_devices: &[PciDevice]) -> Result<(), AhciError> {
     let pi = unsafe { mmio_r32(abar, HBA_PI) };
     let mut chosen: Option<usize> = None;
     for i in 0..32 {
-        if pi & (1 << i) == 0 { continue; }
+        if pi & (1 << i) == 0 {
+            continue;
+        }
         let port = port_regs(abar, i);
         let ssts = unsafe { mmio_r32(port, P_SSTS) };
         let det = ssts & 0x0F;
@@ -196,12 +204,17 @@ pub fn init(pci_devices: &[PciDevice]) -> Result<(), AhciError> {
     let sectors = port.sector_count;
 
     let mut slot = AHCI.lock();
-    *slot = Some(Ahci { abar, port: Some(port) });
+    *slot = Some(Ahci {
+        abar,
+        port: Some(port),
+    });
     drop(slot);
 
     let dev: Arc<dyn BlockDevice> = Arc::new(SataDisk { sectors });
     // SAFETY: drivers::init holds CLI-STI in MVP and only calls us once.
-    unsafe { crate::drivers::block::register(dev); }
+    unsafe {
+        crate::drivers::block::register(dev);
+    }
     Ok(())
 }
 
@@ -246,10 +259,10 @@ fn init_port(abar: *mut u8, idx: usize) -> Result<Port, AhciError> {
 
     // Program port base addresses and re-enable.
     unsafe {
-        mmio_w32(regs, P_CLB,  cmd_list_phys as u32);
+        mmio_w32(regs, P_CLB, cmd_list_phys as u32);
         mmio_w32(regs, P_CLBU, (cmd_list_phys >> 32) as u32);
-        mmio_w32(regs, P_FB,   fis_phys as u32);
-        mmio_w32(regs, P_FBU,  (fis_phys >> 32) as u32);
+        mmio_w32(regs, P_FB, fis_phys as u32);
+        mmio_w32(regs, P_FBU, (fis_phys >> 32) as u32);
         mmio_w32(regs, P_SERR, 0xFFFF_FFFF); // clear all errors
         let cmd = mmio_r32(regs, P_CMD);
         mmio_w32(regs, P_CMD, cmd | PORT_CMD_FRE);
@@ -259,10 +272,19 @@ fn init_port(abar: *mut u8, idx: usize) -> Result<Port, AhciError> {
 
     // Run IDENTIFY DEVICE to obtain sector count.
     let identify_phys = phys::alloc_frame().map_err(|_| AhciError::Io)?.addr();
-    unsafe { core::ptr::write_bytes(identify_phys as *mut u8, 0, 512); }
+    unsafe {
+        core::ptr::write_bytes(identify_phys as *mut u8, 0, 512);
+    }
     submit_command(
-        regs, cmd_list_phys, cmd_table_phys,
-        ATA_CMD_IDENTIFY, /*lba=*/0, /*count=*/0, identify_phys, 512, /*write=*/false,
+        regs,
+        cmd_list_phys,
+        cmd_table_phys,
+        ATA_CMD_IDENTIFY,
+        /*lba=*/ 0,
+        /*count=*/ 0,
+        identify_phys,
+        512,
+        /*write=*/ false,
     )?;
 
     let sector_count = read_identify_lba(identify_phys);
@@ -270,11 +292,17 @@ fn init_port(abar: *mut u8, idx: usize) -> Result<Port, AhciError> {
 
     crate::serial::serial_println!(
         "[ AHCI ] port {} ready: {} sectors ({} MiB)",
-        idx, sector_count, (sector_count * SECTOR_SIZE as u64) / (1024 * 1024),
+        idx,
+        sector_count,
+        (sector_count * SECTOR_SIZE as u64) / (1024 * 1024),
     );
 
     Ok(Port {
-        regs, cmd_list_phys, fis_phys, cmd_table_phys, sector_count,
+        regs,
+        cmd_list_phys,
+        fis_phys,
+        cmd_table_phys,
+        sector_count,
     })
 }
 
@@ -302,15 +330,21 @@ fn submit_command(
     regs: *mut u8,
     cmd_list_phys: u64,
     cmd_table_phys: u64,
-    cmd: u8, lba: u64, count: u16,
-    buf_phys: u64, byte_count: u32, write: bool,
+    cmd: u8,
+    lba: u64,
+    count: u16,
+    buf_phys: u64,
+    byte_count: u32,
+    write: bool,
 ) -> Result<(), AhciError> {
     // SAFETY: pages identity-mapped, slot 0 reserved for synchronous I/O.
     unsafe {
         let header = cmd_list_phys as *mut CmdHeader;
         // CFL = 5 (Reg H2D FIS dwords), W bit (28) set for writes, no atapi.
         let mut flags: u16 = 5;
-        if write { flags |= 1 << 6; }
+        if write {
+            flags |= 1 << 6;
+        }
         write_volatile(&mut (*header).flags, flags);
         write_volatile(&mut (*header).prdtl, 1);
         write_volatile(&mut (*header).prdbc, 0);
@@ -355,22 +389,32 @@ fn submit_command(
     // Poll CI until cleared (= command complete) or TFD error.
     for _ in 0..50_000_000u64 {
         let ci = unsafe { mmio_r32(regs, P_CI) };
-        if ci & 1 == 0 { break; }
+        if ci & 1 == 0 {
+            break;
+        }
         let tfd = unsafe { mmio_r32(regs, P_TFD) };
-        if tfd & TFD_ERR != 0 { return Err(AhciError::Io); }
+        if tfd & TFD_ERR != 0 {
+            return Err(AhciError::Io);
+        }
         core::hint::spin_loop();
     }
     let ci = unsafe { mmio_r32(regs, P_CI) };
-    if ci & 1 != 0 { return Err(AhciError::Io); }
+    if ci & 1 != 0 {
+        return Err(AhciError::Io);
+    }
     let tfd = unsafe { mmio_r32(regs, P_TFD) };
-    if tfd & TFD_ERR != 0 { return Err(AhciError::Io); }
+    if tfd & TFD_ERR != 0 {
+        return Err(AhciError::Io);
+    }
     Ok(())
 }
 
 fn wait_clear(regs: *mut u8, off: usize, mask: u32, spins: u64) -> Result<(), AhciError> {
     for _ in 0..spins {
         let v = unsafe { mmio_r32(regs, off) };
-        if v & mask == 0 { return Ok(()); }
+        if v & mask == 0 {
+            return Ok(());
+        }
         core::hint::spin_loop();
     }
     Err(AhciError::NotIdle)
@@ -379,7 +423,9 @@ fn wait_clear(regs: *mut u8, off: usize, mask: u32, spins: u64) -> Result<(), Ah
 fn wait_ready(regs: *mut u8, spins: u64) -> Result<(), AhciError> {
     for _ in 0..spins {
         let tfd = unsafe { mmio_r32(regs, P_TFD) };
-        if tfd & (TFD_BSY | TFD_DRQ) == 0 { return Ok(()); }
+        if tfd & (TFD_BSY | TFD_DRQ) == 0 {
+            return Ok(());
+        }
         core::hint::spin_loop();
     }
     Err(AhciError::NotIdle)
@@ -394,19 +440,31 @@ pub struct SataDisk {
 }
 
 impl BlockDevice for SataDisk {
-    fn name(&self) -> &str { "sda" }
-    fn sector_count(&self) -> u64 { self.sectors }
+    fn name(&self) -> &str {
+        "sda"
+    }
+    fn sector_count(&self) -> u64 {
+        self.sectors
+    }
 
     fn read_sector(&self, lba: u64, out: &mut [u8]) -> BlockResult<()> {
-        if out.len() != SECTOR_SIZE { return Err(BlockError::InvalidBuffer); }
-        if lba >= self.sectors { return Err(BlockError::OutOfRange); }
-        do_io(lba, out, /*write=*/false)
+        if out.len() != SECTOR_SIZE {
+            return Err(BlockError::InvalidBuffer);
+        }
+        if lba >= self.sectors {
+            return Err(BlockError::OutOfRange);
+        }
+        do_io(lba, out, /*write=*/ false)
     }
 
     fn write_sector(&self, lba: u64, input: &[u8]) -> BlockResult<()> {
-        if input.len() != SECTOR_SIZE { return Err(BlockError::InvalidBuffer); }
-        if lba >= self.sectors { return Err(BlockError::OutOfRange); }
-        do_io(lba, input, /*write=*/true)
+        if input.len() != SECTOR_SIZE {
+            return Err(BlockError::InvalidBuffer);
+        }
+        if lba >= self.sectors {
+            return Err(BlockError::OutOfRange);
+        }
+        do_io(lba, input, /*write=*/ true)
     }
 }
 
@@ -425,11 +483,21 @@ fn do_io(lba: u64, buf: &[u8], write: bool) -> BlockResult<()> {
                 core::ptr::copy_nonoverlapping(buf.as_ptr(), scratch as *mut u8, SECTOR_SIZE);
             }
         }
-        let cmd = if write { ATA_CMD_WRITE_DMA_EXT } else { ATA_CMD_READ_DMA_EXT };
+        let cmd = if write {
+            ATA_CMD_WRITE_DMA_EXT
+        } else {
+            ATA_CMD_READ_DMA_EXT
+        };
         let res = submit_command(
-            port.regs, ahci.cmd_list_phys_for_test(port),
+            port.regs,
+            ahci.cmd_list_phys_for_test(port),
             port.cmd_table_phys,
-            cmd, lba, 1, scratch, SECTOR_SIZE as u32, write,
+            cmd,
+            lba,
+            1,
+            scratch,
+            SECTOR_SIZE as u32,
+            write,
         );
         if !write && res.is_ok() {
             unsafe {
@@ -448,5 +516,7 @@ fn do_io(lba: u64, buf: &[u8], write: bool) -> BlockResult<()> {
 
 // Tiny accessor (kept here so Ahci's fields stay private to this module).
 impl Ahci {
-    fn cmd_list_phys_for_test(&self, port: &Port) -> u64 { port.cmd_list_phys }
+    fn cmd_list_phys_for_test(&self, port: &Port) -> u64 {
+        port.cmd_list_phys
+    }
 }

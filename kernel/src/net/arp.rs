@@ -21,7 +21,9 @@ pub struct ArpPacket {
 
 impl ArpPacket {
     pub fn parse(payload: &[u8]) -> Option<Self> {
-        if payload.len() < ARP_PACKET_LEN { return None; }
+        if payload.len() < ARP_PACKET_LEN {
+            return None;
+        }
         let htype = u16::from_be_bytes([payload[0], payload[1]]);
         let ptype = u16::from_be_bytes([payload[2], payload[3]]);
         let hlen = payload[4];
@@ -38,7 +40,13 @@ impl ArpPacket {
         sender_ip.copy_from_slice(&payload[14..18]);
         target_mac.copy_from_slice(&payload[18..24]);
         target_ip.copy_from_slice(&payload[24..28]);
-        Some(ArpPacket { op, sender_mac, sender_ip, target_mac, target_ip })
+        Some(ArpPacket {
+            op,
+            sender_mac,
+            sender_ip,
+            target_mac,
+            target_ip,
+        })
     }
 
     /// Serialize this ARP packet (28 bytes) at the start of `out`.
@@ -74,7 +82,11 @@ pub struct ArpCache {
 impl ArpCache {
     pub const fn new() -> Self {
         ArpCache {
-            entries: [CacheEntry { ip: [0; 4], mac: [0; 6], valid: false }; CACHE_SIZE],
+            entries: [CacheEntry {
+                ip: [0; 4],
+                mac: [0; 6],
+                valid: false,
+            }; CACHE_SIZE],
             next_slot: 0,
         }
     }
@@ -88,23 +100,25 @@ impl ArpCache {
             }
         }
         // Otherwise overwrite next slot (round-robin eviction).
-        self.entries[self.next_slot] = CacheEntry { ip, mac, valid: true };
+        self.entries[self.next_slot] = CacheEntry {
+            ip,
+            mac,
+            valid: true,
+        };
         self.next_slot = (self.next_slot + 1) % CACHE_SIZE;
     }
 
     pub fn lookup(&self, ip: [u8; 4]) -> Option<[u8; 6]> {
-        self.entries.iter().find(|e| e.valid && e.ip == ip).map(|e| e.mac)
+        self.entries
+            .iter()
+            .find(|e| e.valid && e.ip == ip)
+            .map(|e| e.mac)
     }
 }
 
 /// Build a complete ARP-request frame (Ethernet header + ARP payload).
 /// Returns 42 bytes in `out`.
-pub fn build_request(
-    out: &mut [u8],
-    src_mac: &[u8; 6],
-    src_ip: &[u8; 4],
-    target_ip: &[u8; 4],
-) {
+pub fn build_request(out: &mut [u8], src_mac: &[u8; 6], src_ip: &[u8; 4], target_ip: &[u8; 4]) {
     debug_assert!(out.len() >= ARP_FRAME_LEN);
     eth::write_header(out, &eth::MAC_BROADCAST, src_mac, ETHERTYPE_ARP);
     let pkt = ArpPacket {

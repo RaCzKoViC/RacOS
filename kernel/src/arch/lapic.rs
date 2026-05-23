@@ -16,16 +16,16 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // ── Register offsets (relative to LAPIC base) ─────────────────────────────
 
-const LAPIC_REG_ID:       usize = 0x020;
-const LAPIC_REG_VERSION:  usize = 0x030;
-const LAPIC_REG_TPR:      usize = 0x080;
-const LAPIC_REG_EOI:      usize = 0x0B0;
-const LAPIC_REG_SVR:      usize = 0x0F0;
-const LAPIC_REG_ESR:      usize = 0x280;
-const LAPIC_REG_ICR_LOW:  usize = 0x300;
+const LAPIC_REG_ID: usize = 0x020;
+const LAPIC_REG_VERSION: usize = 0x030;
+const LAPIC_REG_TPR: usize = 0x080;
+const LAPIC_REG_EOI: usize = 0x0B0;
+const LAPIC_REG_SVR: usize = 0x0F0;
+const LAPIC_REG_ESR: usize = 0x280;
+const LAPIC_REG_ICR_LOW: usize = 0x300;
 const LAPIC_REG_ICR_HIGH: usize = 0x310;
 // LAPIC timer (G.4.1)
-const LAPIC_REG_LVT_TIMER:    usize = 0x320;
+const LAPIC_REG_LVT_TIMER: usize = 0x320;
 const LAPIC_REG_INITIAL_COUNT: usize = 0x380;
 const LAPIC_REG_CURRENT_COUNT: usize = 0x390;
 const LAPIC_REG_DIVIDE_CONFIG: usize = 0x3E0;
@@ -35,7 +35,7 @@ const LAPIC_REG_DIVIDE_CONFIG: usize = 0x3E0;
 /// collide with anything else the kernel already routes.
 pub const LAPIC_TIMER_VECTOR: u8 = 0x40;
 const LVT_TIMER_PERIODIC: u32 = 0b01 << 17;
-const LVT_TIMER_MASKED:   u32 = 1 << 16;
+const LVT_TIMER_MASKED: u32 = 1 << 16;
 /// Divider 16 (DCR bits 3,1,0 = 011) — gives a useful tick rate against
 /// QEMU's typical ~1 GHz LAPIC bus clock without slamming the CPU. The
 /// exact rate isn't load-bearing for G.4.1 (we just need *some* tick per
@@ -52,25 +52,25 @@ const SPURIOUS_VECTOR: u32 = 0xFF;
 
 // ICR low encoding helpers — kept as standalone consts so the IPI helpers
 // read like the Intel SDM tables they mirror.
-const ICR_DELIVERY_FIXED:   u32 = 0b000 << 8;
-const ICR_DELIVERY_INIT:    u32 = 0b101 << 8;
+const ICR_DELIVERY_FIXED: u32 = 0b000 << 8;
+const ICR_DELIVERY_INIT: u32 = 0b101 << 8;
 const ICR_DELIVERY_STARTUP: u32 = 0b110 << 8;
-const ICR_LEVEL_ASSERT:     u32 = 1 << 14;
-const ICR_LEVEL_DEASSERT:   u32 = 0;
-const ICR_TRIGGER_EDGE:     u32 = 0;
-const ICR_TRIGGER_LEVEL:    u32 = 1 << 15;
-const ICR_STATUS_PENDING:   u32 = 1 << 12;
+const ICR_LEVEL_ASSERT: u32 = 1 << 14;
+const ICR_LEVEL_DEASSERT: u32 = 0;
+const ICR_TRIGGER_EDGE: u32 = 0;
+const ICR_TRIGGER_LEVEL: u32 = 1 << 15;
+const ICR_STATUS_PENDING: u32 = 1 << 12;
 
 // MSR for the LAPIC base — used to confirm the hardware-side enable bit
 // is set. UEFI almost always leaves it enabled, but we check to keep the
 // failure mode explicit.
-const IA32_APIC_BASE_MSR:    u32 = 0x1B;
+const IA32_APIC_BASE_MSR: u32 = 0x1B;
 const APIC_BASE_GLOBAL_ENABLE: u64 = 1 << 11;
 
 // ── Module state ──────────────────────────────────────────────────────────
 
 static LAPIC_BASE: AtomicU64 = AtomicU64::new(0);
-static BSP_ID:     AtomicU32 = AtomicU32::new(0);
+static BSP_ID: AtomicU32 = AtomicU32::new(0);
 
 // ── Public API ────────────────────────────────────────────────────────────
 
@@ -137,7 +137,9 @@ pub unsafe fn init_bsp() {
 /// True iff the BSP's LAPIC software enable bit is currently set.
 pub fn is_enabled() -> bool {
     let base = LAPIC_BASE.load(Ordering::SeqCst);
-    if base == 0 { return false; }
+    if base == 0 {
+        return false;
+    }
     unsafe { read_reg(LAPIC_REG_SVR) & SVR_ENABLE != 0 }
 }
 
@@ -146,7 +148,9 @@ pub fn is_enabled() -> bool {
 /// entry to identify which CPU just came online).
 pub fn current_apic_id() -> u32 {
     let base = LAPIC_BASE.load(Ordering::SeqCst);
-    if base == 0 { return 0; }
+    if base == 0 {
+        return 0;
+    }
     unsafe { (read_reg(LAPIC_REG_ID) >> 24) & 0xFF }
 }
 
@@ -165,7 +169,9 @@ pub fn bsp_id() -> u32 {
 /// enabled via SVR (ap_entry does that before calling us).
 pub unsafe fn init_timer_for_this_cpu() {
     let base = LAPIC_BASE.load(Ordering::SeqCst);
-    if base == 0 { return; }
+    if base == 0 {
+        return;
+    }
     // Mask first so we never see a stale countdown fire mid-config.
     write_reg(LAPIC_REG_LVT_TIMER, LVT_TIMER_MASKED);
     write_reg(LAPIC_REG_DIVIDE_CONFIG, TIMER_DIVIDE_BY_16);
@@ -183,7 +189,9 @@ pub unsafe fn init_timer_for_this_cpu() {
 /// bring-up before the IDT is installed).
 pub unsafe fn disable_timer_for_this_cpu() {
     let base = LAPIC_BASE.load(Ordering::SeqCst);
-    if base == 0 { return; }
+    if base == 0 {
+        return;
+    }
     write_reg(LAPIC_REG_INITIAL_COUNT, 0);
     write_reg(LAPIC_REG_LVT_TIMER, LVT_TIMER_MASKED);
 }
@@ -192,8 +200,12 @@ pub unsafe fn disable_timer_for_this_cpu() {
 /// IRQ (timer, IPI, spurious, etc).
 pub fn eoi() {
     let base = LAPIC_BASE.load(Ordering::SeqCst);
-    if base == 0 { return; }
-    unsafe { write_reg(LAPIC_REG_EOI, 0); }
+    if base == 0 {
+        return;
+    }
+    unsafe {
+        write_reg(LAPIC_REG_EOI, 0);
+    }
 }
 
 // ── IPI primitives (consumed by G.3 AP boot) ──────────────────────────────
@@ -221,7 +233,10 @@ fn wait_delivery() -> Result<(), &'static str> {
 /// initialised (`init_bsp` ran). Caller controls timing — Intel SDM
 /// recommends ~10 ms after this before the Startup IPI.
 pub unsafe fn send_init_ipi(apic_id: u32) -> Result<(), &'static str> {
-    write_icr(apic_id, ICR_DELIVERY_INIT | ICR_LEVEL_ASSERT | ICR_TRIGGER_LEVEL);
+    write_icr(
+        apic_id,
+        ICR_DELIVERY_INIT | ICR_LEVEL_ASSERT | ICR_TRIGGER_LEVEL,
+    );
     wait_delivery()
 }
 
@@ -229,7 +244,10 @@ pub unsafe fn send_init_ipi(apic_id: u32) -> Result<(), &'static str> {
 /// Modern hardware/QEMU often tolerates skipping this, but keeping the
 /// full sequence makes us more portable.
 pub unsafe fn send_init_deassert(apic_id: u32) -> Result<(), &'static str> {
-    write_icr(apic_id, ICR_DELIVERY_INIT | ICR_LEVEL_DEASSERT | ICR_TRIGGER_LEVEL);
+    write_icr(
+        apic_id,
+        ICR_DELIVERY_INIT | ICR_LEVEL_DEASSERT | ICR_TRIGGER_LEVEL,
+    );
     wait_delivery()
 }
 
@@ -237,7 +255,10 @@ pub unsafe fn send_init_deassert(apic_id: u32) -> Result<(), &'static str> {
 /// the AP's real-mode trampoline lives — the AP will start executing at
 /// `vector << 12`. The trampoline must live below 1 MiB.
 pub unsafe fn send_startup_ipi(apic_id: u32, vector: u8) -> Result<(), &'static str> {
-    write_icr(apic_id, ICR_DELIVERY_STARTUP | ICR_LEVEL_ASSERT | ICR_TRIGGER_EDGE | vector as u32);
+    write_icr(
+        apic_id,
+        ICR_DELIVERY_STARTUP | ICR_LEVEL_ASSERT | ICR_TRIGGER_EDGE | vector as u32,
+    );
     wait_delivery()
 }
 
@@ -247,7 +268,7 @@ unsafe fn write_icr(apic_id: u32, low: u32) {
     let base = LAPIC_BASE.load(Ordering::SeqCst);
     debug_assert!(base != 0, "LAPIC base not initialised");
     write_reg(LAPIC_REG_ICR_HIGH, (apic_id & 0xFF) << 24);
-    write_reg(LAPIC_REG_ICR_LOW,  low);
+    write_reg(LAPIC_REG_ICR_LOW, low);
 }
 
 // ── MMIO + MSR helpers ────────────────────────────────────────────────────

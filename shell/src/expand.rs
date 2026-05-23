@@ -5,9 +5,9 @@
 
 extern crate alloc;
 
+use crate::ast::{Word, WordPart};
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::ast::{Word, WordPart};
 
 /// Shell environment: variables + last exit status.
 pub struct Env {
@@ -190,7 +190,11 @@ fn expand_dollar_in_string(s: &str, env: &Env, out: &mut String) {
             }
             // Collect variable name (alphanumeric + _)
             let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || (i == start && (bytes[i] == b'?' || bytes[i] == b'$'))) {
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric()
+                    || bytes[i] == b'_'
+                    || (i == start && (bytes[i] == b'?' || bytes[i] == b'$')))
+            {
                 i += 1;
                 if i == start + 1 && (bytes[start] == b'?' || bytes[start] == b'$') {
                     break; // Single-char specials
@@ -279,9 +283,9 @@ fn expand_command_sub(cmd: &str, env: &Env, out: &mut String) {
 
     // Lex → Parse → Execute the inner command
     {
+        use crate::exec;
         use crate::lexer::Lexer;
         use crate::parser::Parser;
-        use crate::exec;
 
         // We need a mutable Env for execution, but we only have &Env.
         // Create a temporary clone of the environment for the subcommand.
@@ -325,7 +329,7 @@ fn expand_command_sub(cmd: &str, env: &Env, out: &mut String) {
 /// Returns a `Vec<String>` with all matching files (or single expanded word if no globs).
 pub fn expand_word_list(word: &Word, env: &Env) -> Vec<String> {
     // First, handle brace expansion {a,b,c} → multiple words
-    
+
     // Build the complete unexpanded word to check for braces
     let mut complete_word = String::new();
     for part in &word.parts {
@@ -339,7 +343,7 @@ pub fn expand_word_list(word: &Word, env: &Env) -> Vec<String> {
             _ => {}
         }
     }
-    
+
     // Check for brace expansion {a,b,c}
     if let Some(pos) = find_brace_expansion(&complete_word) {
         let (prefix, brace_part, suffix) = extract_brace(&complete_word, pos);
@@ -355,20 +359,20 @@ pub fn expand_word_list(word: &Word, env: &Env) -> Vec<String> {
             return result;
         }
     }
-    
+
     // No brace expansion — check if word contains any glob patterns
     let has_glob = word.parts.iter().any(|p| matches!(p, WordPart::Glob(_)));
-    
+
     if !has_glob {
         // No glob patterns — expand normally and return single result
         let mut result = Vec::new();
         result.push(expand_word(word, env));
         return result;
     }
-    
+
     // Word contains glob patterns — reconstruct pattern string from parts
     let pattern = reconstruct_pattern(word, env);
-    
+
     // Perform glob expansion
     match glob_expand(&pattern, env) {
         Some(matches) if !matches.is_empty() => matches,
@@ -410,18 +414,16 @@ fn reconstruct_pattern(word: &Word, env: &Env) -> String {
                 expand_command_sub(cmd, env, &mut expanded);
                 pattern.push_str(&expanded);
             }
-            WordPart::Glob(_) => {
-                match part {
-                    WordPart::Glob(crate::ast::GlobPattern::Star) => pattern.push('*'),
-                    WordPart::Glob(crate::ast::GlobPattern::Question) => pattern.push('?'),
-                    WordPart::Glob(crate::ast::GlobPattern::Bracket(s)) => {
-                        pattern.push('[');
-                        pattern.push_str(s);
-                        pattern.push(']');
-                    }
-                    _ => {}
+            WordPart::Glob(_) => match part {
+                WordPart::Glob(crate::ast::GlobPattern::Star) => pattern.push('*'),
+                WordPart::Glob(crate::ast::GlobPattern::Question) => pattern.push('?'),
+                WordPart::Glob(crate::ast::GlobPattern::Bracket(s)) => {
+                    pattern.push('[');
+                    pattern.push_str(s);
+                    pattern.push(']');
                 }
-            }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -435,7 +437,7 @@ fn find_brace_expansion(s: &str) -> Option<usize> {
     let mut in_quote = false;
     for (i, c) in s.char_indices() {
         match c {
-            '\\' => in_quote = true,  // Skip next char
+            '\\' => in_quote = true, // Skip next char
             '{' if !in_quote => {
                 if depth == 0 {
                     return Some(i);
@@ -455,7 +457,7 @@ fn find_brace_expansion(s: &str) -> Option<usize> {
 /// Extract {prefix, brace_content, suffix} from string containing braces at given position.
 fn extract_brace(s: &str, start_pos: usize) -> (&str, &str, &str) {
     let prefix = &s[..start_pos];
-    
+
     // Find matching closing brace
     let mut depth = 0;
     let mut end_pos = start_pos;
@@ -475,14 +477,14 @@ fn extract_brace(s: &str, start_pos: usize) -> (&str, &str, &str) {
             _ => {}
         }
     }
-    
+
     let brace_content = &s[start_pos + 1..end_pos];
     let suffix = if end_pos + 1 < s.len() {
         &s[end_pos + 1..]
     } else {
         ""
     };
-    
+
     (prefix, brace_content, suffix)
 }
 
@@ -492,7 +494,7 @@ fn parse_brace_expansion(content: &str) -> Option<Vec<String>> {
     let mut alternatives = Vec::new();
     let mut current = String::new();
     let mut depth = 0;
-    
+
     for c in content.chars() {
         match c {
             '{' => {
@@ -514,12 +516,12 @@ fn parse_brace_expansion(content: &str) -> Option<Vec<String>> {
             _ => current.push(c),
         }
     }
-    
+
     // Add final alternative
     if !current.is_empty() || !alternatives.is_empty() {
         alternatives.push(current);
     }
-    
+
     if alternatives.is_empty() {
         None
     } else if alternatives.len() == 1 && content.find(',').is_none() {
@@ -535,7 +537,7 @@ fn parse_brace_expansion(content: &str) -> Option<Vec<String>> {
 fn glob_expand(pattern: &str, _env: &Env) -> Option<Vec<String>> {
     // Determine directory to search
     let (dir_path, glob_part) = split_path_and_pattern(pattern);
-    
+
     // Check if dir_path contains environment variables that need expansion
     let expanded_dir = if dir_path.contains('$') {
         // [TODO] Expand environment variables in path
@@ -543,20 +545,24 @@ fn glob_expand(pattern: &str, _env: &Env) -> Option<Vec<String>> {
     } else {
         alloc::string::String::from(dir_path)
     };
-    
+
     // Handle special case of pattern with no directory (relative to current dir)
-    let dir_to_search = if expanded_dir.is_empty() { "." } else { &expanded_dir };
-    
+    let dir_to_search = if expanded_dir.is_empty() {
+        "."
+    } else {
+        &expanded_dir
+    };
+
     // Open directory
     let fd = match libc_lite::open(dir_to_search.as_bytes(), 0, 0) {
         Ok(fd) => fd,
         Err(_) => return None,
     };
-    
+
     // Read directory entries
     let mut matches = Vec::new();
     let mut buf = [0u8; 4096];
-    
+
     match libc_lite::getdents(fd, &mut buf) {
         Ok(nbytes) => {
             let mut offset = 0;
@@ -566,7 +572,7 @@ fn glob_expand(pattern: &str, _env: &Env) -> Option<Vec<String>> {
                     break;
                 }
                 let name_bytes = &buf[offset + 10..offset + 10 + name_len];
-                
+
                 // Remove trailing null terminator from name
                 let name_end = name_bytes.iter().position(|&b| b == 0).unwrap_or(name_len);
                 if name_end > 0 {
@@ -582,7 +588,7 @@ fn glob_expand(pattern: &str, _env: &Env) -> Option<Vec<String>> {
                         }
                     }
                 }
-                
+
                 offset += 10 + name_len;
             }
         }
@@ -591,13 +597,13 @@ fn glob_expand(pattern: &str, _env: &Env) -> Option<Vec<String>> {
             return None;
         }
     }
-    
+
     let _ = libc_lite::close(fd);
-    
+
     if matches.is_empty() {
         None
     } else {
-        matches.sort();  // Sort for predictable order
+        matches.sort(); // Sort for predictable order
         Some(matches)
     }
 }
@@ -627,9 +633,9 @@ fn glob_match_recursive(name: &[u8], pattern: &[u8]) -> bool {
         return name.is_empty();
     }
     if pattern.len() == 1 && pattern[0] == b'*' {
-        return true;  // * matches everything
+        return true; // * matches everything
     }
-    
+
     // Handle current pattern character
     match pattern[0] {
         b'*' => {
@@ -655,12 +661,12 @@ fn glob_match_recursive(name: &[u8], pattern: &[u8]) -> bool {
             if name.is_empty() {
                 return false;
             }
-            
+
             // Find closing bracket
             if let Some(close_pos) = pattern[1..].iter().position(|&b| b == b']') {
                 let char_set = &pattern[1..1 + close_pos];
                 let name_char = name[0];
-                
+
                 let matches = if char_set.len() >= 2 && char_set[1] == b'-' {
                     // Range like [a-z]
                     let start = char_set[0];
@@ -670,14 +676,14 @@ fn glob_match_recursive(name: &[u8], pattern: &[u8]) -> bool {
                     // Explicit set like [abc]
                     char_set.iter().any(|&c| c == name_char)
                 };
-                
+
                 if matches {
                     glob_match_recursive(&name[1..], &pattern[2 + close_pos..])
                 } else {
                     false
                 }
             } else {
-                false  // Unclosed bracket
+                false // Unclosed bracket
             }
         }
         c => {

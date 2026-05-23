@@ -131,9 +131,14 @@ impl Parser {
                     if self.at_end()
                         || matches!(
                             self.peek(),
-                            TokenKind::RParen | TokenKind::RBrace | TokenKind::Fi
-                                | TokenKind::Done | TokenKind::Else | TokenKind::Elif
-                                | TokenKind::Esac | TokenKind::DSemi
+                            TokenKind::RParen
+                                | TokenKind::RBrace
+                                | TokenKind::Fi
+                                | TokenKind::Done
+                                | TokenKind::Else
+                                | TokenKind::Elif
+                                | TokenKind::Esac
+                                | TokenKind::DSemi
                         )
                     {
                         break;
@@ -151,8 +156,11 @@ impl Parser {
                     if self.at_end()
                         || matches!(
                             self.peek(),
-                            TokenKind::RParen | TokenKind::RBrace | TokenKind::Fi
-                                | TokenKind::Done | TokenKind::Esac
+                            TokenKind::RParen
+                                | TokenKind::RBrace
+                                | TokenKind::Fi
+                                | TokenKind::Done
+                                | TokenKind::Esac
                         )
                     {
                         // Trailing & — background the left
@@ -277,8 +285,12 @@ impl Parser {
                         });
                     }
                 }
-                TokenKind::Less | TokenKind::Great | TokenKind::DGreat
-                | TokenKind::LessAnd | TokenKind::GreatAnd | TokenKind::IoNumber(_) => {
+                TokenKind::Less
+                | TokenKind::Great
+                | TokenKind::DGreat
+                | TokenKind::LessAnd
+                | TokenKind::GreatAnd
+                | TokenKind::IoNumber(_) => {
                     redirects.push(self.parse_redirect()?);
                 }
                 _ => break,
@@ -299,8 +311,12 @@ impl Parser {
                 | TokenKind::GlobQuestion => {
                     words.push(self.parse_word()?);
                 }
-                TokenKind::Less | TokenKind::Great | TokenKind::DGreat
-                | TokenKind::LessAnd | TokenKind::GreatAnd | TokenKind::IoNumber(_) => {
+                TokenKind::Less
+                | TokenKind::Great
+                | TokenKind::DGreat
+                | TokenKind::LessAnd
+                | TokenKind::GreatAnd
+                | TokenKind::IoNumber(_) => {
                     redirects.push(self.parse_redirect()?);
                 }
                 _ => break,
@@ -393,8 +409,11 @@ impl Parser {
         let mut redirects = Vec::new();
         while matches!(
             self.peek(),
-            TokenKind::Less | TokenKind::Great | TokenKind::DGreat
-                | TokenKind::LessAnd | TokenKind::GreatAnd
+            TokenKind::Less
+                | TokenKind::Great
+                | TokenKind::DGreat
+                | TokenKind::LessAnd
+                | TokenKind::GreatAnd
         ) {
             redirects.push(self.parse_redirect()?);
         }
@@ -415,8 +434,11 @@ impl Parser {
         let mut redirects = Vec::new();
         while matches!(
             self.peek(),
-            TokenKind::Less | TokenKind::Great | TokenKind::DGreat
-                | TokenKind::LessAnd | TokenKind::GreatAnd
+            TokenKind::Less
+                | TokenKind::Great
+                | TokenKind::DGreat
+                | TokenKind::LessAnd
+                | TokenKind::GreatAnd
         ) {
             redirects.push(self.parse_redirect()?);
         }

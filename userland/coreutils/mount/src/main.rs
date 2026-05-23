@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use libc_lite::{open, read, close, write, println};
+use libc_lite::{close, open, println, read, write};
 
 /// mount — list active mountpoints (reads /proc/mounts).
 #[no_mangle]
@@ -17,7 +17,9 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     loop {
         match read(fd, &mut buf) {
             Ok(0) => break,
-            Ok(n) => { let _ = write(1, &buf[..n]); }
+            Ok(n) => {
+                let _ = write(1, &buf[..n]);
+            }
             Err(_) => break,
         }
     }

@@ -37,14 +37,38 @@ impl CpuState {
 }
 
 static mut CPUS: [CpuState; MAX_CPUS] = [
-    CpuState::empty(), CpuState::empty(), CpuState::empty(), CpuState::empty(),
-    CpuState::empty(), CpuState::empty(), CpuState::empty(), CpuState::empty(),
-    CpuState::empty(), CpuState::empty(), CpuState::empty(), CpuState::empty(),
-    CpuState::empty(), CpuState::empty(), CpuState::empty(), CpuState::empty(),
-    CpuState::empty(), CpuState::empty(), CpuState::empty(), CpuState::empty(),
-    CpuState::empty(), CpuState::empty(), CpuState::empty(), CpuState::empty(),
-    CpuState::empty(), CpuState::empty(), CpuState::empty(), CpuState::empty(),
-    CpuState::empty(), CpuState::empty(), CpuState::empty(), CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
+    CpuState::empty(),
 ];
 
 static CPU_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -74,19 +98,23 @@ pub unsafe fn init() {
     let mut idx = 0usize;
     let mut bsp_assigned = false;
     for cpu in &info.cpus {
-        if idx >= MAX_CPUS { break; }
-        if !cpu.enabled { continue; }
+        if idx >= MAX_CPUS {
+            break;
+        }
+        if !cpu.enabled {
+            continue;
+        }
         let is_bsp = !bsp_assigned;
         if is_bsp {
             bsp_assigned = true;
             BSP_APIC_ID.store(cpu.apic_id, Ordering::SeqCst);
         }
         CPUS[idx] = CpuState {
-            apic_id:   cpu.apic_id,
-            acpi_uid:  cpu.acpi_uid,
+            apic_id: cpu.apic_id,
+            acpi_uid: cpu.acpi_uid,
             is_bsp,
             is_x2apic: cpu.is_x2apic,
-            started:   AtomicBool::new(is_bsp),
+            started: AtomicBool::new(is_bsp),
         };
         idx += 1;
     }
@@ -96,7 +124,9 @@ pub unsafe fn init() {
     let total = cpu_count();
     crate::serial::serial_println!(
         "[  0.000600] RACORE: SMP topology - {} enabled CPU(s), BSP apic_id={}, {} online",
-        total, BSP_APIC_ID.load(Ordering::SeqCst), started,
+        total,
+        BSP_APIC_ID.load(Ordering::SeqCst),
+        started,
     );
 
     if total > 1 {
