@@ -76,14 +76,13 @@ RacOS to w pełni autorski system operacyjny budowany od zera — bez kopiowania
   /ci            — konfiguracja CI/CD
 ```
 
-## Budowanie
+## Quick start
 
-```bash
-just build        # pełny build
-just test         # uruchom testy
-just run          # uruchom w QEMU
-just image        # zbuduj obraz ISO
-```
+- **Linux**: see [docs/DEVELOPMENT_LINUX.md](docs/DEVELOPMENT_LINUX.md)
+- **Windows**: see [docs/DEVELOPMENT_WINDOWS.md](docs/DEVELOPMENT_WINDOWS.md)
+
+Both guides walk you through toolchain install, build, and booting RacOS in
+QEMU.
 
 ## Dokumentacja
 

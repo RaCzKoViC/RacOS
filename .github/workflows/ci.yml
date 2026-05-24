@@ -12,8 +12,19 @@ env:
 
 jobs:
   build:
-    name: Build kernel + bootloader + userland
-    runs-on: ubuntu-latest
+    name: Build kernel + bootloader + userland (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.required == false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            required: true
+          - os: windows-latest
+            required: false
+          - os: macos-latest
+            required: false
     steps:
       - uses: actions/checkout@v4
 
@@ -23,8 +34,17 @@ jobs:
           components: rust-src, llvm-tools-preview
           targets: x86_64-unknown-none, x86_64-unknown-uefi
 
-      - name: Install system deps (nasm)
+      - name: Install system deps (Linux)
+        if: matrix.os == 'ubuntu-22.04'
         run: sudo apt-get update && sudo apt-get install -y nasm
+
+      - name: Install system deps (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install nasm -y
+
+      - name: Install system deps (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install nasm
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -62,6 +82,7 @@ jobs:
         run: cargo build -p rpkg -p rapt
 
       - name: Upload kernel artifact
+        if: matrix.os == 'ubuntu-22.04'
         uses: actions/upload-artifact@v4
         with:
           name: kernel-elf
@@ -69,6 +90,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload bootloader artifact
+        if: matrix.os == 'ubuntu-22.04'
         uses: actions/upload-artifact@v4
         with:
           name: bootloader-efi
