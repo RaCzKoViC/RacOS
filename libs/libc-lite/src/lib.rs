@@ -1218,7 +1218,7 @@ pub fn eprintln(s: &str) {
 /// #[no_mangle]
 /// pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 { ... }
 /// ```
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "host-test")))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub unsafe extern "C" fn _start() {
@@ -1249,7 +1249,7 @@ pub unsafe extern "C" fn _start() {
 /// `main` to be declared via `extern "C"` in libc-lite. The downstream
 /// crate's `main` resolves to a regular C-ABI function thanks to
 /// `#[no_mangle] pub extern "C" fn main(...)`.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "host-test")))]
 #[unsafe(no_mangle)]
 unsafe extern "C" fn _libc_lite_main_trampoline(argc: i32, argv: *const *const u8) -> i32 {
     extern "C" {
@@ -1262,7 +1262,7 @@ unsafe extern "C" fn _libc_lite_main_trampoline(argc: i32, argv: *const *const u
 // Panic handler dla userland
 // ─────────────────────────────────────────────────
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "host-test")))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     eprintln("PANIC in userland process");
@@ -1326,7 +1326,7 @@ mod bump_alloc {
         }
     }
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "host-test")))]
     #[global_allocator]
     static ALLOCATOR: BumpAllocator = BumpAllocator;
 }

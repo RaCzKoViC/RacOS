@@ -866,3 +866,112 @@ fn glob_match_recursive(name: &[u8], pattern: &[u8]) -> bool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{GlobPattern, WordPart};
+    use alloc::string::String;
+    use alloc::vec;
+
+    fn word(parts: Vec<WordPart>) -> Word {
+        Word::from_parts(parts)
+    }
+
+    #[test]
+    fn expands_variables_and_special_parameters() {
+        let mut env = Env::new(4242);
+        env.set(String::from("USER"), String::from("maciej"));
+        env.last_status = 7;
+        env.arg0 = String::from("script.rsh");
+        env.positional = vec![String::from("one"), String::from("two")];
+
+        let expanded = expand_word(
+            &word(vec![
+                WordPart::Literal(String::from("hi ")),
+                WordPart::Variable(String::from("USER")),
+                WordPart::Literal(String::from(" status ")),
+                WordPart::Variable(String::from("?")),
+                WordPart::Literal(String::from(" pid ")),
+                WordPart::Variable(String::from("$")),
+                WordPart::Literal(String::from(" argc ")),
+                WordPart::Variable(String::from("#")),
+                WordPart::Literal(String::from(" argv0 ")),
+                WordPart::Variable(String::from("0")),
+                WordPart::Literal(String::from(" first ")),
+                WordPart::Variable(String::from("1")),
+                WordPart::Literal(String::from(" all ")),
+                WordPart::Variable(String::from("@")),
+            ]),
+            &env,
+        );
+
+        assert_eq!(
+            expanded,
+            "hi maciej status 7 pid 4242 argc 2 argv0 script.rsh first one all one two"
+        );
+    }
+
+    #[test]
+    fn expands_double_quoted_parameter_forms() {
+        let mut env = Env::new(1);
+        env.set(String::from("NAME"), String::from("RacOS"));
+        env.set(String::from("EMPTY"), String::new());
+
+        let expanded = expand_word(
+            &word(vec![WordPart::DoubleQuoted(String::from(
+                "hello $NAME ${#NAME} ${MISSING:-fallback} ${EMPTY:-default} ${NAME:+alt}",
+            ))]),
+            &env,
+        );
+
+        assert_eq!(expanded, "hello RacOS 5 fallback default alt");
+    }
+
+    #[test]
+    fn preserves_single_quotes_and_expands_tilde() {
+        let mut env = Env::new(1);
+        env.set(String::from("HOME"), String::from("/home/racos"));
+
+        assert_eq!(
+            expand_word(
+                &word(vec![WordPart::SingleQuoted(String::from("$HOME"))]),
+                &env,
+            ),
+            "$HOME"
+        );
+        assert_eq!(
+            expand_word(&Word::literal("~/src"), &env),
+            "/home/racos/src"
+        );
+    }
+
+    #[test]
+    fn expands_plain_word_lists_without_globs() {
+        let mut env = Env::new(1);
+        env.set(String::from("NAME"), String::from("RacOS"));
+
+        let expanded = expand_word_list(
+            &word(vec![
+                WordPart::Literal(String::from("pkg-")),
+                WordPart::BraceExpansion(String::from("NAME")),
+            ]),
+            &env,
+        );
+
+        assert_eq!(expanded, vec![String::from("pkg-RacOS")]);
+    }
+
+    #[test]
+    fn matches_case_glob_patterns() {
+        assert!(pattern_match("kernel.rs", "*.rs"));
+        assert!(pattern_match("tty0", "tty?"));
+        assert!(pattern_match("irq7", "irq[0-9]"));
+        assert!(!pattern_match("kernel.c", "*.rs"));
+        assert!(!pattern_match("tty10", "tty?"));
+
+        let literal_glob =
+            expand_word(&word(vec![WordPart::Glob(GlobPattern::Star)]), &Env::new(1));
+        assert_eq!(literal_glob, "*");
+    }
+}

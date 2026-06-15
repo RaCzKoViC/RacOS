@@ -105,11 +105,10 @@ jobs:
       - name: Install nasm
         run: sudo apt-get update && sudo apt-get install -y nasm
       - name: Run host-side workspace tests
-        # racsh's parser has #[test]s that run cleanly on host. Other crates
-        # depend on libc-lite which collides with libgcc when linked against
-        # the host toolchain, so we narrow the host-test set to racsh only.
-        run: cargo test -p racsh
-        continue-on-error: true
+        # racsh parser/expander tests now run against the real crate. rpkg and
+        # rapt are host-side package tools, so keep them in the same required
+        # host test gate.
+        run: cargo test -p racsh -p rpkg -p rapt
 
   boot-smoke:
     name: QEMU boot smoke (UEFI)
