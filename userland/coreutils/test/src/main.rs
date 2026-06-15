@@ -14,6 +14,9 @@ static mut FAIL: u32 = 0;
 const O_RDWR: u32 = 0x0002;
 const O_CREAT: u32 = 0x0040;
 const O_TRUNC: u32 = 0x0200;
+const SIGTERM: i32 = 15;
+const EXEC_LOOP_ITERS: u32 = 50;
+const MEMFREE_LEAK_TOLERANCE_KB: u32 = 256;
 
 #[repr(C)]
 struct StatBuf {
@@ -68,6 +71,15 @@ fn print_u32(n: u32) {
     }
 }
 
+fn print_i32(n: i32) {
+    if n < 0 {
+        print("-");
+        print_u32(n.wrapping_neg() as u32);
+    } else {
+        print_u32(n as u32);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     println("=== RacOS System Test Suite ===");
@@ -82,6 +94,9 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_pipe();
     test_dup();
     test_spawn_wait();
+    test_signal_default_terminate();
+    test_sigchld_waitpid();
+    test_exec_loop_memory_cleanup();
     test_chdir_getcwd();
     test_security_syscalls();
 
@@ -221,6 +236,170 @@ fn test_spawn_wait() {
         check!("wait returns child pid", ret.is_ok());
         check!("child exit status is 0", status == 0);
     }
+}
+
+fn test_signal_default_terminate() {
+    println("\n[test] signal default termination");
+
+    let path = b"/bin/sleep\0";
+    let arg0 = b"sleep\0";
+    let arg1 = b"5\0";
+    let argv: [*const u8; 3] = [arg0.as_ptr(), arg1.as_ptr(), core::ptr::null()];
+
+    let pid = spawn_args(path, &argv);
+    check!("spawn /bin/sleep returns Ok", pid.is_ok());
+    if let Ok(pid) = pid {
+        let _ = sleep_ms(10);
+
+        let killed = kill(pid, SIGTERM);
+        check!("kill(SIGTERM) returns Ok", killed.is_ok());
+
+        let mut status: i32 = -99;
+        let waited = waitpid(pid, &mut status, 0);
+        check!(
+            "waitpid returns signalled child",
+            waited.unwrap_or(-1) == pid
+        );
+        check!("SIGTERM default action exits non-zero", status != 0);
+        if waited.is_ok() && status != 0 {
+            println("PHASE21-SIGNAL-TERM-OK");
+        }
+    }
+}
+
+fn test_sigchld_waitpid() {
+    println("\n[test] SIGCHLD wait wakeup");
+
+    let path = b"/bin/sleep\0";
+    let arg0 = b"sleep\0";
+    let arg1 = b"5\0";
+    let argv: [*const u8; 3] = [arg0.as_ptr(), arg1.as_ptr(), core::ptr::null()];
+
+    let pid = spawn_args(path, &argv);
+    check!("spawn child for SIGCHLD test", pid.is_ok());
+    if let Ok(pid) = pid {
+        let mut status: i32 = -99;
+        let before = waitpid(pid, &mut status, WNOHANG);
+        check!(
+            "waitpid(WNOHANG) reports running child",
+            before.unwrap_or(-1) == 0
+        );
+
+        let killed = kill(pid, SIGTERM);
+        check!("kill child for SIGCHLD test", killed.is_ok());
+
+        let waited = waitpid(pid, &mut status, 0);
+        check!(
+            "blocking waitpid wakes for child",
+            waited.unwrap_or(-1) == pid
+        );
+        check!("SIGCHLD wait status is non-zero", status != 0);
+        if waited.is_ok() && status != 0 {
+            println("PHASE21-SIGCHLD-WAIT-OK");
+        }
+    }
+}
+
+fn test_exec_loop_memory_cleanup() {
+    println("\n[test] exec loop memory cleanup");
+
+    let before = read_memfree_kb();
+    check!("read /proc/meminfo before loop", before.is_some());
+    let before = match before {
+        Some(v) => v,
+        None => return,
+    };
+
+    let mut all_ok = true;
+    let mut last_status: i32 = 0;
+    for _ in 0..EXEC_LOOP_ITERS {
+        let pid = spawn(b"/bin/true\0");
+        if let Ok(pid) = pid {
+            let mut status: i32 = -1;
+            last_status = status;
+            match waitpid(pid, &mut status, 0) {
+                Ok(waited) if waited == pid && status == 0 => last_status = status,
+                Ok(_) => {
+                    last_status = status;
+                    all_ok = false;
+                }
+                _ => all_ok = false,
+            }
+        } else {
+            last_status = -999;
+            all_ok = false;
+        }
+    }
+
+    let _ = sleep_ms(10);
+
+    let after = read_memfree_kb();
+    check!("read /proc/meminfo after loop", after.is_some());
+    let after = match after {
+        Some(v) => v,
+        None => return,
+    };
+
+    let leaked = before.saturating_sub(after);
+    print("  MemFree before=");
+    print_u32(before);
+    print(" kB after=");
+    print_u32(after);
+    print(" kB leaked=");
+    print_u32(leaked);
+    println(" kB");
+
+    check!("exec loop children exit cleanly", all_ok);
+    check!(
+        "exec loop memory delta within tolerance",
+        leaked <= MEMFREE_LEAK_TOLERANCE_KB
+    );
+    if all_ok && leaked <= MEMFREE_LEAK_TOLERANCE_KB {
+        println("PHASE21-EXEC-LOOP-OK");
+    } else {
+        print("  exec-loop status before=");
+        print_u32(before);
+        print(" after=");
+        print_u32(after);
+        print(" leaked=");
+        print_u32(leaked);
+        print(" last_status=");
+        print_i32(last_status);
+        println("");
+    }
+}
+
+fn read_memfree_kb() -> Option<u32> {
+    let fd = open(b"/proc/meminfo\0", 0, 0).ok()?;
+    let mut buf = [0u8; 256];
+    let n = read(fd, &mut buf).ok()?;
+    let _ = close(fd);
+    parse_memfree_kb(&buf[..n])
+}
+
+fn parse_memfree_kb(buf: &[u8]) -> Option<u32> {
+    let key = b"MemFree:";
+    let mut i = 0usize;
+    while i + key.len() <= buf.len() {
+        if &buf[i..i + key.len()] == key {
+            let mut j = i + key.len();
+            while j < buf.len() && (buf[j] == b' ' || buf[j] == b'\t') {
+                j += 1;
+            }
+            let mut value = 0u32;
+            let mut saw_digit = false;
+            while j < buf.len() && buf[j] >= b'0' && buf[j] <= b'9' {
+                value = value
+                    .saturating_mul(10)
+                    .saturating_add((buf[j] - b'0') as u32);
+                saw_digit = true;
+                j += 1;
+            }
+            return if saw_digit { Some(value) } else { None };
+        }
+        i += 1;
+    }
+    None
 }
 
 fn test_chdir_getcwd() {

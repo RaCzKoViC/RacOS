@@ -313,15 +313,11 @@ jobs:
         # be PIE or the bootloader hands it off with unfixed RIP-relative
         # GOT addresses).
         run: |
-          RUSTFLAGS="-C relocation-model=static -C link-arg=-no-pie" \
-            cargo build --package racore --target x86_64-unknown-none
           cargo build --package racos-boot --target x86_64-unknown-uefi
+          bash scripts/build-image.sh
           mkdir -p esp/EFI/BOOT
           cp target/x86_64-unknown-uefi/debug/bootx64.efi esp/EFI/BOOT/BOOTX64.EFI
           cp target/x86_64-unknown-none/debug/racore esp/racore.elf
-          if [ -d initramfs-root ]; then
-            python3 scripts/pack-initramfs.py initramfs-root esp/initramfs.img
-          fi
 
       - name: Boot + drive racsh over TCP-serial
         run: |
@@ -354,8 +350,9 @@ jobs:
             sleep 2; printf 'pwd\n'
             sleep 2; printf 'echo ci-smoke-ok\n'
             sleep 2; printf 'cat /proc/version\n'
-            sleep 5
-          ) | timeout 25 ncat 127.0.0.1 4444 > shell.log || true
+            sleep 2; printf 'racos-test\n'
+            sleep 30
+          ) | timeout 60 ncat 127.0.0.1 4444 > shell.log || true
           kill $QEMU_PID 2>/dev/null || true
           wait $QEMU_PID 2>/dev/null || true
           echo "--- qemu-host.log (whatever QEMU printed before being killed) ---"
@@ -373,6 +370,12 @@ jobs:
             || (echo "FAIL: echo did not roundtrip" && exit 1)
           grep -q "RacOS version" shell.log \
             || (echo "FAIL: cat /proc/version did not return content" && exit 1)
+          grep -q "PHASE21-SIGNAL-TERM-OK" shell.log \
+            || (echo "FAIL: Phase 2.1 signal default-action test did not pass" && exit 1)
+          grep -q "PHASE21-SIGCHLD-WAIT-OK" shell.log \
+            || (echo "FAIL: Phase 2.1 SIGCHLD wait test did not pass" && exit 1)
+          grep -q "PHASE21-EXEC-LOOP-OK" shell.log \
+            || (echo "FAIL: Phase 2.1 exec-loop cleanup test did not pass" && exit 1)
           echo "Interactive shell PASSED"
 
       - name: Upload shell log
