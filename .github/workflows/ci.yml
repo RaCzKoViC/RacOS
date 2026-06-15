@@ -12,19 +12,40 @@ env:
 
 jobs:
   build:
-    name: Build kernel + bootloader + userland
-    runs-on: ubuntu-latest
+    name: Build kernel + bootloader + userland (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.required == false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            required: true
+          - os: windows-latest
+            required: false
+          - os: macos-latest
+            required: false
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain (pinned via rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@nightly-2026-05-21
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-21
           components: rust-src, llvm-tools-preview
           targets: x86_64-unknown-none, x86_64-unknown-uefi
 
-      - name: Install system deps (nasm)
+      - name: Install system deps (Linux)
+        if: matrix.os == 'ubuntu-22.04'
         run: sudo apt-get update && sudo apt-get install -y nasm
+
+      - name: Install system deps (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install nasm -y
+
+      - name: Install system deps (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install nasm
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -50,18 +71,13 @@ jobs:
         # binaries piled in this began failing at link time on racos-mkdir.
         # rpkg/rapt are host-side tooling (use std) so they can't share the
         # bare-metal target — excluded here, host build covered below.
-        run: |
-          cargo build --workspace \
-            --exclude racore --exclude racos-boot \
-            --exclude rpkg --exclude rapt \
-            --target x86_64-unknown-none \
-            -Z build-std=core,alloc \
-            -Z build-std-features=compiler-builtins-mem
+        run: cargo build --workspace --exclude racore --exclude racos-boot --exclude rpkg --exclude rapt --target x86_64-unknown-none -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
 
       - name: Build host-side packaging tools (rpkg + rapt)
         run: cargo build -p rpkg -p rapt
 
       - name: Upload kernel artifact
+        if: matrix.os == 'ubuntu-22.04'
         uses: actions/upload-artifact@v4
         with:
           name: kernel-elf
@@ -69,6 +85,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload bootloader artifact
+        if: matrix.os == 'ubuntu-22.04'
         uses: actions/upload-artifact@v4
         with:
           name: bootloader-efi
@@ -81,8 +98,9 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly-2026-05-21
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-21
           components: rust-src
       - name: Install nasm
         run: sudo apt-get update && sudo apt-get install -y nasm
@@ -99,8 +117,9 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly-2026-05-21
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-21
           components: rust-src, llvm-tools-preview
           targets: x86_64-unknown-none, x86_64-unknown-uefi
       - name: Install QEMU, OVMF, nasm, python
@@ -149,7 +168,7 @@ jobs:
           echo "Using OVMF=$OVMF"
           qemu-system-x86_64 --version | head -n 1
           timeout 15 qemu-system-x86_64 \
-            -machine q35 -cpu qemu64 -m 512M \
+            -machine q35 -cpu qemu64,+smep,+smap -m 512M \
             -drive if=pflash,format=raw,file=$OVMF,readonly=on \
             -drive file=fat:rw:esp,format=raw \
             -serial stdio -display none -no-reboot \
@@ -186,8 +205,9 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly-2026-05-21
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-21
           components: rust-src, llvm-tools-preview
           targets: x86_64-unknown-none, x86_64-unknown-uefi
       - name: Install QEMU, OVMF, nasm, python
@@ -279,8 +299,9 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly-2026-05-21
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-21
           components: rust-src, llvm-tools-preview
           targets: x86_64-unknown-none, x86_64-unknown-uefi
       - name: Install QEMU, OVMF, nasm, python, ncat
@@ -369,8 +390,9 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly-2026-05-21
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-21
           components: rustfmt, clippy, rust-src
           targets: x86_64-unknown-none, x86_64-unknown-uefi
       - name: rustfmt check

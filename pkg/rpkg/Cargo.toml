@@ -8,4 +8,3 @@ default = ["std"]
 std = []
 
 [dependencies]
-libc-lite = { path = "../../libs/libc-lite" }

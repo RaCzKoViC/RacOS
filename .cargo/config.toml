@@ -1,4 +1,7 @@
-# Cargo configuration for RacOS workspace
-
-[build]
-target-dir = "C:\\Users\\Maciej\\RacOS-target"
+# Cargo configuration for RacOS workspace.
+#
+# We intentionally do NOT set `[build] target-dir` here. Letting cargo use the
+# default `<workspace>/target` keeps the config portable across Linux/macOS/
+# Windows. To redirect builds elsewhere, set the env var RACOS_TARGET_DIR
+# (the justfile and scripts/{build-image,make-image}.sh export it as
+# CARGO_TARGET_DIR for cargo).
