@@ -4,12 +4,15 @@
 # Runs on Linux and Windows. Override the target dir with the env var
 # RACOS_TARGET_DIR; otherwise defaults to `target/` in the repo.
 
+set windows-shell := ["powershell.exe", "-NoProfile", "-Command"]
+
 project   := "RacOS"
 kernel    := "RaCore"
 arch      := "x86_64"
 qemu      := "qemu-system-x86_64"
 target    := "x86_64-unknown-none"
 uefi_target := "x86_64-unknown-uefi"
+userland_target := "x86_64-racos-user.json"
 target_dir := env_var_or_default("RACOS_TARGET_DIR", "target")
 
 # Pin cargo's output dir to target_dir so RACOS_TARGET_DIR flows into the
@@ -32,7 +35,8 @@ build-boot:
 
 # Build userland crates (default members)
 build-userland:
-    cargo build
+    cargo build --workspace --exclude racore --exclude racos-boot --exclude rpkg --exclude rapt --target {{userland_target}} -Zjson-target-spec -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
+    cargo build --package rpkg --package rapt
 
 # Run all tests
 test: test-unit
@@ -50,9 +54,7 @@ test-boot: build-kernel
 
 [windows]
 test-boot: build-kernel
-    powershell -NoProfile -Command "& {{qemu}} -machine q35 -cpu qemu64 -m 256M `
-        -serial stdio -display none -no-reboot `
-        -kernel '{{target_dir}}/{{target}}/debug/racore' 2>&1 | Select-Object -First 30"
+    powershell -NoProfile -Command "& {{qemu}} -machine q35 -cpu qemu64 -m 256M -serial stdio -display none -no-reboot -kernel '{{target_dir}}/{{target}}/debug/racore' 2>&1 | Select-Object -First 30"
 
 # Run in QEMU
 [unix]
@@ -63,9 +65,7 @@ run: build-kernel
 
 [windows]
 run: build-kernel
-    powershell -NoProfile -Command "& {{qemu}} -machine q35 -cpu qemu64 -m 256M `
-        -serial stdio -display none -no-reboot `
-        -kernel '{{target_dir}}/{{target}}/debug/racore'"
+    powershell -NoProfile -Command "& {{qemu}} -machine q35 -cpu qemu64 -m 256M -serial stdio -display none -no-reboot -kernel '{{target_dir}}/{{target}}/debug/racore'"
 
 # Lint
 lint:
@@ -130,10 +130,7 @@ run-uefi: image
 
 [windows]
 run-uefi: image
-    powershell -NoProfile -Command "& {{qemu}} -machine q35 -cpu qemu64 -m 512M `
-        -drive if=pflash,format=raw,file=tools\\OVMF_CODE.fd,readonly=on `
-        -drive file=fat:rw:esp,format=raw `
-        -serial stdio -display none -no-reboot"
+    powershell -NoProfile -Command "& {{qemu}} -machine q35 -cpu qemu64 -m 512M -drive if=pflash,format=raw,file=tools\\OVMF_CODE.fd,readonly=on -drive file=fat:rw:esp,format=raw -serial stdio -display none -no-reboot"
 
 # Test UEFI boot (non-interactive, validates serial output)
 [unix]
@@ -145,10 +142,7 @@ test-uefi: image
 
 [windows]
 test-uefi: image
-    powershell -NoProfile -Command "& {{qemu}} -machine q35 -cpu qemu64 -m 512M `
-        -drive if=pflash,format=raw,file=tools\\OVMF_CODE.fd,readonly=on `
-        -drive file=fat:rw:esp,format=raw `
-        -serial stdio -display none -no-reboot 2>&1 | Select-Object -First 60"
+    powershell -NoProfile -Command "& {{qemu}} -machine q35 -cpu qemu64 -m 512M -drive if=pflash,format=raw,file=tools\\OVMF_CODE.fd,readonly=on -drive file=fat:rw:esp,format=raw -serial stdio -display none -no-reboot 2>&1 | Select-Object -First 60"
 
 # Clean build artifacts
 [unix]

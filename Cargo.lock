@@ -319,16 +319,10 @@ dependencies = [
 [[package]]
 name = "rapt"
 version = "0.1.0"
-dependencies = [
- "libc-lite",
-]
 
 [[package]]
 name = "rpkg"
 version = "0.1.0"
-dependencies = [
- "libc-lite",
-]
 
 [[package]]
 name = "syn"

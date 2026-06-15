@@ -63,7 +63,10 @@ jobs:
         run: cargo build --package racos-boot --target x86_64-unknown-uefi
 
       - name: Build userland workspace
-        run: cargo build --workspace --exclude racore --exclude racos-boot
+        run: cargo build --workspace --exclude racore --exclude racos-boot --exclude rpkg --exclude rapt --target x86_64-racos-user.json -Zjson-target-spec -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
+
+      - name: Build package manager crates (host)
+        run: cargo build --package rpkg --package rapt
 
       - name: Upload kernel artifact
         if: matrix.os == 'ubuntu-22.04'
