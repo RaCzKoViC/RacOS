@@ -437,8 +437,17 @@ pub fn sys_exit(status: i32) -> ! {
         crate::task::scheduler::current_pid()
     );
 
-    // Mark task as zombie and schedule away
-    // TODO: proper process cleanup (release address space, fds, signal parent)
+    // Release all file descriptors now; address space is freed during reaping.
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+        let _ = crate::task::scheduler::with_current_fd_table(|fds| {
+            fds.close_all();
+        });
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
+
+    // Mark task as zombie and schedule away.
+    // Parent is notified via SIGCHLD and reaped children are reparented.
     unsafe {
         crate::task::scheduler::exit_current(status);
     }
@@ -1948,8 +1957,7 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SyscallRes
 /// Return from a signal handler (restores pre-signal context).
 /// For now, this is a stub — signal delivery is default-action only.
 pub fn sys_sigreturn() -> SyscallResult {
-    // TODO: restore saved user context from signal frame
-    Ok(0)
+    Err(SyscallError::ENOSYS)
 }
 
 // ─────────────────────────────────────────────────

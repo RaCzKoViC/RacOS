@@ -315,6 +315,11 @@ impl Scheduler {
                     break;
                 }
             }
+
+            // Notify the parent about child state change.
+            unsafe {
+                let _ = send_signal_to(parent_pid, super::signal::Signal::SIGCHLD);
+            }
         }
 
         // Schedule another task immediately

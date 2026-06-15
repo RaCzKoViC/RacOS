@@ -90,6 +90,16 @@ impl Clone for FdTable {
 }
 
 impl FdTable {
+    /// Close all open file descriptors.
+    ///
+    /// Useful when a process exits so file handles are released immediately
+    /// instead of waiting for the scheduler to drop the whole task structure.
+    pub fn close_all(&mut self) {
+        for fd in self.entries.iter_mut() {
+            *fd = None;
+        }
+    }
+
     pub fn new() -> Self {
         let mut entries = Vec::with_capacity(MAX_FDS);
         for _ in 0..MAX_FDS {
