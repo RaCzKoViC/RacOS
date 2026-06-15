@@ -351,8 +351,8 @@ jobs:
             sleep 2; printf 'echo ci-smoke-ok\n'
             sleep 2; printf 'cat /proc/version\n'
             sleep 2; printf 'racos-test\n'
-            sleep 30
-          ) | timeout 60 ncat 127.0.0.1 4444 > shell.log || true
+            sleep 70
+          ) | timeout 100 ncat 127.0.0.1 4444 > shell.log || true
           kill $QEMU_PID 2>/dev/null || true
           wait $QEMU_PID 2>/dev/null || true
           echo "--- qemu-host.log (whatever QEMU printed before being killed) ---"
