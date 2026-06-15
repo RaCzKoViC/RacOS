@@ -234,9 +234,28 @@ pub fn execute(node: &AstNode, env: &mut Env) -> i32 {
             0
         }
 
-        AstNode::Subshell { body, redirects: _ } => {
-            // True subshell requires fork — for MVP, execute in-process
-            execute(body, env)
+        AstNode::Subshell { body, redirects } => {
+            // A subshell runs in a forked child so that cd, variable
+            // assignments and redirections inside `( ... )` do not leak into
+            // the parent shell. The parent waits for the child's exit status.
+            match libc_lite::fork() {
+                Ok(0) => {
+                    let code = match apply_redirects(redirects, env) {
+                        Ok(_) => execute(body, env),
+                        Err(_) => 1,
+                    };
+                    libc_lite::exit(code);
+                }
+                Ok(_child) => {
+                    let mut status = 0i32;
+                    let _ = libc_lite::wait(&mut status);
+                    status
+                }
+                Err(_) => {
+                    // fork unavailable — fall back to in-process execution.
+                    execute(body, env)
+                }
+            }
         }
 
         AstNode::BraceGroup { body, redirects: _ } => execute(body, env),

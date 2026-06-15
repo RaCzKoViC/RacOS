@@ -755,6 +755,41 @@ pub fn isatty(fd: i32) -> bool {
     unsafe { syscall1(SYS_ISATTY, fd as u64) > 0 }
 }
 
+/// Number of command-line arguments, from the `argc` passed to `main`.
+pub fn arg_count(argc: i32) -> usize {
+    if argc < 0 {
+        0
+    } else {
+        argc as usize
+    }
+}
+
+/// Get command-line argument `index` as a byte slice (NUL stripped), using the
+/// raw `argv` passed to `main`. Returns `None` past the end of the array.
+///
+/// The returned slice borrows the process's argv block, which lives for the
+/// whole program, hence the `'static` lifetime. This wrapper exists so callers
+/// that forbid `unsafe` (e.g. `sh`) can still read their arguments safely.
+pub fn arg(argv: *const *const u8, index: usize) -> Option<&'static [u8]> {
+    if argv.is_null() {
+        return None;
+    }
+    // SAFETY: argv is the kernel-provided, NULL-terminated pointer array; each
+    // non-null entry points to a NUL-terminated C string. We never read past
+    // the NULL terminator of the array nor the NUL of a string.
+    unsafe {
+        let p = *argv.add(index);
+        if p.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+        Some(core::slice::from_raw_parts(p, len))
+    }
+}
+
 /// Wait for specific PID.
 pub fn waitpid(pid: i32, status: &mut i32, options: u32) -> Result<i32, i64> {
     let ret = unsafe {

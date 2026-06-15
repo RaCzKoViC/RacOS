@@ -133,6 +133,8 @@ impl Parser {
                             self.peek(),
                             TokenKind::RParen
                                 | TokenKind::RBrace
+                                | TokenKind::Then
+                                | TokenKind::Do
                                 | TokenKind::Fi
                                 | TokenKind::Done
                                 | TokenKind::Else
@@ -158,6 +160,8 @@ impl Parser {
                             self.peek(),
                             TokenKind::RParen
                                 | TokenKind::RBrace
+                                | TokenKind::Then
+                                | TokenKind::Do
                                 | TokenKind::Fi
                                 | TokenKind::Done
                                 | TokenKind::Esac
@@ -309,10 +313,23 @@ impl Parser {
         loop {
             match self.peek() {
                 TokenKind::AssignmentWord { .. } => {
-                    if let TokenKind::AssignmentWord { name, value } = self.advance().kind.clone() {
+                    let tok = self.advance().clone();
+                    if let TokenKind::AssignmentWord { name, value } = tok.kind {
+                        // The value may continue into adjacent expansion tokens
+                        // (e.g. `PATH=$PATH:/x` lexes as AssignmentWord{PATH,""}
+                        // followed by $PATH). Build a multi-part value word.
+                        let mut parts = Vec::new();
+                        if !value.is_empty() {
+                            parts.push(WordPart::Literal(value));
+                        }
+                        let end = tok.span.offset + tok.span.len;
+                        self.merge_adjacent(&mut parts, end);
+                        if parts.is_empty() {
+                            parts.push(WordPart::Literal(String::new()));
+                        }
                         assignments.push(Assignment {
                             name,
-                            value: Word::literal(&value),
+                            value: Word::from_parts(parts),
                         });
                     }
                 }
@@ -375,15 +392,22 @@ impl Parser {
         let mut parts = Vec::new();
 
         let first = self.advance().clone();
-        let mut word_end = first.span.offset + first.span.len;
+        let word_end = first.span.offset + first.span.len;
         if !push_word_part(&first.kind, &mut parts) {
             return Err(self.error(&alloc::format!("Expected word, got {:?}", first.kind)));
         }
 
         // Greedily merge immediately-adjacent word-like tokens.
+        self.merge_adjacent(&mut parts, word_end);
+
+        Ok(Word::from_parts(parts))
+    }
+
+    /// Consume tokens that begin exactly where the previous one ended (no
+    /// intervening whitespace) and append their word parts to `parts`.
+    fn merge_adjacent(&mut self, parts: &mut Vec<WordPart>, mut word_end: usize) {
         loop {
             let tok = self.current_token();
-            // Adjacency: the next token must start exactly where this one ended.
             if tok.span.offset != word_end {
                 break;
             }
@@ -396,8 +420,6 @@ impl Parser {
                 break;
             }
         }
-
-        Ok(Word::from_parts(parts))
     }
 
     /// Parse a redirect: [N]< | > | >> | <& | >& WORD

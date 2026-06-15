@@ -238,6 +238,11 @@ impl<'a> Lexer<'a> {
                         || c == b'<'
                         || c == b'>'
                         || c == b'#'
+                        // End the word at an (unescaped, unquoted) '$' so the
+                        // following $VAR / ${...} / $(...) lexes as its own
+                        // expansion token. The parser re-joins adjacent tokens
+                        // into one multi-part word, so `pre$VAR` / `a=${B}` work.
+                        || c == b'$'
                     {
                         break;
                     }
