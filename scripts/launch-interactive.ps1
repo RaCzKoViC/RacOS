@@ -7,11 +7,19 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 Set-Location $Root
 
-$QemuExe   = "D:\qemu\qemu-system-x86_64.exe"
-$OvmfCode  = "D:\qemu\share\edk2-x86_64-code.fd"
-$EspDir    = Join-Path $Root "esp"
-$DiskPath  = Join-Path $Root "racos-disk.img"
-$SerialLog = Join-Path $Root "racos-serial.log"
+. (Join-Path $PSScriptRoot "_qemu-common.ps1")
+
+$qemu      = Find-QemuPaths
+$QemuExe   = $qemu.Exe
+$OvmfCode  = $qemu.Ovmf
+
+# QEMU mishandles spaces in -drive/-serial paths (e.g. a project under
+# "D:\OS project"). Hand it a space-free alias of the project root; the files
+# still live in the real tree.
+$RootQemu  = Resolve-SpacelessPath $Root
+$EspDir    = Join-Path $RootQemu "esp"
+$DiskPath  = Join-Path $RootQemu "racos-disk.img"
+$SerialLog = Join-Path $RootQemu "racos-serial.log"
 
 if (-not (Test-Path $DiskPath)) {
     Write-Host "Creating 16 MiB sparse disk: $DiskPath"

@@ -26,10 +26,18 @@ $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.De
 Set-Location $ProjectRoot
 
 # ── Paths ──
-$QemuExe   = "D:\qemu\qemu-system-x86_64.exe"
-$OvmfCode  = "D:\qemu\share\edk2-x86_64-code.fd"
+. (Join-Path $PSScriptRoot "_qemu-common.ps1")
+$qemu      = Find-QemuPaths
+$QemuExe   = $qemu.Exe
+$OvmfCode  = $qemu.Ovmf
 $EspDir    = Join-Path $ProjectRoot "esp"
 $KernelElf = "C:\Users\Maciej\RacOS-target\x86_64-unknown-none\debug\racore"
+
+# QEMU mishandles spaces in -drive paths (e.g. a project under "D:\OS project").
+# $RootQemu is a space-free alias of the project root; the files it points at are
+# the real ones in the project tree. Use it only for paths fed into QEMU args.
+$RootQemu  = Resolve-SpacelessPath $ProjectRoot
+$EspDirQemu = Join-Path $RootQemu "esp"
 
 # Build kernel with static relocation model for direct physical entry jumping
 $oldRustflags = $env:RUSTFLAGS
@@ -80,7 +88,7 @@ $QemuArgs = @(
     "-m", "${Ram}M"
     "-drive", "if=pflash,format=raw,readonly=on,file=$OvmfCode"
     "-boot", "menu=on"
-    "-drive", "if=ide,format=raw,file=fat:rw:$EspDir"
+    "-drive", "if=ide,format=raw,file=fat:rw:$EspDirQemu"
     "-serial", "stdio"
     "-no-reboot"
     "-no-shutdown"
@@ -95,7 +103,7 @@ if ($Headless) {
 if ($Net) {
     # virtio-net-pci on QEMU user-mode networking: gateway 10.0.2.2, DNS 10.0.2.3
     # filter-dump captures every frame on net0 to a pcap for offline inspection.
-    $pcapPath = "$ProjectRoot\racos-net.pcap"
+    $pcapPath = "$RootQemu\racos-net.pcap"
     # disable-modern=on forces transitional virtio-net into legacy mode so our
     # PIO-based driver can talk to it. Without this, QEMU 4.0+ defaults q35 to
     # modern-only and our legacy I/O ops are ignored silently.
@@ -111,7 +119,7 @@ if ($Disk) {
     # Persistent SATA disk on ich9-ahci. The image is created lazily — first
     # run produces a 16 MiB sparse file that survives reboots and stays in the
     # project root next to the pcap.
-    $diskPath = "$ProjectRoot\racos-disk.img"
+    $diskPath = "$RootQemu\racos-disk.img"
     if (-not (Test-Path $diskPath)) {
         $size = 16MB
         $fs = [System.IO.File]::Create($diskPath)
