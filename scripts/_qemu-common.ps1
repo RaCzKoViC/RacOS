@@ -66,7 +66,13 @@ function Find-QemuPaths {
     .SYNOPSIS
         Locate qemu-system-x86_64.exe and the OVMF code firmware.
     .OUTPUTS
-        Hashtable @{ Exe = <path>; Ovmf = <path> }.
+        Hashtable @{ Exe = <path>; ExeGui = <path>; Ovmf = <path> }.
+        - Exe    : the console build of qemu-system-x86_64; use it when serial is
+                   wired to stdio so the launching terminal stays interactive.
+        - ExeGui : the windowed build (qemu-system-x86_64w.exe) which does NOT
+                   spawn an extra console window; use it for the graphical,
+                   self-contained interactive console. Falls back to Exe when the
+                   windowed build is not present.
         The OVMF path is required to be space-free (it is fed into a QEMU
         `-drive file=` option); installs under "C:\Program Files" are therefore
         only used for the executable, not the firmware.
@@ -81,6 +87,10 @@ function Find-QemuPaths {
     }
 
     $qemuDir = Split-Path -Parent $exe
+    # The 'w' suffix is QEMU's GUI-subsystem build: it shows the display window
+    # without opening a console window alongside it.
+    $exeGuiCandidate = Join-Path $qemuDir 'qemu-system-x86_64w.exe'
+    $exeGui = if (Test-Path -LiteralPath $exeGuiCandidate) { $exeGuiCandidate } else { $exe }
     $ovmfCandidates = @(
         'D:\qemu\share\edk2-x86_64-code.fd',
         (Join-Path $qemuDir 'share\edk2-x86_64-code.fd')
@@ -90,5 +100,5 @@ function Find-QemuPaths {
         throw "OVMF firmware (edk2-x86_64-code.fd) not found at a space-free path. Looked in: $($ovmfCandidates -join '; ')"
     }
 
-    return @{ Exe = $exe; Ovmf = $ovmf }
+    return @{ Exe = $exe; ExeGui = $exeGui; Ovmf = $ovmf }
 }

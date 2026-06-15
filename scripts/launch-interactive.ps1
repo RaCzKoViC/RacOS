@@ -1,5 +1,10 @@
-# Launch RacOS in QEMU with a graphical window for interactive use,
-# tee serial to a log file so we can both watch what's happening.
+# Launch RacOS in QEMU as a single, self-contained interactive window.
+#
+# The graphical (VGA) window is a full console: the kernel mirrors /dev/console
+# output to the framebuffer and feeds PS/2 keystrokes back into the console input
+# stream, so you type directly in the QEMU window. We use the windowed QEMU build
+# (qemu-system-x86_64w.exe) so no separate, empty terminal window is opened.
+# Serial is still teed to a log file for inspection.
 
 param([switch]$NoNet)
 
@@ -10,7 +15,7 @@ Set-Location $Root
 . (Join-Path $PSScriptRoot "_qemu-common.ps1")
 
 $qemu      = Find-QemuPaths
-$QemuExe   = $qemu.Exe
+$QemuExe   = $qemu.ExeGui     # GUI build: no extra console window
 $OvmfCode  = $qemu.Ovmf
 
 # QEMU mishandles spaces in -drive/-serial paths (e.g. a project under
@@ -53,4 +58,6 @@ if (-not $NoNet) {
 }
 
 Write-Host "Launching RacOS QEMU window. Serial log: $SerialLog"
+Write-Host "Click into the QEMU window and type - it is a full interactive console."
+Write-Host "Alt+F1..F6 switch virtual terminals."
 Start-Process -FilePath $QemuExe -ArgumentList $args -PassThru | Select-Object Id
