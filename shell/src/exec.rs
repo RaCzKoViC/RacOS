@@ -204,8 +204,8 @@ pub fn execute(node: &AstNode, env: &mut Env) -> i32 {
                     .flat_map(|w| expand::expand_word_list(w, env))
                     .collect()
             } else {
-                // No word list — use positional parameters (not implemented)
-                Vec::new()
+                // `for x; do ...` with no list iterates the positional params.
+                env.positional.clone()
             };
             let mut status = 0;
             for item in &items {
@@ -221,7 +221,7 @@ pub fn execute(node: &AstNode, env: &mut Env) -> i32 {
             for item in items {
                 for pattern in &item.patterns {
                     let pat = expand::expand_word(pattern, env);
-                    if pat == value || pat == "*" {
+                    if expand::pattern_match(&value, &pat) {
                         if let Some(body) = &item.body {
                             let s = execute(body, env);
                             env.last_status = s;
@@ -241,11 +241,31 @@ pub fn execute(node: &AstNode, env: &mut Env) -> i32 {
 
         AstNode::BraceGroup { body, redirects: _ } => execute(body, env),
 
-        AstNode::FunctionDef { name: _, body: _ } => {
-            // TODO: function table
+        AstNode::FunctionDef { name, body } => {
+            env.define_function(name.clone(), (**body).clone());
             0
         }
     }
+}
+
+/// Execute a shell function body with `args[1..]` bound as positional
+/// parameters. The previous positional parameters are restored afterward.
+/// `args[0]` is the function name. Recursion is bounded by `MAX_FN_DEPTH`.
+fn exec_function(body: &AstNode, args: &[String], env: &mut Env) -> i32 {
+    if env.fn_depth >= expand::MAX_FN_DEPTH {
+        let _ = libc_lite::write(2, b"racsh: function recursion limit exceeded\n");
+        return 1;
+    }
+
+    let saved_positional = core::mem::take(&mut env.positional);
+    env.positional = args[1..].to_vec();
+    env.fn_depth += 1;
+
+    let status = execute(body, env);
+
+    env.fn_depth -= 1;
+    env.positional = saved_positional;
+    status
 }
 
 /// Execute a simple command (assignments + words + redirects).
@@ -281,6 +301,11 @@ fn exec_simple(
         BuiltinResult::Ok(status) => return status,
         BuiltinResult::Exit(code) => libc_lite::exit(code),
         BuiltinResult::NotBuiltin => {}
+    }
+
+    // Shell function — runs in-process with positional parameters bound.
+    if let Some(body) = env.lookup_function(&expanded[0]) {
+        return exec_function(&body, &expanded, env);
     }
 
     // External command — resolve path and spawn

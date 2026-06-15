@@ -431,10 +431,16 @@ impl<'a> Lexer<'a> {
                     || ch == b'$'
                     || ch == b'!'
                     || ch == b'#'
-                    || ch == b'0'
                     || ch == b'@'
                     || ch == b'*' =>
             {
+                let mut name = String::new();
+                name.push(self.advance().unwrap() as char);
+                Ok(TokenKind::DollarVar(name))
+            }
+            // Positional parameter $0..$9. POSIX takes a single digit for the
+            // bare form (use ${12} for multi-digit), so consume exactly one.
+            Some(ch) if ch.is_ascii_digit() => {
                 let mut name = String::new();
                 name.push(self.advance().unwrap() as char);
                 Ok(TokenKind::DollarVar(name))

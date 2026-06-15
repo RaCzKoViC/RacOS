@@ -152,11 +152,13 @@ fn builtin_unset(args: &[String], env: &mut Env) -> BuiltinResult {
 }
 
 fn builtin_set(env: &Env, write_fn: &dyn Fn(&[u8])) -> BuiltinResult {
-    // Print all variables
-    // Access vars through the public API — iterate by checking known names
-    // For now, just print a placeholder
-    write_fn(b"(set: variable listing not yet implemented)\n");
-    let _ = env;
+    // Print all variables in `name=value` form (one per line).
+    for (name, value) in env.vars() {
+        write_fn(name.as_bytes());
+        write_fn(b"=");
+        write_fn(value.as_bytes());
+        write_fn(b"\n");
+    }
     BuiltinResult::Ok(0)
 }
 

@@ -5,9 +5,12 @@
 
 extern crate alloc;
 
-use crate::ast::{Word, WordPart};
+use crate::ast::{AstNode, Word, WordPart};
 use alloc::string::String;
 use alloc::vec::Vec;
+
+/// Maximum shell-function call nesting, to bound runaway recursion.
+pub const MAX_FN_DEPTH: u32 = 64;
 
 /// Shell environment: variables + last exit status.
 pub struct Env {
@@ -17,6 +20,14 @@ pub struct Env {
     pub last_status: i32,
     /// Shell PID ($$).
     pub shell_pid: i32,
+    /// Positional parameters $1, $2, ... (index 0 == $1).
+    pub positional: Vec<String>,
+    /// $0 — script or shell name.
+    pub arg0: String,
+    /// Defined shell functions: (name, body).
+    functions: Vec<(String, AstNode)>,
+    /// Current shell-function call depth (recursion guard).
+    pub fn_depth: u32,
 }
 
 impl Env {
@@ -25,6 +36,10 @@ impl Env {
             vars: Vec::new(),
             last_status: 0,
             shell_pid: pid,
+            positional: Vec::new(),
+            arg0: String::from("racsh"),
+            functions: Vec::new(),
+            fn_depth: 0,
         }
     }
 
@@ -55,6 +70,31 @@ impl Env {
         self.vars.retain(|(k, _)| k != name);
     }
 
+    /// Define (or redefine) a shell function.
+    pub fn define_function(&mut self, name: String, body: AstNode) {
+        for entry in self.functions.iter_mut() {
+            if entry.0 == name {
+                entry.1 = body;
+                return;
+            }
+        }
+        self.functions.push((name, body));
+    }
+
+    /// Look up a shell function body by name. Returns an owned clone so the
+    /// caller can borrow `self` mutably while executing the function.
+    pub fn lookup_function(&self, name: &str) -> Option<AstNode> {
+        self.functions
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, body)| body.clone())
+    }
+
+    /// Iterate over all variables as (name, value) — used by `set`/`export -p`.
+    pub fn vars(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.vars.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
     /// Get PATH as an iterator of directory strings.
     pub fn path_dirs(&self) -> PathDirs<'_> {
         PathDirs {
@@ -69,6 +109,10 @@ impl Env {
             vars: self.vars.clone(),
             last_status: self.last_status,
             shell_pid: self.shell_pid,
+            positional: self.positional.clone(),
+            arg0: self.arg0.clone(),
+            functions: self.functions.clone(),
+            fn_depth: self.fn_depth,
         }
     }
 }
@@ -139,10 +183,10 @@ fn expand_part(part: &WordPart, env: &Env, out: &mut String) {
             expand_command_sub(cmd, env, out);
         }
         WordPart::BraceExpansion(s) => {
-            // Post-MVP — treat as literal for now
-            out.push('{');
-            out.push_str(s);
-            out.push('}');
+            // This part carries `${...}` parameter-expansion content (the lexer
+            // emits DollarBrace here). Brace *list* expansion {a,b,c} is handled
+            // separately on literal text in expand_word_list().
+            expand_param_brace(s, env, out);
         }
         WordPart::Glob(_) => {
             // Glob expansion requires filesystem access — pass through as literal
@@ -163,18 +207,116 @@ fn expand_part(part: &WordPart, env: &Env, out: &mut String) {
 /// Expand a variable name to its value.
 fn expand_variable(name: &str, env: &Env, out: &mut String) {
     match name {
-        "?" => {
-            format_i32(env.last_status, out);
-        }
-        "$" => {
-            format_i32(env.shell_pid, out);
+        "?" => format_i32(env.last_status, out),
+        "$" => format_i32(env.shell_pid, out),
+        "#" => format_i32(env.positional.len() as i32, out),
+        "0" => out.push_str(&env.arg0),
+        "@" | "*" => {
+            // Join positional parameters with a single space. (Proper "$@"
+            // word-splitting semantics are a post-MVP refinement.)
+            for (i, p) in env.positional.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                out.push_str(p);
+            }
         }
         _ => {
+            // Positional parameter $1..$9 (and multi-digit via ${12}).
+            if !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()) {
+                if let Ok(idx) = parse_index(name) {
+                    if idx >= 1 {
+                        if let Some(val) = env.positional.get(idx - 1) {
+                            out.push_str(val);
+                        }
+                    }
+                }
+                return;
+            }
             if let Some(val) = env.get(name) {
                 out.push_str(val);
             }
         }
     }
+}
+
+/// Parse an ASCII-decimal string into a usize index.
+fn parse_index(s: &str) -> Result<usize, ()> {
+    let mut n: usize = 0;
+    for &b in s.as_bytes() {
+        if !b.is_ascii_digit() {
+            return Err(());
+        }
+        n = n.wrapping_mul(10).wrapping_add((b - b'0') as usize);
+    }
+    Ok(n)
+}
+
+/// Expand a `${...}` parameter expansion. Supports:
+///   ${NAME}            — value (empty if unset)
+///   ${#NAME}           — length of value
+///   ${NAME:-word}      — value if set & non-empty, else `word`
+///   ${NAME:+word}      — `word` if set & non-empty, else empty
+///   ${NAME:?word}      — value if set & non-empty, else error `word` to stderr
+/// The fallback `word` is taken literally (no nested expansion in this MVP).
+fn expand_param_brace(content: &str, env: &Env, out: &mut String) {
+    // ${#NAME} — length
+    if let Some(rest) = content.strip_prefix('#') {
+        let mut val = String::new();
+        expand_variable(rest, env, &mut val);
+        format_i32(val.len() as i32, out);
+        return;
+    }
+
+    // Look for a modifier operator ':-', ':+', ':?'.
+    if let Some(colon) = content.find(':') {
+        let name = &content[..colon];
+        let bytes = content.as_bytes();
+        if colon + 1 < bytes.len() {
+            let op = bytes[colon + 1];
+            let word = &content[colon + 2..];
+            let mut val = String::new();
+            expand_variable(name, env, &mut val);
+            let set_nonempty = !val.is_empty();
+            match op {
+                b'-' => {
+                    if set_nonempty {
+                        out.push_str(&val);
+                    } else {
+                        out.push_str(word);
+                    }
+                    return;
+                }
+                b'+' => {
+                    if set_nonempty {
+                        out.push_str(word);
+                    }
+                    return;
+                }
+                b'?' => {
+                    if set_nonempty {
+                        out.push_str(&val);
+                    } else {
+                        let _ = libc_lite::write(2, b"racsh: ");
+                        let _ = libc_lite::write(2, name.as_bytes());
+                        let _ = libc_lite::write(2, b": ");
+                        let _ = libc_lite::write(2, word.as_bytes());
+                        let _ = libc_lite::write(2, b"\n");
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Plain ${NAME}
+    expand_variable(content, env, out);
+}
+
+/// Public glob/pattern matcher (used by `case`).
+pub fn pattern_match(value: &str, pattern: &str) -> bool {
+    glob_match(value, pattern)
 }
 
 /// Expand $VAR references within a double-quoted string.
@@ -188,17 +330,41 @@ fn expand_dollar_in_string(s: &str, env: &Env, out: &mut String) {
                 out.push('$');
                 break;
             }
-            // Collect variable name (alphanumeric + _)
-            let start = i;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric()
-                    || bytes[i] == b'_'
-                    || (i == start && (bytes[i] == b'?' || bytes[i] == b'$')))
-            {
+            // ${...} parameter expansion inside double quotes.
+            if bytes[i] == b'{' {
                 i += 1;
-                if i == start + 1 && (bytes[start] == b'?' || bytes[start] == b'$') {
-                    break; // Single-char specials
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'}' {
+                    i += 1;
                 }
+                let content = &s[start..i];
+                if i < bytes.len() {
+                    i += 1; // consume '}'
+                }
+                expand_param_brace(content, env, out);
+                continue;
+            }
+            // Single-character special parameters: $? $$ $# $@ $* $! and $0..$9.
+            let c = bytes[i];
+            if c == b'?'
+                || c == b'$'
+                || c == b'#'
+                || c == b'@'
+                || c == b'*'
+                || c == b'!'
+                || c.is_ascii_digit()
+            {
+                let one = [c];
+                // SAFETY: `c` is a single ASCII byte, always valid UTF-8.
+                let name = unsafe { core::str::from_utf8_unchecked(&one) };
+                expand_variable(name, env, out);
+                i += 1;
+                continue;
+            }
+            // Named variable: [A-Za-z_][A-Za-z0-9_]*
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
             }
             if i > start {
                 let var_name = &s[start..i];
@@ -338,7 +504,9 @@ pub fn expand_word_list(word: &Word, env: &Env) -> Vec<String> {
             WordPart::SingleQuoted(s) => complete_word.push_str(s),
             WordPart::DoubleQuoted(s) => complete_word.push_str(s),
             WordPart::BraceExpansion(s) => {
-                complete_word.push_str(s);
+                // `${...}` parameter expansion — expand to its value, not the
+                // literal braces (which would corrupt brace-list detection).
+                expand_param_brace(s, env, &mut complete_word);
             }
             _ => {}
         }
@@ -414,6 +582,9 @@ fn reconstruct_pattern(word: &Word, env: &Env) -> String {
                 expand_command_sub(cmd, env, &mut expanded);
                 pattern.push_str(&expanded);
             }
+            WordPart::BraceExpansion(s) => {
+                expand_param_brace(s, env, &mut pattern);
+            }
             WordPart::Glob(_) => match part {
                 WordPart::Glob(crate::ast::GlobPattern::Star) => pattern.push('*'),
                 WordPart::Glob(crate::ast::GlobPattern::Question) => pattern.push('?'),
@@ -424,7 +595,6 @@ fn reconstruct_pattern(word: &Word, env: &Env) -> String {
                 }
                 _ => {}
             },
-            _ => {}
         }
     }
     pattern
