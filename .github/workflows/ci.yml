@@ -152,7 +152,7 @@ jobs:
           echo "Using OVMF=$OVMF"
           qemu-system-x86_64 --version | head -n 1
           timeout 15 qemu-system-x86_64 \
-            -machine q35 -cpu qemu64 -m 512M \
+            -machine q35 -cpu qemu64,+smep,+smap -m 512M \
             -drive if=pflash,format=raw,file=$OVMF,readonly=on \
             -drive file=fat:rw:esp,format=raw \
             -serial stdio -display none -no-reboot \
