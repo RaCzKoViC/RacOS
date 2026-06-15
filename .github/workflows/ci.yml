@@ -29,8 +29,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain (pinned via rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@nightly-2026-05-21
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-21
           components: rust-src, llvm-tools-preview
           targets: x86_64-unknown-none, x86_64-unknown-uefi
 
@@ -103,8 +104,9 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly-2026-05-21
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-21
           components: rust-src
       - name: Install nasm
         run: sudo apt-get update && sudo apt-get install -y nasm
@@ -121,8 +123,9 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly-2026-05-21
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-21
           components: rust-src, llvm-tools-preview
           targets: x86_64-unknown-none, x86_64-unknown-uefi
       - name: Install QEMU, OVMF, nasm, python
@@ -208,8 +211,9 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly-2026-05-21
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-21
           components: rust-src, llvm-tools-preview
           targets: x86_64-unknown-none, x86_64-unknown-uefi
       - name: Install QEMU, OVMF, nasm, python
@@ -301,8 +305,9 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly-2026-05-21
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-21
           components: rust-src, llvm-tools-preview
           targets: x86_64-unknown-none, x86_64-unknown-uefi
       - name: Install QEMU, OVMF, nasm, python, ncat
@@ -391,8 +396,9 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly-2026-05-21
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-21
           components: rustfmt, clippy, rust-src
           targets: x86_64-unknown-none, x86_64-unknown-uefi
       - name: rustfmt check
