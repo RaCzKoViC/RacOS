@@ -80,12 +80,6 @@ fn print_i32(n: i32) {
     }
 }
 
-fn yield_some() {
-    for _ in 0..8 {
-        let _ = sched_yield();
-    }
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     println("=== RacOS System Test Suite ===");
@@ -255,8 +249,6 @@ fn test_signal_default_terminate() {
     let pid = spawn_args(path, &argv);
     check!("spawn /bin/sleep returns Ok", pid.is_ok());
     if let Ok(pid) = pid {
-        yield_some();
-
         let killed = kill(pid, SIGTERM);
         check!("kill(SIGTERM) returns Ok", killed.is_ok());
 
@@ -284,8 +276,6 @@ fn test_sigchld_waitpid() {
     let pid = spawn_args(path, &argv);
     check!("spawn child for SIGCHLD test", pid.is_ok());
     if let Ok(pid) = pid {
-        yield_some();
-
         let mut status: i32 = -99;
         let before = waitpid(pid, &mut status, WNOHANG);
         check!(
@@ -338,8 +328,6 @@ fn test_exec_loop_memory_cleanup() {
             all_ok = false;
         }
     }
-
-    yield_some();
 
     let after = read_memfree_kb();
     check!("read /proc/meminfo after loop", after.is_some());
