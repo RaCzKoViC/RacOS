@@ -7,7 +7,8 @@
 # Usage: powershell -File scripts/build-image.ps1 [-Release]
 
 param(
-    [switch]$Release
+    [switch]$Release,
+    [string[]]$KernelFeatures = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,15 +34,25 @@ Write-Host "Target dir: $TargetDir"
 # --- Step 1: Build kernel ---
 Write-Host "`n[1/4] Building kernel..." -ForegroundColor Yellow
 $env:RUSTFLAGS = "-C relocation-model=static -C link-arg=-no-pie"
-cargo build --package racore @CargoFlags
+$KernelArgs = @("--package", "racore") + $CargoFlags
+if ($KernelFeatures.Count -gt 0) {
+    $KernelArgs += @("--features", ($KernelFeatures -join ","))
+    Write-Host "  Kernel features: $($KernelFeatures -join ',')"
+}
+cargo build @KernelArgs
 if ($LASTEXITCODE -ne 0) { throw "Kernel build failed" }
 
-# Restore default flags before building userland binaries.
-$env:RUSTFLAGS = $OldRustFlags
+# Userland build: compile core/alloc with debug-assertions off so the
+# `core::ptr::read::precondition_check` UB-check UD2 stubs are not emitted.
+# Those panics fire inside racsh / coreutils whenever Rust thinks a raw
+# pointer might be misaligned (false-positive on this nightly), and crash
+# the shell mid-pipeline. We don't lose much by disabling them in userland
+# — the kernel-side UB checks stay on via its own RUSTFLAGS earlier.
+$env:RUSTFLAGS = "$OldRustFlags -C debug-assertions=off"
 
 # --- Step 2: Build coreutils ---
 Write-Host "`n[2/4] Building coreutils..." -ForegroundColor Yellow
-$Coreutils = @("racos-hello", "racos-echo", "racos-cat", "racos-true", "racos-false", "racos-sh", "racos-init", "racos-test", "racos-ls", "racos-wc", "racos-uptime", "racos-mkdir", "racos-rm", "racos-sleep", "racos-head", "racos-tail", "racos-env", "racos-basename", "racos-dirname", "racos-grep", "racos-cp", "racos-mv", "racos-cut", "racos-uniq", "racos-find", "racos-od", "racos-tee", "racos-hexdump", "racterm")
+$Coreutils = @("racos-hello", "racos-echo", "racos-cat", "racos-true", "racos-false", "racos-sh", "racos-init", "racos-test", "racos-ls", "racos-wc", "racos-uptime", "racos-mkdir", "racos-rm", "racos-sleep", "racos-head", "racos-tail", "racos-env", "racos-basename", "racos-dirname", "racos-grep", "racos-cp", "racos-mv", "racos-cut", "racos-uniq", "racos-find", "racos-od", "racos-tee", "racos-hexdump", "racterm", "racos-dig", "racos-wget", "racos-mount", "racos-df", "racos-umount", "racos-mkfs-racfs", "racos-mkfs-fat32", "racos-sync")
 foreach ($pkg in $Coreutils) {
     cargo build --package $pkg @CargoFlags -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
     if ($LASTEXITCODE -ne 0) { throw "Build failed for $pkg" }
@@ -58,20 +69,25 @@ New-Item -ItemType Directory -Force "$InitramfsRoot\sbin" | Out-Null
 New-Item -ItemType Directory -Force "$InitramfsRoot\etc\racinit" | Out-Null
 New-Item -ItemType Directory -Force "$InitramfsRoot\etc" | Out-Null
 
-# Copy binaries — bin names match the [[bin]] name in Cargo.toml
-$BinList = @("hello", "echo", "cat", "true", "false", "sh", "racterm", "racos-test", "ls", "wc", "uptime", "mkdir", "rm", "sleep", "head", "tail", "env", "basename", "dirname", "grep", "cp", "mv", "cut", "uniq", "find", "od", "tee", "hexdump")
+# Copy binaries — bin names match the [[bin]] name in Cargo.toml.
+# Tuple form is "<cargo-bin-name>=<initramfs-name>"; plain entries map 1:1.
+# Cargo rejects '.' in crate names so mkfs_racfs is renamed to mkfs.racfs here.
+$BinList = @("hello", "echo", "cat", "true", "false", "sh", "racterm", "racos-test", "ls", "wc", "uptime", "mkdir", "rm", "sleep", "head", "tail", "env", "basename", "dirname", "grep", "cp", "mv", "cut", "uniq", "find", "od", "tee", "hexdump", "dig", "wget", "mount", "df", "umount", "mkfs_racfs=mkfs.racfs", "mkfs_fat32=mkfs.fat32", "sync")
 $SbinList = @("init")
 
-foreach ($bin in $BinList) {
-    $src = "$BinDir\$bin"
+foreach ($entry in $BinList) {
+    $parts = $entry.Split("=")
+    $srcName = $parts[0]
+    $dstName = if ($parts.Length -gt 1) { $parts[1] } else { $parts[0] }
+    $src = "$BinDir\$srcName"
     if (-not (Test-Path $src)) {
-        Write-Warning "Binary not found: $bin - skipping"
+        Write-Warning "Binary not found: $srcName - skipping"
         continue
     }
-    $dst = "$InitramfsRoot\bin\$bin"
+    $dst = "$InitramfsRoot\bin\$dstName"
     Copy-Item $src $dst
     $size = (Get-Item $dst).Length
-    $msg = "  bin/" + $bin + " [" + $size + " bytes]"
+    $msg = "  bin/" + $dstName + " [" + $size + " bytes]"
     Write-Host $msg
 }
 

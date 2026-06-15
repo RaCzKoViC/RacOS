@@ -8,10 +8,10 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use super::inode::{InodeOps, InodeNum, VfsResult, VfsError, DirEntry};
+use super::inode::{DirEntry, InodeNum, InodeOps, VfsError, VfsResult};
 
 /// A filesystem driver that can provide inodes.
-pub trait Filesystem: Send + Sync {
+pub trait Filesystem: Send + Sync + 'static {
     /// Get the root inode of this filesystem.
     fn root_inode(&self) -> Arc<dyn InodeOps>;
 
@@ -20,6 +20,11 @@ pub trait Filesystem: Send + Sync {
 
     /// Filesystem name (e.g., "initramfs", "devfs", "tmpfs").
     fn name(&self) -> &str;
+
+    /// Downcast hook so syscall handlers can reach the concrete writable
+    /// backing store of a mount (instead of looking it up by name in a
+    /// global singleton, which mixes up multiple mounts of the same FS).
+    fn as_any(&self) -> &dyn core::any::Any;
 }
 
 /// A mount point entry.
@@ -35,9 +40,7 @@ pub struct MountTable {
 
 impl MountTable {
     pub fn new() -> Self {
-        MountTable {
-            mounts: Vec::new(),
-        }
+        MountTable { mounts: Vec::new() }
     }
 
     /// Mount a filesystem at the given path.
@@ -52,11 +55,7 @@ impl MountTable {
             existing.fs = fs;
             return;
         }
-        crate::serial::serial_println!(
-            "[   VFS   ] Mounting '{}' at {}",
-            fs.name(),
-            path
-        );
+        crate::serial::serial_println!("[   VFS   ] Mounting '{}' at {}", fs.name(), path);
         self.mounts.push(MountEntry {
             path: String::from(path),
             fs,
@@ -71,11 +70,7 @@ impl MountTable {
         if let Some(idx) = self.mounts.iter().position(|m| m.path == path) {
             let fs_name = String::from(self.mounts[idx].fs.name());
             self.mounts.remove(idx);
-            crate::serial::serial_println!(
-                "[   VFS   ] Unmounted '{}' from {}",
-                fs_name,
-                path
-            );
+            crate::serial::serial_println!("[   VFS   ] Unmounted '{}' from {}", fs_name, path);
             Ok(())
         } else {
             Err(VfsError::NotFound)
@@ -86,6 +81,37 @@ impl MountTable {
     pub fn is_mounted(&self, path: &str) -> bool {
         self.mounts.iter().any(|m| m.path == path)
     }
+
+    /// Snapshot of all active mount entries (for /proc/mounts).
+    pub fn entries(&self) -> &[MountEntry] {
+        &self.mounts
+    }
+}
+
+/// Flush every block-backed mount in the global mount table.
+/// Returns the number of mounts successfully synced. Errors are swallowed
+/// because partial progress is still useful for crash safety.
+///
+/// # Safety
+/// Caller must ensure the global mount table has been initialised.
+pub unsafe fn flush_all() -> usize {
+    let mt = mount_table();
+    let mut count = 0;
+    for entry in mt.mounts.iter() {
+        let any = entry.fs.as_any();
+        if let Some(racfs_fs) = any.downcast_ref::<super::racfs::RacfsFilesystem>() {
+            if racfs_fs.inner().sync().is_ok() {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+impl MountTable {
+    // Re-open the impl block so subsequent methods (if any) compile.
+    #[allow(dead_code)]
+    fn _flush_stub(&self) {}
 
     /// Resolve a path to a filesystem and relative path.
     /// Returns the longest-prefix matching mount and the remainder of the path.
@@ -99,8 +125,7 @@ impl MountTable {
             } else if path == mpath {
                 true
             } else {
-                path.starts_with(mpath)
-                    && path.as_bytes().get(mpath.len()).copied() == Some(b'/')
+                path.starts_with(mpath) && path.as_bytes().get(mpath.len()).copied() == Some(b'/')
             };
             if is_match {
                 let len = entry.path.len();

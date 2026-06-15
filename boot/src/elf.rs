@@ -91,8 +91,7 @@ pub fn validate_header(data: &[u8]) -> Result<Elf64Info, &'static str> {
         return Err("Entry point is zero");
     }
 
-    let phdr_end = hdr.e_phoff as usize
-        + (hdr.e_phnum as usize) * (hdr.e_phentsize as usize);
+    let phdr_end = hdr.e_phoff as usize + (hdr.e_phnum as usize) * (hdr.e_phentsize as usize);
     if phdr_end > data.len() {
         return Err("Program headers extend beyond file");
     }
@@ -111,8 +110,7 @@ pub fn validate_header(data: &[u8]) -> Result<Elf64Info, &'static str> {
 /// The caller must ensure `index < info.phdr_count` and that the
 /// data slice is large enough to contain all program headers.
 pub unsafe fn get_phdr(data: &[u8], info: &Elf64Info, index: u16) -> Elf64Phdr {
-    let offset = info.phdr_offset as usize
-        + (index as usize) * (info.phdr_entry_size as usize);
+    let offset = info.phdr_offset as usize + (index as usize) * (info.phdr_entry_size as usize);
     let ptr = data.as_ptr().add(offset) as *const Elf64Phdr;
     core::ptr::read_unaligned(ptr)
 }

@@ -13,7 +13,11 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
             0
         } else {
             let mut len = 0;
-            unsafe { while *file_ptr.add(len) != 0 { len += 1; } }
+            unsafe {
+                while *file_ptr.add(len) != 0 {
+                    len += 1;
+                }
+            }
             let path = unsafe { core::slice::from_raw_parts(file_ptr, len + 1) };
             match libc_lite::open(path, 0, 0) {
                 Ok(fd) => fd,
@@ -81,7 +85,7 @@ fn output_if_unique(line: &[u8], prev_line: &mut [u8], prev_len: &mut usize) {
 
     if is_unique {
         let _ = libc_lite::write(1, line);
-        
+
         // Update previous line
         for (i, &b) in line.iter().enumerate() {
             if i < prev_line.len() {

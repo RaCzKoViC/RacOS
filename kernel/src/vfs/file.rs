@@ -9,15 +9,15 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::inode::{InodeOps, VfsResult, VfsError, InodeNum};
+use super::inode::{InodeNum, InodeOps, VfsError, VfsResult};
 
 /// Open file flags (KERNEL_ABI.md §6.2).
 pub mod flags {
     pub const O_RDONLY: u32 = 0x0000;
     pub const O_WRONLY: u32 = 0x0001;
-    pub const O_RDWR: u32   = 0x0002;
-    pub const O_CREAT: u32  = 0x0040;
-    pub const O_TRUNC: u32  = 0x0200;
+    pub const O_RDWR: u32 = 0x0002;
+    pub const O_CREAT: u32 = 0x0040;
+    pub const O_TRUNC: u32 = 0x0200;
     pub const O_APPEND: u32 = 0x0400;
 
     pub const ACCESS_MODE_MASK: u32 = 0x0003;

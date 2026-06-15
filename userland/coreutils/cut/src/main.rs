@@ -8,7 +8,7 @@ use libc_lite;
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     let mut field = 1usize;
-    let mut delim = '\t';  // Default tab
+    let mut delim = '\t'; // Default tab
     let mut file_idx = 0;
 
     // Parse arguments
@@ -20,7 +20,11 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
             continue;
         }
         let mut arg_len = 0usize;
-        unsafe { while *arg_ptr.add(arg_len) != 0 { arg_len += 1; } }
+        unsafe {
+            while *arg_ptr.add(arg_len) != 0 {
+                arg_len += 1;
+            }
+        }
         let arg_bytes = unsafe { core::slice::from_raw_parts(arg_ptr, arg_len) };
 
         if arg_bytes.len() > 0 && arg_bytes[0] == b'-' {
@@ -31,8 +35,14 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
                         i += 1;
                         let num_ptr = unsafe { *argv.add(i as usize) };
                         let mut num_len = 0;
-                        unsafe { while *num_ptr.add(num_len) != 0 { num_len += 1; } }
-                        if let Some(n) = parse_int(unsafe { core::slice::from_raw_parts(num_ptr, num_len) }) {
+                        unsafe {
+                            while *num_ptr.add(num_len) != 0 {
+                                num_len += 1;
+                            }
+                        }
+                        if let Some(n) =
+                            parse_int(unsafe { core::slice::from_raw_parts(num_ptr, num_len) })
+                        {
                             field = n as usize;
                         }
                     }
@@ -62,9 +72,15 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     } else {
         for idx in file_idx..argc {
             let file_ptr = unsafe { *argv.add(idx as usize) };
-            if file_ptr.is_null() { continue; }
+            if file_ptr.is_null() {
+                continue;
+            }
             let mut len = 0;
-            unsafe { while *file_ptr.add(len) != 0 { len += 1; } }
+            unsafe {
+                while *file_ptr.add(len) != 0 {
+                    len += 1;
+                }
+            }
             let path = unsafe { core::slice::from_raw_parts(file_ptr, len + 1) };
             match libc_lite::open(path, 0, 0) {
                 Ok(fd) => {

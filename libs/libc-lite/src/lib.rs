@@ -92,6 +92,9 @@ pub const SYS_REBOOT: u64 = 74;
 pub const SYS_HOSTNAME: u64 = 75;
 pub const SYS_GETRANDOM: u64 = 76;
 pub const SYS_CLONE: u64 = 77;
+pub const SYS_GETHOSTBYNAME: u64 = 78;
+pub const SYS_MKFS: u64 = 79;
+pub const SYS_SYNC: u64 = 80;
 pub const SYS_PTHREAD_CREATE: u64 = 0x400;
 
 // ─────────────────────────────────────────────────
@@ -227,82 +230,139 @@ pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6:
 
 /// Zakończ proces z kodem wyjścia.
 pub fn exit(status: i32) -> ! {
-    unsafe { syscall1(SYS_EXIT, status as u64); }
+    unsafe {
+        syscall1(SYS_EXIT, status as u64);
+    }
     loop {}
 }
 
 /// Odczytaj z deskryptora pliku.
 pub fn read(fd: i32, buf: &mut [u8]) -> Result<usize, i64> {
-    let ret = unsafe { syscall3(SYS_READ, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) };
-    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
+    let ret = unsafe {
+        syscall3(
+            SYS_READ,
+            fd as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 /// Zapisz do deskryptora pliku.
 pub fn write(fd: i32, buf: &[u8]) -> Result<usize, i64> {
     let ret = unsafe { syscall3(SYS_WRITE, fd as u64, buf.as_ptr() as u64, buf.len() as u64) };
-    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 /// Otwórz plik.
 pub fn open(path: &[u8], flags: u32, mode: u32) -> Result<i32, i64> {
     let ret = unsafe { syscall3(SYS_OPEN, path.as_ptr() as u64, flags as u64, mode as u64) };
-    if ret < 0 { Err(ret) } else { Ok(ret as i32) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as i32)
+    }
 }
 
 /// Zamknij deskryptor pliku.
 pub fn close(fd: i32) -> Result<(), i64> {
     let ret = unsafe { syscall1(SYS_CLOSE, fd as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Pobierz informacje o pliku.
 pub fn stat(path: &[u8], buf: &mut [u8; 80]) -> Result<(), i64> {
     let ret = unsafe { syscall2(SYS_STAT, path.as_ptr() as u64, buf.as_mut_ptr() as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Utwórz anonimowy pipe.
 pub fn pipe(fds: &mut [i32; 2]) -> Result<(), i64> {
     let ret = unsafe { syscall1(SYS_PIPE, fds.as_mut_ptr() as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Zduplikuj deskryptor pliku.
 pub fn dup(oldfd: i32) -> Result<i32, i64> {
     let ret = unsafe { syscall1(SYS_DUP, oldfd as u64) };
-    if ret < 0 { Err(ret) } else { Ok(ret as i32) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as i32)
+    }
 }
 
 /// Zduplikuj deskryptor na konkretny numer.
 pub fn dup2(oldfd: i32, newfd: i32) -> Result<i32, i64> {
     let ret = unsafe { syscall2(SYS_DUP2, oldfd as u64, newfd as u64) };
-    if ret < 0 { Err(ret) } else { Ok(ret as i32) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as i32)
+    }
 }
 
 /// Uruchom nowy program w bieżącym procesie (zastępuje obraz).
 pub fn exec(path: &[u8]) -> Result<(), i64> {
     let ret = unsafe { syscall3(SYS_EXEC, path.as_ptr() as u64, 0, 0) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Utwórz nowy proces potomny z ELF.
 pub fn spawn(path: &[u8]) -> Result<i32, i64> {
     let ret = unsafe { syscall3(SYS_SPAWN, path.as_ptr() as u64, 0, 0) };
-    if ret < 0 { Err(ret) } else { Ok(ret as i32) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as i32)
+    }
 }
 
 /// Utwórz nowy proces potomny z ELF, przekazując argumenty.
 /// `argv` to tablica wskaźników do null-terminated stringów, zakończona NULL.
 pub fn spawn_args(path: &[u8], argv: &[*const u8]) -> Result<i32, i64> {
     let ret = unsafe { syscall3(SYS_SPAWN, path.as_ptr() as u64, argv.as_ptr() as u64, 0) };
-    if ret < 0 { Err(ret) } else { Ok(ret as i32) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as i32)
+    }
 }
 
 /// Czekaj na zakończenie procesu potomnego.
 /// Zwraca (pid, exit_status).
 pub fn wait(status: &mut i32) -> Result<i32, i64> {
     let ret = unsafe { syscall3(SYS_WAIT, -1i32 as u64, status as *mut i32 as u64, 0) };
-    if ret < 0 { Err(ret) } else { Ok(ret as i32) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as i32)
+    }
 }
 
 /// Pobierz PID bieżącego procesu.
@@ -313,43 +373,71 @@ pub fn getpid() -> i32 {
 /// Wyślij sygnał do procesu.
 pub fn kill(pid: i32, sig: i32) -> Result<(), i64> {
     let ret = unsafe { syscall2(SYS_KILL, pid as u64, sig as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Zmień bieżący katalog roboczy.
 pub fn chdir(path: &[u8]) -> Result<(), i64> {
     let ret = unsafe { syscall1(SYS_CHDIR, path.as_ptr() as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Pobierz bieżący katalog roboczy.
 pub fn getcwd(buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe { syscall2(SYS_GETCWD, buf.as_mut_ptr() as u64, buf.len() as u64) };
-    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 /// Ustaw grupę procesów.
 pub fn setpgid(pid: u32, pgid: u32) -> Result<(), i64> {
     let ret = unsafe { syscall2(SYS_SETPGID, pid as u64, pgid as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Pobierz grupę procesów.
 pub fn getpgid(pid: u32) -> Result<u32, i64> {
     let ret = unsafe { syscall1(SYS_GETPGID, pid as u64) };
-    if ret < 0 { Err(ret) } else { Ok(ret as u32) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as u32)
+    }
 }
 
 /// Utwórz nową sesję.
 pub fn setsid() -> Result<u32, i64> {
     let ret = unsafe { syscall0(SYS_SETSID) };
-    if ret < 0 { Err(ret) } else { Ok(ret as u32) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as u32)
+    }
 }
 
 /// Kontrola urządzenia I/O.
 pub fn ioctl(fd: i32, request: u32, arg: u64) -> Result<i64, i64> {
     let ret = unsafe { syscall3(SYS_IOCTL, fd as u64, request as u64, arg) };
-    if ret < 0 { Err(ret) } else { Ok(ret) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret)
+    }
 }
 
 /// Timespec — czas w sekundach + nanosekundach.
@@ -365,9 +453,17 @@ pub const CLOCK_MONOTONIC: u32 = 1;
 /// Pobierz aktualny czas z zegara `clock_id`.
 pub fn clock_gettime(clock_id: u32, tp: &mut Timespec) -> Result<(), i64> {
     let ret = unsafe {
-        syscall2(SYS_CLOCK_GETTIME, clock_id as u64, tp as *mut Timespec as u64)
+        syscall2(
+            SYS_CLOCK_GETTIME,
+            clock_id as u64,
+            tp as *mut Timespec as u64,
+        )
     };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Wpis katalogowy z getdents.
@@ -382,27 +478,48 @@ pub struct DirEntry {
 /// Zwraca liczbę bajtów (0 = koniec).
 pub fn getdents(fd: i32, buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
-        syscall3(SYS_GETDENTS, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
+        syscall3(
+            SYS_GETDENTS,
+            fd as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
     };
-    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 /// Utwórz katalog.
 pub fn mkdir(path: &[u8], mode: u32) -> Result<(), i64> {
     let ret = unsafe { syscall2(SYS_MKDIR, path.as_ptr() as u64, mode as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Usuń plik lub pusty katalog.
 pub fn unlink(path: &[u8]) -> Result<(), i64> {
     let ret = unsafe { syscall1(SYS_UNLINK, path.as_ptr() as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Fork the current process. Returns 0 in child, child PID in parent.
 pub fn fork() -> Result<i32, i64> {
     let ret = unsafe { syscall0(SYS_FORK) };
-    if ret < 0 { Err(ret) } else { Ok(ret as i32) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as i32)
+    }
 }
 
 /// Clone flags.
@@ -412,8 +529,21 @@ pub const CLONE_THREAD: u32 = 0x00010000;
 /// Clone the current process/thread.
 /// For threads: clone(CLONE_VM | CLONE_THREAD, stack, 0, 0, 0)
 pub fn clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8) -> Result<i32, i64> {
-    let ret = unsafe { syscall5(SYS_CLONE, flags as u64, stack as u64, ptid as u64, tls as u64, ctid as u64) };
-    if ret < 0 { Err(ret) } else { Ok(ret as i32) }
+    let ret = unsafe {
+        syscall5(
+            SYS_CLONE,
+            flags as u64,
+            stack as u64,
+            ptid as u64,
+            tls as u64,
+            ctid as u64,
+        )
+    };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as i32)
+    }
 }
 
 /// Signal action structure.
@@ -428,11 +558,19 @@ pub const SIG_DFL: u64 = 0;
 pub const SIG_IGN: u64 = 1;
 
 /// Install a signal handler.
-pub fn sigaction(sig: i32, act: Option<&SigAction>, oldact: Option<&mut SigAction>) -> Result<(), i64> {
+pub fn sigaction(
+    sig: i32,
+    act: Option<&SigAction>,
+    oldact: Option<&mut SigAction>,
+) -> Result<(), i64> {
     let act_ptr = act.map(|a| a as *const SigAction as u64).unwrap_or(0);
     let oldact_ptr = oldact.map(|a| a as *mut SigAction as u64).unwrap_or(0);
     let ret = unsafe { syscall3(SYS_SIGACTION, sig as u64, act_ptr, oldact_ptr) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// PollFd for poll().
@@ -452,9 +590,18 @@ pub const POLLNVAL: i16 = 0x0020;
 /// Poll file descriptors.
 pub fn poll(fds: &mut [PollFd], timeout_ms: i32) -> Result<i32, i64> {
     let ret = unsafe {
-        syscall3(SYS_POLL, fds.as_mut_ptr() as u64, fds.len() as u64, timeout_ms as u64)
+        syscall3(
+            SYS_POLL,
+            fds.as_mut_ptr() as u64,
+            fds.len() as u64,
+            timeout_ms as u64,
+        )
     };
-    if ret < 0 { Err(ret) } else { Ok(ret as i32) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as i32)
+    }
 }
 
 /// Get parent PID.
@@ -475,13 +622,21 @@ pub fn getgid() -> u32 {
 /// Set UID.
 pub fn setuid(uid: u32) -> Result<(), i64> {
     let ret = unsafe { syscall1(SYS_SETUID, uid as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Set GID.
 pub fn setgid(gid: u32) -> Result<(), i64> {
     let ret = unsafe { syscall1(SYS_SETGID, gid as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Get effective UID.
@@ -496,9 +651,16 @@ pub fn getegid() -> u32 {
 
 /// Sleep for specified duration.
 pub fn nanosleep(sec: u64, nsec: u64) -> Result<(), i64> {
-    let ts = Timespec { tv_sec: sec, tv_nsec: nsec };
+    let ts = Timespec {
+        tv_sec: sec,
+        tv_nsec: nsec,
+    };
     let ret = unsafe { syscall2(SYS_NANOSLEEP, &ts as *const Timespec as u64, 0) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Sleep for given milliseconds.
@@ -509,13 +671,21 @@ pub fn sleep_ms(ms: u64) -> Result<(), i64> {
 /// Stat a file by fd.
 pub fn fstat(fd: i32, buf: &mut [u8; 80]) -> Result<(), i64> {
     let ret = unsafe { syscall2(SYS_FSTAT, fd as u64, buf.as_mut_ptr() as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Seek within a file.
 pub fn lseek(fd: i32, offset: i64, whence: i32) -> Result<i64, i64> {
     let ret = unsafe { syscall3(SYS_LSEEK, fd as u64, offset as u64, whence as u64) };
-    if ret < 0 { Err(ret) } else { Ok(ret) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret)
+    }
 }
 pub const SEEK_SET: i32 = 0;
 pub const SEEK_CUR: i32 = 1;
@@ -524,7 +694,11 @@ pub const SEEK_END: i32 = 2;
 /// Check file accessibility.
 pub fn access(path: &[u8], mode: u32) -> Result<(), i64> {
     let ret = unsafe { syscall2(SYS_ACCESS, path.as_ptr() as u64, mode as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 pub const F_OK: u32 = 0;
 pub const R_OK: u32 = 4;
@@ -534,13 +708,21 @@ pub const X_OK: u32 = 1;
 /// Change file permissions.
 pub fn chmod(path: &[u8], mode: u32) -> Result<(), i64> {
     let ret = unsafe { syscall2(SYS_CHMOD, path.as_ptr() as u64, mode as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Change file ownership.
 pub fn chown(path: &[u8], uid: u32, gid: u32) -> Result<(), i64> {
     let ret = unsafe { syscall3(SYS_CHOWN, path.as_ptr() as u64, uid as u64, gid as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Set file creation mask.
@@ -551,13 +733,21 @@ pub fn umask(mask: u32) -> u32 {
 /// Rename a file.
 pub fn rename(old: &[u8], new: &[u8]) -> Result<(), i64> {
     let ret = unsafe { syscall2(SYS_RENAME, old.as_ptr() as u64, new.as_ptr() as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// File control.
 pub fn fcntl(fd: i32, cmd: i32, arg: u64) -> Result<i64, i64> {
     let ret = unsafe { syscall3(SYS_FCNTL, fd as u64, cmd as u64, arg) };
-    if ret < 0 { Err(ret) } else { Ok(ret) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret)
+    }
 }
 
 /// Check if fd is a terminal.
@@ -565,12 +755,56 @@ pub fn isatty(fd: i32) -> bool {
     unsafe { syscall1(SYS_ISATTY, fd as u64) > 0 }
 }
 
+/// Number of command-line arguments, from the `argc` passed to `main`.
+pub fn arg_count(argc: i32) -> usize {
+    if argc < 0 {
+        0
+    } else {
+        argc as usize
+    }
+}
+
+/// Get command-line argument `index` as a byte slice (NUL stripped), using the
+/// raw `argv` passed to `main`. Returns `None` past the end of the array.
+///
+/// The returned slice borrows the process's argv block, which lives for the
+/// whole program, hence the `'static` lifetime. This wrapper exists so callers
+/// that forbid `unsafe` (e.g. `sh`) can still read their arguments safely.
+pub fn arg(argv: *const *const u8, index: usize) -> Option<&'static [u8]> {
+    if argv.is_null() {
+        return None;
+    }
+    // SAFETY: argv is the kernel-provided, NULL-terminated pointer array; each
+    // non-null entry points to a NUL-terminated C string. We never read past
+    // the NULL terminator of the array nor the NUL of a string.
+    unsafe {
+        let p = *argv.add(index);
+        if p.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+        Some(core::slice::from_raw_parts(p, len))
+    }
+}
+
 /// Wait for specific PID.
 pub fn waitpid(pid: i32, status: &mut i32, options: u32) -> Result<i32, i64> {
     let ret = unsafe {
-        syscall3(SYS_WAITPID, pid as u64, status as *mut i32 as u64, options as u64)
+        syscall3(
+            SYS_WAITPID,
+            pid as u64,
+            status as *mut i32 as u64,
+            options as u64,
+        )
     };
-    if ret < 0 { Err(ret) } else { Ok(ret as i32) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as i32)
+    }
 }
 pub const WNOHANG: u32 = 1;
 
@@ -599,25 +833,41 @@ impl UtsName {
 /// Get system name information.
 pub fn uname(buf: &mut UtsName) -> Result<(), i64> {
     let ret = unsafe { syscall1(SYS_UNAME, buf as *mut UtsName as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Send fsync to ensure data is written.
 pub fn fsync(fd: i32) -> Result<(), i64> {
     let ret = unsafe { syscall1(SYS_FSYNC, fd as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Yield the CPU.
 pub fn sched_yield() -> Result<(), i64> {
     let ret = unsafe { syscall0(SYS_SCHED_YIELD) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Reboot the system.
 pub fn reboot(cmd: u32) -> Result<(), i64> {
     let ret = unsafe { syscall1(SYS_REBOOT, cmd as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 pub const REBOOT_POWER_OFF: u32 = 0x4321;
 pub const REBOOT_RESTART: u32 = 0x1234;
@@ -625,24 +875,40 @@ pub const REBOOT_RESTART: u32 = 0x1234;
 /// Get or set hostname.
 pub fn hostname_get(buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe { syscall3(SYS_HOSTNAME, buf.as_mut_ptr() as u64, buf.len() as u64, 0) };
-    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 pub fn hostname_set(name: &[u8]) -> Result<(), i64> {
     let ret = unsafe { syscall3(SYS_HOSTNAME, name.as_ptr() as u64, name.len() as u64, 1) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Get random bytes.
 pub fn getrandom(buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe { syscall3(SYS_GETRANDOM, buf.as_mut_ptr() as u64, buf.len() as u64, 0) };
-    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 /// Memory-protect a region.
 pub fn mprotect(addr: u64, len: usize, prot: u32) -> Result<(), i64> {
     let ret = unsafe { syscall3(SYS_MPROTECT, addr, len as u64, prot as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 pub const PROT_NONE: u32 = 0;
 pub const PROT_READ: u32 = 1;
@@ -678,6 +944,19 @@ impl SockAddrIn {
         }
     }
 
+    /// Build a sockaddr_in from a host-order port and a 4-byte IP in
+    /// network-order (a[0].a[1].a[2].a[3]). The kernel reads sin_addr as
+    /// 4 raw bytes from memory and treats them as a network-order address,
+    /// so we use from_ne_bytes to keep the wire ordering intact through
+    /// the LE store.
+    pub const fn new(ip: [u8; 4], port: u16) -> Self {
+        SockAddrIn {
+            sin_family: AF_INET as u16,
+            sin_port: port.to_be(),
+            sin_addr: u32::from_ne_bytes(ip),
+        }
+    }
+
     pub fn port_host(&self) -> u16 {
         u16::from_be(self.sin_port)
     }
@@ -687,9 +966,74 @@ impl SockAddrIn {
     }
 }
 
+/// Synchronous DNS A-record lookup. Blocks until the kernel resolver returns
+/// (typically <100 ms on QEMU user-mode) or until the kernel-side timeout
+/// of ~3 seconds elapses.
+pub fn gethostbyname(name: &[u8]) -> Result<[u8; 4], i64> {
+    let mut ip = [0u8; 4];
+    let ret = unsafe {
+        syscall3(
+            SYS_GETHOSTBYNAME,
+            name.as_ptr() as u64,
+            name.len() as u64,
+            ip.as_mut_ptr() as u64,
+        )
+    };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ip)
+    }
+}
+
+/// Unmount a filesystem from `target`. Requires CAP_SYS_ADMIN.
+pub fn umount(target: &[u8]) -> Result<(), i64> {
+    // Caller must pass a NUL-terminated byte slice (validate_user_string in kernel).
+    let ret = unsafe { syscall1(SYS_UMOUNT, target.as_ptr() as u64) };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
+}
+
+/// Flush all dirty block-cache entries to disk. Returns the number of
+/// mounts synced (block-backed filesystems only).
+pub fn sync() -> Result<i64, i64> {
+    let ret = unsafe { syscall0(SYS_SYNC) };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret)
+    }
+}
+
+/// Format `device` with the given filesystem type ("racfs" currently).
+/// Refuses if the device backs an active mount.
+pub fn mkfs(device: &[u8], fstype: &[u8]) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall4(
+            SYS_MKFS,
+            device.as_ptr() as u64,
+            device.len() as u64,
+            fstype.as_ptr() as u64,
+            fstype.len() as u64,
+        )
+    };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
+}
+
 pub fn socket(domain: i32, stype: i32, protocol: i32) -> Result<i32, i64> {
     let ret = unsafe { syscall3(SYS_SOCKET, domain as u64, stype as u64, protocol as u64) };
-    if ret < 0 { Err(ret) } else { Ok(ret as i32) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as i32)
+    }
 }
 
 pub fn bind(fd: i32, addr: &SockAddrIn) -> Result<(), i64> {
@@ -701,12 +1045,20 @@ pub fn bind(fd: i32, addr: &SockAddrIn) -> Result<(), i64> {
             core::mem::size_of::<SockAddrIn>() as u64,
         )
     };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 pub fn listen(fd: i32, backlog: i32) -> Result<(), i64> {
     let ret = unsafe { syscall2(SYS_LISTEN, fd as u64, backlog as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 pub fn accept(fd: i32, addr: Option<&mut SockAddrIn>) -> Result<i32, i64> {
@@ -717,7 +1069,11 @@ pub fn accept(fd: i32, addr: Option<&mut SockAddrIn>) -> Result<i32, i64> {
         (0u64, 0u64)
     };
     let ret = unsafe { syscall3(SYS_ACCEPT, fd as u64, addr_ptr, len_ptr) };
-    if ret < 0 { Err(ret) } else { Ok(ret as i32) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as i32)
+    }
 }
 
 pub fn connect(fd: i32, addr: &SockAddrIn) -> Result<(), i64> {
@@ -729,22 +1085,54 @@ pub fn connect(fd: i32, addr: &SockAddrIn) -> Result<(), i64> {
             core::mem::size_of::<SockAddrIn>() as u64,
         )
     };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 pub fn send(fd: i32, buf: &[u8], flags: u32) -> Result<usize, i64> {
-    let ret = unsafe { syscall4(SYS_SEND, fd as u64, buf.as_ptr() as u64, buf.len() as u64, flags as u64) };
-    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
+    let ret = unsafe {
+        syscall4(
+            SYS_SEND,
+            fd as u64,
+            buf.as_ptr() as u64,
+            buf.len() as u64,
+            flags as u64,
+        )
+    };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 pub fn recv(fd: i32, buf: &mut [u8], flags: u32) -> Result<usize, i64> {
-    let ret = unsafe { syscall4(SYS_RECV, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64, flags as u64) };
-    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
+    let ret = unsafe {
+        syscall4(
+            SYS_RECV,
+            fd as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            flags as u64,
+        )
+    };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 pub fn shutdown(fd: i32, how: i32) -> Result<(), i64> {
     let ret = unsafe { syscall2(SYS_SHUTDOWN, fd as u64, how as u64) };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 pub fn getsockname(fd: i32, addr: &mut SockAddrIn) -> Result<(), i64> {
@@ -757,7 +1145,11 @@ pub fn getsockname(fd: i32, addr: &mut SockAddrIn) -> Result<(), i64> {
             &mut len as *mut u32 as u64,
         )
     };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 pub fn getpeername(fd: i32, addr: &mut SockAddrIn) -> Result<(), i64> {
@@ -770,7 +1162,11 @@ pub fn getpeername(fd: i32, addr: &mut SockAddrIn) -> Result<(), i64> {
             &mut len as *mut u32 as u64,
         )
     };
-    if ret < 0 { Err(ret) } else { Ok(()) }
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 // ─────────────────────────────────────────────────

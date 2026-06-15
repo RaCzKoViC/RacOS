@@ -153,10 +153,7 @@ impl PtyMaster {
         if self.foreground_pgid > 0 {
             unsafe {
                 core::arch::asm!("cli", options(nomem, nostack));
-                crate::task::scheduler::send_signal_to_group(
-                    self.foreground_pgid as u32,
-                    signal,
-                );
+                crate::task::scheduler::send_signal_to_group(self.foreground_pgid as u32, signal);
                 core::arch::asm!("sti", options(nomem, nostack));
             }
         }

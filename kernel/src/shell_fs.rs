@@ -77,8 +77,12 @@ impl MemFs {
 
         // /bin, /home/user, /etc
         let bin = fs.add_node(0, "bin", NodeType::Directory, b"").unwrap_or(0);
-        let home = fs.add_node(0, "home", NodeType::Directory, b"").unwrap_or(0);
-        let user = fs.add_node(home, "user", NodeType::Directory, b"").unwrap_or(home);
+        let home = fs
+            .add_node(0, "home", NodeType::Directory, b"")
+            .unwrap_or(0);
+        let user = fs
+            .add_node(home, "user", NodeType::Directory, b"")
+            .unwrap_or(home);
         let etc = fs.add_node(0, "etc", NodeType::Directory, b"").unwrap_or(0);
 
         let _ = fs.add_node(bin, "ls", NodeType::File, b"builtin");
@@ -307,13 +311,15 @@ impl FatFs {
             return Err("fat: invalid total sectors");
         }
 
-        let root_dir_sectors =
-            ((root_entry_count as u32 * 32) + (bytes_per_sector as u32 - 1)) / bytes_per_sector as u32;
+        let root_dir_sectors = ((root_entry_count as u32 * 32) + (bytes_per_sector as u32 - 1))
+            / bytes_per_sector as u32;
         let first_fat_sector = reserved_sectors as u32;
         let first_root_sector = first_fat_sector + fat_count as u32 * sectors_per_fat_16 as u32;
         let first_data_sector = first_root_sector + root_dir_sectors;
         let data_sectors = total_sectors.saturating_sub(
-            reserved_sectors as u32 + fat_count as u32 * sectors_per_fat_16 as u32 + root_dir_sectors,
+            reserved_sectors as u32
+                + fat_count as u32 * sectors_per_fat_16 as u32
+                + root_dir_sectors,
         );
         let cluster_count = data_sectors / sectors_per_cluster as u32;
 

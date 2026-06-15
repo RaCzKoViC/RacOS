@@ -6,7 +6,24 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
-#![allow(dead_code, unused_imports, unused_variables, function_casts_as_integer, unreachable_code)]
+// Modern unsafe-discipline: every unsafe op should sit in its own
+// `unsafe { ... }` block, even inside an `unsafe fn` (Rust 2024-edition
+// default, backported here as a warning so we can migrate gradually
+// without forcing the edition bump or a 200+ site refactor in one
+// commit). Each unsafe block touched in new code carries its own
+// SAFETY comment per docs/language-policy.md.
+#![warn(unsafe_op_in_unsafe_fn)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    function_casts_as_integer,
+    unreachable_code,
+    // The warn above intentionally lights up most of the kernel until
+    // we migrate. Silence the noise crate-wide while keeping the warn
+    // active for new code that opts back in with an inner `#[warn(...)]`.
+    unsafe_op_in_unsafe_fn
+)]
 
 extern crate alloc;
 
@@ -26,10 +43,10 @@ mod tty;
 mod vfs;
 #[macro_use]
 mod print;
+mod mod_loader;
 mod panic;
 mod shell_fs;
 mod sync;
-mod mod_loader;
 
 use boot::BootInfo;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -59,12 +76,18 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         fb_console::init(boot_info);
     }
 
-    println!("RACORE: RacOS kernel starting (Build {})", env!("CARGO_PKG_VERSION"));
-    
+    println!(
+        "RACORE: RacOS kernel starting (Build {})",
+        env!("CARGO_PKG_VERSION")
+    );
+
     // Validate boot info
     boot::validate(boot_info);
 
-    serial::serial_println!("[  0.000010] RACORE: Boot info validated (magic OK, version {})", boot_info.version);
+    serial::serial_println!(
+        "[  0.000010] RACORE: Boot info validated (magic OK, version {})",
+        boot_info.version
+    );
 
     // Report memory
     let usable_bytes = boot::count_usable_memory(boot_info);
@@ -93,8 +116,11 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Reserve kernel memory region so allocator doesn't hand it out
     // SAFETY: kernel_physical_base is valid from bootloader.
     unsafe {
-        // Reserve first 2 MiB (kernel + boot structures)
-        mm::phys::reserve_range(0, 2 * 1024 * 1024);
+        // Reserve first 16 MiB. Kernel ELF is currently ~6 MiB loaded at 1 MiB,
+        // so it ends around 7 MiB; the previous 2 MiB reservation only just
+        // worked when usable memory happened to start above the kernel and
+        // broke as soon as the kernel image grew past that line.
+        mm::phys::reserve_range(0, 16 * 1024 * 1024);
         // Reserve framebuffer if present
         if boot_info.framebuffer.address != 0 {
             let fb_size = boot_info.framebuffer.pitch as u64 * boot_info.framebuffer.height as u64;
@@ -114,8 +140,38 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         tty::vt::init();
     }
 
+    // ACPI/MADT discovery now that the heap can hold parsed topology
+    // (CPU + IOAPIC vectors). The arch layer intentionally leaves this for
+    // main so that the rsdp_address from BootInfo stays explicit.
+    unsafe {
+        arch::acpi::init(boot_info.rsdp_address);
+        arch::smp::init();
+        // G.2: turn on the BSP's LAPIC so the IPI helpers are usable. G.3
+        // will fire INIT-SIPI-SIPI through them to bring up the APs.
+        arch::lapic::init_bsp();
+        // G.4 foundation: BSP claims its per-CPU slot before bringing up
+        // any AP. APs initialise their own slots from ap_entry.
+        arch::percpu::init_for_this_cpu(arch::lapic::current_apic_id());
+        // G.4.1: BSP arms its own LAPIC timer. The IDT vector was
+        // installed by idt::init() above; once IF is on (later in this
+        // function) timer IRQs start landing and bumping PerCpu.tick_count.
+        arch::lapic::init_timer_for_this_cpu();
+        // G.3: walk every enabled MADT entry that isn't the BSP, fire
+        // INIT-SIPI-SIPI, and wait for each AP to reach its Rust idle
+        // halt. No-op on single-CPU guests.
+        let _ = arch::ap::bring_up_all();
+    }
+
     // Initialize drivers (subsystem, block, PCI).
     drivers::init();
+    // Phase F smoke test: verify AHCI persistence (write marker on first boot,
+    // confirm it on later boots).
+    drivers::ahci_self_test();
+    // Phase E smoke test: verify the NIC TX path before the rest of init runs.
+    drivers::nic_self_test();
+    // Phase E krok 2/3: bring up the IPv4 stack and run the ARP→ICMP→DNS demo.
+    net::stack::init();
+    net::stack::start_demo("example.com");
 
     // Initialize shell filesystem API after block devices are ready.
     shell_fs::init(KERNEL_SHELL_DEBUG);
@@ -135,19 +191,27 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Initialize scheduler with idle task (PID 0)
     // SAFETY: Called once, heap is ready, interrupts still disabled.
-    unsafe { task::scheduler::init(); }
+    unsafe {
+        task::scheduler::init();
+    }
 
     // Initialize SYSCALL/SYSRET mechanism
     // SAFETY: Called once, GDT/TSS are initialized, interrupts disabled.
-    unsafe { syscall::entry::init(); }
+    unsafe {
+        syscall::entry::init();
+    }
 
     // Snapshot the boot-time kernel CR3. All future user page tables inherit
     // their kernel mappings from this snapshot (see virt::create_user_page_table).
     // Must happen before any user process is constructed.
-    unsafe { mm::virt::capture_kernel_cr3(); }
+    unsafe {
+        mm::virt::capture_kernel_cr3();
+    }
 
     // Initialize VFS
-    unsafe { vfs::mount::init(); }
+    unsafe {
+        vfs::mount::init();
+    }
 
     // Set up and mount initramfs at root
     {
@@ -158,16 +222,23 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 boot_info.initramfs_size,
                 boot_info.initramfs_base
             );
-            vfs::initramfs::Initramfs::from_binary(boot_info.initramfs_base, boot_info.initramfs_size)
-                .unwrap_or_else(|| {
-                    serial::serial_println!("[  0.000280] RACORE: Binary initramfs parse failed, using built-in");
-                    let mut fs = vfs::initramfs::Initramfs::new();
-                    let _sbin_ino = fs.add_dir("sbin");
-                    let _etc_ino = fs.add_dir("etc");
-                    fs
-                })
+            vfs::initramfs::Initramfs::from_binary(
+                boot_info.initramfs_base,
+                boot_info.initramfs_size,
+            )
+            .unwrap_or_else(|| {
+                serial::serial_println!(
+                    "[  0.000280] RACORE: Binary initramfs parse failed, using built-in"
+                );
+                let mut fs = vfs::initramfs::Initramfs::new();
+                let _sbin_ino = fs.add_dir("sbin");
+                let _etc_ino = fs.add_dir("etc");
+                fs
+            })
         } else {
-            serial::serial_println!("[  0.000280] RACORE: No initramfs from bootloader, using built-in");
+            serial::serial_println!(
+                "[  0.000280] RACORE: No initramfs from bootloader, using built-in"
+            );
             let mut fs = vfs::initramfs::Initramfs::new();
             let _sbin_ino = fs.add_dir("sbin");
             let _etc_ino = fs.add_dir("etc");
@@ -210,7 +281,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         }
     }
 
-    // Set up and mount racfs at /var (block-device-backed on ram0)
+    // Set up and mount racfs at /var (ephemeral, block-device-backed on ram0)
     {
         let racfs = unsafe { vfs::racfs::init() };
         let racfs_fs = vfs::racfs::RacfsFilesystem::new(racfs);
@@ -219,10 +290,75 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         }
     }
 
+    // Phase F.4: format ram1 as FAT32 and mount on /fat.
+    // Ramdisk content is volatile, so we format unconditionally each boot —
+    // the smoke test still verifies the full write/read path end-to-end.
+    if let Some(ram1) = drivers::block::find("ram1") {
+        match vfs::fat32::format_fat32(ram1, "RACOS-FAT") {
+            Ok(fat) => {
+                vfs::fat32::smoke_test(&fat);
+                let fat_fs = vfs::fat32::Fat32Filesystem::new(fat);
+                // Mount point: create /fat on the root initramfs first.
+                let mt = unsafe { vfs::mount::mount_table() };
+                if mt.lookup_path("/fat").is_err() {
+                    // initramfs doesn't expose mkdir; we mount on / and rely
+                    // on resolve()'s longest-prefix match to send /fat/... to
+                    // the FAT32 instance even without a directory entry on
+                    // the root FS.
+                }
+                unsafe {
+                    vfs::mount::mount_table().mount("/fat", fat_fs);
+                }
+                serial::serial_println!(
+                    "[  0.000365] RACORE: fat32 mounted on /fat (volatile, on ram1)"
+                );
+            }
+            Err(e) => serial::serial_println!("[  0.000365] RACORE: /fat mount failed: {:?}", e),
+        }
+    }
+
+    // Phase F krok 3: mount racfs on the persistent SATA disk at /mnt.
+    // Open existing FS if the superblock is valid; otherwise format it once.
+    if let Some(sda) = drivers::block::find("sda") {
+        match vfs::racfs::Racfs::open_or_format(sda) {
+            Ok(racfs) => {
+                // Run persistence test against the on-disk FS before handing
+                // it off to the mount table.
+                vfs::racfs::persistence_test(&racfs, "sda");
+                let racfs_fs = vfs::racfs::RacfsFilesystem::new(racfs);
+                unsafe {
+                    vfs::mount::mount_table().mount("/mnt", racfs_fs);
+                }
+                serial::serial_println!(
+                    "[  0.000370] RACORE: racfs mounted on /mnt (persistent, on sda)"
+                );
+            }
+            Err(e) => serial::serial_println!("[  0.000370] RACORE: /mnt mount failed: {:?}", e),
+        }
+    }
+
     serial::serial_println!(
         "[  0.000300] RACORE: VFS ready (initramfs + devfs + tmpfs + procfs + racfs mounted), block-devices={}",
         drivers::block::count()
     );
+
+    // CI boot smoke (off by default — enable with `--features ci-smoke`).
+    // Runs synchronous assertions against the live kernel state and exits
+    // the QEMU guest via isa-debug-exit, so the host can read a real exit
+    // code instead of grepping the serial log.
+    #[cfg(feature = "ci-smoke")]
+    run_ci_smoke_and_exit();
+
+    // Phase F.2: kernel-side writeback daemon. Periodically flushes dirty
+    // cache entries on every block-backed mount so user-visible data lands
+    // on disk even without an explicit sync().
+    unsafe {
+        if let Err(e) = task::scheduler::spawn("flushd", flushd_task) {
+            serial::serial_println!("[  0.000310] RACORE: flushd spawn failed: {}", e);
+        } else {
+            serial::serial_println!("[  0.000310] RACORE: flushd writeback daemon spawned");
+        }
+    }
 
     if RUN_KERNEL_SELF_TESTS {
         // Optional bring-up self-tests.
@@ -231,12 +367,10 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 .expect("Failed to spawn test-task-a");
             task::scheduler::spawn("test-task-b", test_task_b)
                 .expect("Failed to spawn test-task-b");
-            task::scheduler::spawn("test-racfs", test_racfs)
-                .expect("Failed to spawn test-racfs");
+            task::scheduler::spawn("test-racfs", test_racfs).expect("Failed to spawn test-racfs");
             task::scheduler::spawn("test-security", test_security)
                 .expect("Failed to spawn test-security");
-            task::scheduler::spawn("test-net", test_net)
-                .expect("Failed to spawn test-net");
+            task::scheduler::spawn("test-net", test_net).expect("Failed to spawn test-net");
         }
     }
 
@@ -251,7 +385,9 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 serial::serial_println!("[  0.000360] RACORE: init watchdog skipped (bring-up)");
             }
             None => {
-                serial::serial_println!("[  0.000360] RACORE: init start failed, entering emergency shell");
+                serial::serial_println!(
+                    "[  0.000360] RACORE: init start failed, entering emergency shell"
+                );
                 spawn_kernel_shell_once();
             }
         }
@@ -263,7 +399,9 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Enable interrupts
     serial::serial_println!("[  0.000400] RACORE: Enabling interrupts");
-    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
 
     serial::serial_println!("[  0.000500] RACORE: Entering idle loop (scheduler active)");
 
@@ -271,9 +409,11 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     idle_loop()
 }
 
-/// Halts the CPU in a loop, waking only on interrupts.
+/// Halts the CPU in a loop, waking only on interrupts. Polls the network
+/// stack on each wakeup so RX frames are processed without IRQ-driven NIC.
 fn idle_loop() -> ! {
     loop {
+        net::stack::poll();
         arch::halt();
     }
 }
@@ -326,19 +466,28 @@ fn try_spawn_init() -> Option<u32> {
         let loaded = match elf::load_elf(&data) {
             Ok(l) => l,
             Err(e) => {
-                serial::serial_println!("[  0.000350] RACORE: ELF load failed for '{}': {:?}", path, e);
+                serial::serial_println!(
+                    "[  0.000350] RACORE: ELF load failed for '{}': {:?}",
+                    path,
+                    e
+                );
                 continue;
             }
         };
 
         // Create user process
-        let mut process = match task::process::UserProcess::from_elf(path, &loaded, &[path.as_bytes()]) {
-            Ok(p) => p,
-            Err(e) => {
-                serial::serial_println!("[  0.000350] RACORE: Process create failed for '{}': {}", path, e);
-                continue;
-            }
-        };
+        let mut process =
+            match task::process::UserProcess::from_elf(path, &loaded, &[path.as_bytes()]) {
+                Ok(p) => p,
+                Err(e) => {
+                    serial::serial_println!(
+                        "[  0.000350] RACORE: Process create failed for '{}': {}",
+                        path,
+                        e
+                    );
+                    continue;
+                }
+            };
 
         // Set up stdin/stdout/stderr (FDs 0, 1, 2) pointing to /dev/console
         {
@@ -347,10 +496,10 @@ fn try_spawn_init() -> Option<u32> {
                 if let Ok(inode) = fs.get_inode(ino) {
                     use alloc::sync::Arc;
                     use vfs::file::OpenFile;
-                    let stdin  = Arc::new(OpenFile::new(ino, inode.clone(), 0)); // O_RDONLY
+                    let stdin = Arc::new(OpenFile::new(ino, inode.clone(), 0)); // O_RDONLY
                     let stdout = Arc::new(OpenFile::new(ino, inode.clone(), 1)); // O_WRONLY
-                    let stderr = Arc::new(OpenFile::new(ino, inode, 1));         // O_WRONLY
-                    let _ = process.task.fd_table.alloc(stdin);  // fd 0
+                    let stderr = Arc::new(OpenFile::new(ino, inode, 1)); // O_WRONLY
+                    let _ = process.task.fd_table.alloc(stdin); // fd 0
                     let _ = process.task.fd_table.alloc(stdout); // fd 1
                     let _ = process.task.fd_table.alloc(stderr); // fd 2
                     serial::serial_println!("[  0.000355] RACORE: FDs 0/1/2 → /dev/console");
@@ -369,7 +518,11 @@ fn try_spawn_init() -> Option<u32> {
                 return Some(pid);
             }
             Err(e) => {
-                serial::serial_println!("[  0.000350] RACORE: spawn_user failed for '{}': {}", path, e);
+                serial::serial_println!(
+                    "[  0.000350] RACORE: spawn_user failed for '{}': {}",
+                    path,
+                    e
+                );
             }
         }
     }
@@ -421,7 +574,9 @@ fn init_watchdog_task() -> ! {
                         now.saturating_sub(start_tick),
                     );
                     spawn_kernel_shell_once();
-                    loop { task::scheduler::yield_now(); }
+                    loop {
+                        task::scheduler::yield_now();
+                    }
                 }
                 _ if now.saturating_sub(start_tick) > INIT_QUICK_FAIL_WINDOW_TICKS => {
                     serial::serial_println!(
@@ -429,7 +584,9 @@ fn init_watchdog_task() -> ! {
                         init_pid,
                         INIT_QUICK_FAIL_WINDOW_TICKS,
                     );
-                    loop { task::scheduler::yield_now(); }
+                    loop {
+                        task::scheduler::yield_now();
+                    }
                 }
                 _ => {}
             }
@@ -713,11 +870,7 @@ fn parse_and_dispatch(line: &str) {
     let args = &tokens[1..count];
 
     if KERNEL_SHELL_DEBUG {
-        serial::serial_println!(
-            "[ SHELL ] command='{}' argc={}",
-            command,
-            args.len()
-        );
+        serial::serial_println!("[ SHELL ] command='{}' argc={}", command, args.len());
     }
 
     for cmd in SHELL_COMMANDS {
@@ -803,7 +956,9 @@ fn test_racfs() -> ! {
         Ok(ino) => ino,
         Err(e) => {
             serial::serial_println!("[TEST-RACFS] FAIL lookup test dir: {:?}", e);
-            loop { task::scheduler::yield_now(); }
+            loop {
+                task::scheduler::yield_now();
+            }
         }
     };
 
@@ -814,7 +969,9 @@ fn test_racfs() -> ! {
         }
         Err(e) => {
             serial::serial_println!("[TEST-RACFS] FAIL create file: {:?}", e);
-            loop { task::scheduler::yield_now(); }
+            loop {
+                task::scheduler::yield_now();
+            }
         }
     };
 
@@ -862,7 +1019,10 @@ fn test_racfs() -> ! {
             if entries.is_empty() {
                 serial::serial_println!("[TEST-RACFS] post-unlink readdir PASS: 0 entries");
             } else {
-                serial::serial_println!("[TEST-RACFS] post-unlink readdir FAIL: {} entries", entries.len());
+                serial::serial_println!(
+                    "[TEST-RACFS] post-unlink readdir FAIL: {} entries",
+                    entries.len()
+                );
             }
         }
         Err(e) => serial::serial_println!("[TEST-RACFS] FAIL post-unlink readdir: {:?}", e),
@@ -907,11 +1067,16 @@ fn test_security() -> ! {
     if dac_read && !dac_write {
         serial::serial_println!("[TEST-SEC ] C3 DAC PASS (0644 blocks non-owner writes)");
     } else {
-        serial::serial_println!("[TEST-SEC ] C3 DAC FAIL (read={}, write={})", dac_read, dac_write);
+        serial::serial_println!(
+            "[TEST-SEC ] C3 DAC FAIL (read={}, write={})",
+            dac_read,
+            dac_write
+        );
     }
 
     let mut cap_creds = user_creds;
-    cap_creds.cap_effective = security::capability::cap_mask(security::capability::CAP_DAC_OVERRIDE);
+    cap_creds.cap_effective =
+        security::capability::cap_mask(security::capability::CAP_DAC_OVERRIDE);
     let override_write = security::dac::can_access(&cap_creds, &meta, security::dac::Access::Write);
     if override_write {
         serial::serial_println!("[TEST-SEC ] C2 CAP_DAC_OVERRIDE PASS");
@@ -944,7 +1109,8 @@ fn test_security() -> ! {
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let _ = task::scheduler::with_current_task_mut(|t| {
-            t.creds.cap_effective = security::capability::cap_mask(security::capability::CAP_SETUID);
+            t.creds.cap_effective =
+                security::capability::cap_mask(security::capability::CAP_SETUID);
         });
         core::arch::asm!("sti", options(nomem, nostack));
     }
@@ -984,7 +1150,9 @@ fn test_net() -> ! {
         Ok(s) => s,
         Err(e) => {
             serial::serial_println!("[TEST-NET ] FAIL socket(server): {:?}", e);
-            loop { task::scheduler::yield_now(); }
+            loop {
+                task::scheduler::yield_now();
+            }
         }
     };
     net::bind_fd(server_pid, 100, server_sid);
@@ -995,7 +1163,9 @@ fn test_net() -> ! {
         Ok(s) => s,
         Err(e) => {
             serial::serial_println!("[TEST-NET ] FAIL socket(client): {:?}", e);
-            loop { task::scheduler::yield_now(); }
+            loop {
+                task::scheduler::yield_now();
+            }
         }
     };
     net::bind_fd(server_pid, 101, client_sid);
@@ -1004,7 +1174,9 @@ fn test_net() -> ! {
         Ok(()) => serial::serial_println!("[TEST-NET ] connect PASS"),
         Err(e) => {
             serial::serial_println!("[TEST-NET ] connect FAIL: {:?}", e);
-            loop { task::scheduler::yield_now(); }
+            loop {
+                task::scheduler::yield_now();
+            }
         }
     }
 
@@ -1012,7 +1184,9 @@ fn test_net() -> ! {
         Ok(s) => s,
         Err(e) => {
             serial::serial_println!("[TEST-NET ] accept FAIL: {:?}", e);
-            loop { task::scheduler::yield_now(); }
+            loop {
+                task::scheduler::yield_now();
+            }
         }
     };
     net::bind_fd(server_pid, 102, accepted_sid);
@@ -1030,7 +1204,10 @@ fn test_net() -> ! {
     match net::recv(server_pid, 102, &mut rx) {
         Ok(n) => {
             if &rx[..n] == payload {
-                serial::serial_println!("[TEST-NET ] recv PASS '{}')", core::str::from_utf8(&rx[..n]).unwrap_or("?"));
+                serial::serial_println!(
+                    "[TEST-NET ] recv PASS '{}')",
+                    core::str::from_utf8(&rx[..n]).unwrap_or("?")
+                );
             } else {
                 serial::serial_println!("[TEST-NET ] recv FAIL content mismatch");
             }
@@ -1047,5 +1224,345 @@ fn test_net() -> ! {
     serial::serial_println!("[TEST-NET ] Loopback socket test complete");
     loop {
         task::scheduler::yield_now();
+    }
+}
+
+/// Periodic writeback daemon. Wakes every ~5 seconds (5000 PIT ticks) and
+/// flushes dirty cache entries on every block-backed mount. Crucial for
+/// safety: even if eager flush in racfs ever skips a write, the daemon
+/// guarantees data lands on disk within a bounded window.
+const FLUSHD_INTERVAL_TICKS: u64 = 5_000;
+fn flushd_task() -> ! {
+    serial::serial_println!(
+        "[ FLUSHD  ] task started, interval={} ticks",
+        FLUSHD_INTERVAL_TICKS
+    );
+    let mut last_run = interrupts::pit::ticks();
+    let mut total_syncs: u64 = 0;
+    loop {
+        let now = interrupts::pit::ticks();
+        if now.saturating_sub(last_run) >= FLUSHD_INTERVAL_TICKS {
+            let synced = unsafe { vfs::mount::flush_all() };
+            total_syncs += synced as u64;
+            serial::serial_println!(
+                "[ FLUSHD  ] tick — synced {} mount(s) (cumulative {})",
+                synced,
+                total_syncs,
+            );
+            last_run = now;
+        }
+        task::scheduler::yield_now();
+    }
+}
+
+// ─── CI boot smoke harness ────────────────────────────────────────────────
+//
+// Compiled in only when the `ci-smoke` feature is enabled. The smoke runs
+// synchronous, deterministic assertions and signals the host via
+// isa-debug-exit (port 0xf4):
+//   write 0x10 → QEMU exits with (0x10 << 1) | 1 = 33  (success)
+//   write 0x11 → QEMU exits with (0x11 << 1) | 1 = 35  (failure)
+// CI asserts on the integer exit code, so kernel panics, hangs and asserted
+// failures are all distinguishable from a success.
+
+/// Write `code` to the QEMU isa-debug-exit port at 0xf4 and halt. Never
+/// returns. The port maps `eax` → `(eax << 1) | 1` as QEMU's exit code.
+#[cfg(feature = "ci-smoke")]
+fn exit_qemu(code: u32) -> ! {
+    unsafe {
+        core::arch::asm!(
+            "out dx, eax",
+            in("dx") 0xf4u16,
+            in("eax") code,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    loop {
+        arch::halt();
+    }
+}
+
+#[cfg(feature = "ci-smoke")]
+fn run_ci_smoke_and_exit() -> ! {
+    serial::serial_println!("[ SMOKE ] CI boot smoke starting");
+    let mut all_pass = true;
+
+    macro_rules! check {
+        ($name:expr, $cond:expr) => {{
+            let ok = $cond;
+            if ok {
+                serial::serial_println!("[ SMOKE ] PASS {}", $name);
+            } else {
+                serial::serial_println!("[ SMOKE ] FAIL {}", $name);
+                all_pass = false;
+            }
+        }};
+    }
+
+    // 0. ACPI + SMP topology — must have parsed at least the BSP, BSP must
+    //    be marked started before any AP work begins.
+    let acpi = arch::acpi::get_info();
+    check!("acpi::parsed", acpi.is_some());
+    let cpu_count = arch::smp::cpu_count();
+    check!("smp::bsp_present", cpu_count >= 1);
+    check!("smp::bsp_started", arch::smp::started_count() >= 1);
+    // G.3: every enabled MADT entry should now have a live Rust idle
+    // loop sitting on it. Catches a regressed trampoline (AP boots
+    // but never marks started) or a missed CPU in for_each_cpu.
+    let started = arch::smp::started_count();
+    if started == cpu_count {
+        serial::serial_println!(
+            "[ SMOKE ] PASS smp::all_aps_started ({}/{})",
+            started,
+            cpu_count,
+        );
+    } else {
+        serial::serial_println!(
+            "[ SMOKE ] FAIL smp::all_aps_started ({}/{})",
+            started,
+            cpu_count,
+        );
+        all_pass = false;
+    }
+
+    // G.4 foundation: every CPU should have written its own apic_id into
+    // its own PerCpu slot via its own GS base. If two CPUs ended up with
+    // overlapping GS bases (slot_index_for collision or wrmsr no-op) the
+    // self_check values won't line up with apic_id.
+    let mut percpu_ok = true;
+    arch::smp::for_each_cpu::<(), _>(|cpu| {
+        let slot = arch::percpu::peek(cpu.apic_id).expect("PerCpu slot");
+        let sc = slot.self_check.load(core::sync::atomic::Ordering::SeqCst);
+        if sc != cpu.apic_id {
+            serial::serial_println!(
+                "[ SMOKE ] FAIL percpu::self_check apic_id={} expected={} got={}",
+                cpu.apic_id,
+                cpu.apic_id,
+                sc,
+            );
+            percpu_ok = false;
+        }
+        None
+    });
+    if percpu_ok {
+        serial::serial_println!("[ SMOKE ] PASS percpu::gs_base_coherent");
+    } else {
+        all_pass = false;
+    }
+
+    // G.4.1: every CPU should have armed its own LAPIC timer and seen at
+    // least one tick land on its own PerCpu.tick_count. Smoke runs with
+    // IF=0 (kernel_main hasn't enabled IRQs yet), so the BSP timer is
+    // armed but masked until we sti briefly. APs sti'd in ap_entry, so
+    // they may already have ticks; the busy wait gives them more.
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
+    for _ in 0..2_000_000u32 {
+        core::hint::spin_loop();
+    }
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+    }
+    let mut timer_ok = true;
+    arch::smp::for_each_cpu::<(), _>(|cpu| {
+        let slot = arch::percpu::peek(cpu.apic_id).expect("PerCpu slot");
+        let ticks = slot.tick_count.load(core::sync::atomic::Ordering::SeqCst);
+        if ticks == 0 {
+            serial::serial_println!(
+                "[ SMOKE ] FAIL lapic_timer::tick apic_id={} ticks=0",
+                cpu.apic_id,
+            );
+            timer_ok = false;
+        } else {
+            serial::serial_println!(
+                "[ SMOKE ] INFO lapic_timer apic_id={} ticks={}",
+                cpu.apic_id,
+                ticks,
+            );
+        }
+        None
+    });
+    if timer_ok {
+        serial::serial_println!("[ SMOKE ] PASS lapic_timer::per_cpu_ticking");
+    } else {
+        all_pass = false;
+    }
+
+    // 0b. BSP LAPIC (G.2) — software-enabled, current cpu's id matches
+    //     what the MADT reported for the BSP. Catches both "init_bsp
+    //     forgot to run" and "MADT vs hardware disagree on BSP id".
+    check!("lapic::enabled", arch::lapic::is_enabled());
+    let bsp_md = arch::smp::bsp_apic_id();
+    let bsp_hw = arch::lapic::bsp_id();
+    let bsp_cur = arch::lapic::current_apic_id();
+    if bsp_md != bsp_hw || bsp_hw != bsp_cur {
+        serial::serial_println!(
+            "[ SMOKE ] FAIL lapic::bsp_id_consistent madt={} hw={} current={}",
+            bsp_md,
+            bsp_hw,
+            bsp_cur,
+        );
+        all_pass = false;
+    } else {
+        serial::serial_println!(
+            "[ SMOKE ] PASS lapic::bsp_id_consistent (madt=hw=current={})",
+            bsp_md,
+        );
+    }
+
+    // 1. Block devices that drivers::init must have registered (ram0/ram1
+    //    are unconditional; sda is only present when QEMU attached an AHCI
+    //    disk, so it's reported as an info skip when missing).
+    check!("block::ram0", drivers::block::find("ram0").is_some());
+    check!("block::ram1", drivers::block::find("ram1").is_some());
+    let has_sda = drivers::block::find("sda").is_some();
+    if !has_sda {
+        serial::serial_println!("[ SMOKE ] SKIP block::sda (no AHCI disk attached)");
+    }
+
+    // 2. VFS mount table topology.
+    let mt = unsafe { vfs::mount::mount_table() };
+    check!("vfs::mount /", mt.is_mounted("/"));
+    check!("vfs::mount /dev", mt.is_mounted("/dev"));
+    check!("vfs::mount /tmp", mt.is_mounted("/tmp"));
+    check!("vfs::mount /proc", mt.is_mounted("/proc"));
+    check!("vfs::mount /var", mt.is_mounted("/var"));
+    check!("vfs::mount /fat", mt.is_mounted("/fat"));
+    if has_sda {
+        check!("vfs::mount /mnt", mt.is_mounted("/mnt"));
+    }
+
+    // 3. racfs round-trip on ram0 (file create + write + read + unlink).
+    {
+        let racfs = unsafe { vfs::racfs::instance().clone() };
+        let ino = racfs.create_file(0, "smoke.txt").unwrap_or(0);
+        check!("racfs::create_file", ino > 0);
+        let payload = b"racfs-smoke-1234";
+        let wrote = racfs.write_file(ino, 0, payload).unwrap_or(0);
+        check!("racfs::write_file", wrote == payload.len());
+        let mut buf = [0u8; 32];
+        let read = racfs.read_file(ino, 0, &mut buf).unwrap_or(0);
+        check!(
+            "racfs::read_file",
+            read == payload.len() && &buf[..read] == payload
+        );
+        check!("racfs::unlink", racfs.unlink(0, "smoke.txt").is_ok());
+    }
+
+    // 3b. /mnt round-trip via mount_table — mirrors the racsh path
+    //     (echo > /mnt/x; cat /mnt/x). This is the exact path that was
+    //     broken interactively: create through the per-mount store, then
+    //     re-resolve through mount_table().lookup_path and read back via
+    //     the resolved Filesystem + Inode handles. If the bug is in cache
+    //     coherency between mutating writes and a fresh mount-table
+    //     lookup, it will surface here as either ENOENT or a 0-byte read.
+    if has_sda {
+        let mt = unsafe { vfs::mount::mount_table() };
+        let mut subtest_pass = true;
+        let payload = b"mnt-roundtrip-9876";
+        let path = "/mnt/smoke-mnt.txt";
+
+        // (a) Reach the concrete Racfs backing /mnt and create a fresh file.
+        let mnt_racfs = mt
+            .entries()
+            .iter()
+            .find(|m| m.path == "/mnt")
+            .and_then(|m| m.fs.as_any().downcast_ref::<vfs::racfs::RacfsFilesystem>())
+            .map(|fs| fs.inner());
+        if let Some(racfs) = mnt_racfs {
+            // Make the test idempotent across re-runs against the same disk.
+            let _ = racfs.unlink(0, "smoke-mnt.txt");
+            let ino = racfs.create_file(0, "smoke-mnt.txt").unwrap_or(0);
+            if ino == 0 {
+                serial::serial_println!("[ SMOKE ] FAIL mnt::create_file");
+                subtest_pass = false;
+            }
+            let wrote = racfs.write_file(ino, 0, payload).unwrap_or(0);
+            if wrote != payload.len() {
+                serial::serial_println!(
+                    "[ SMOKE ] FAIL mnt::write_file wrote={} want={}",
+                    wrote,
+                    payload.len(),
+                );
+                subtest_pass = false;
+            }
+        } else {
+            serial::serial_println!("[ SMOKE ] FAIL mnt::downcast_racfs");
+            subtest_pass = false;
+        }
+
+        // (b) Re-resolve the file from the path API as cat would.
+        match mt.lookup_path(path) {
+            Ok((fs, ino)) => match fs.get_inode(ino) {
+                Ok(inode) => {
+                    let mut buf = [0u8; 64];
+                    let n = inode.read(0, &mut buf).unwrap_or(0);
+                    if n != payload.len() || &buf[..n] != payload {
+                        serial::serial_println!(
+                            "[ SMOKE ] FAIL mnt::read_after_create n={} content={:?}",
+                            n,
+                            &buf[..n.min(buf.len())],
+                        );
+                        subtest_pass = false;
+                    }
+                }
+                Err(e) => {
+                    serial::serial_println!("[ SMOKE ] FAIL mnt::get_inode {:?}", e,);
+                    subtest_pass = false;
+                }
+            },
+            Err(e) => {
+                serial::serial_println!("[ SMOKE ] FAIL mnt::lookup_after_create {:?}", e,);
+                subtest_pass = false;
+            }
+        }
+
+        if subtest_pass {
+            serial::serial_println!("[ SMOKE ] PASS mnt::roundtrip");
+        } else {
+            all_pass = false;
+        }
+    }
+
+    // 4. FAT32 round-trip on /fat (already exercised by smoke_test during
+    //    boot — re-check the BOOT.CNT we wrote in main).
+    if let Ok((fs, _)) = mt.lookup_path("/fat/TEST/BOOT.CNT") {
+        if let Ok((_, ino)) = mt.lookup_path("/fat/TEST/BOOT.CNT") {
+            if let Ok(inode) = fs.get_inode(ino) {
+                let mut buf = [0u8; 16];
+                let n = inode.read(0, &mut buf).unwrap_or(0);
+                check!("fat32::boot.cnt non-empty", n > 0);
+            } else {
+                check!("fat32::boot.cnt readable", false);
+            }
+        }
+    } else {
+        check!("fat32::boot.cnt exists", false);
+    }
+
+    // 5. initramfs binaries we expect for userland tooling.
+    check!(
+        "initramfs::/sbin/init",
+        mt.lookup_path("/sbin/init").is_ok()
+    );
+    check!("initramfs::/bin/sh", mt.lookup_path("/bin/sh").is_ok());
+    check!(
+        "initramfs::mkfs.racfs",
+        mt.lookup_path("/bin/mkfs.racfs").is_ok()
+    );
+    check!(
+        "initramfs::mkfs.fat32",
+        mt.lookup_path("/bin/mkfs.fat32").is_ok()
+    );
+
+    if all_pass {
+        serial::serial_println!("[ SMOKE ] ALL PASS — exiting QEMU via isa-debug-exit (code 0x10)");
+        exit_qemu(0x10);
+    } else {
+        serial::serial_println!(
+            "[ SMOKE ] AT LEAST ONE FAILURE — exiting QEMU via isa-debug-exit (code 0x11)"
+        );
+        exit_qemu(0x11);
     }
 }

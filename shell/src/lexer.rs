@@ -238,6 +238,11 @@ impl<'a> Lexer<'a> {
                         || c == b'<'
                         || c == b'>'
                         || c == b'#'
+                        // End the word at an (unescaped, unquoted) '$' so the
+                        // following $VAR / ${...} / $(...) lexes as its own
+                        // expansion token. The parser re-joins adjacent tokens
+                        // into one multi-part word, so `pre$VAR` / `a=${B}` work.
+                        || c == b'$'
                     {
                         break;
                     }
@@ -248,12 +253,18 @@ impl<'a> Lexer<'a> {
                         }
                     } else if c == b'\'' {
                         // Inline single-quote in word
-                        if let TokenKind::SingleQuoted(s) = self.lex_single_quoted().unwrap_or(TokenKind::Word(String::new())) {
+                        if let TokenKind::SingleQuoted(s) = self
+                            .lex_single_quoted()
+                            .unwrap_or(TokenKind::Word(String::new()))
+                        {
                             word.push_str(&s);
                         }
                     } else if c == b'"' {
                         // Inline double-quote in word
-                        if let TokenKind::DoubleQuoted(s) = self.lex_double_quoted().unwrap_or(TokenKind::Word(String::new())) {
+                        if let TokenKind::DoubleQuoted(s) = self
+                            .lex_double_quoted()
+                            .unwrap_or(TokenKind::Word(String::new()))
+                        {
                             word.push_str(&s);
                         }
                     } else {
@@ -420,9 +431,21 @@ impl<'a> Lexer<'a> {
                 }
                 Ok(TokenKind::DollarVar(name))
             }
-            Some(ch) if ch == b'?' || ch == b'$' || ch == b'!' || ch == b'#'
-                || ch == b'0' || ch == b'@' || ch == b'*' =>
+            Some(ch)
+                if ch == b'?'
+                    || ch == b'$'
+                    || ch == b'!'
+                    || ch == b'#'
+                    || ch == b'@'
+                    || ch == b'*' =>
             {
+                let mut name = String::new();
+                name.push(self.advance().unwrap() as char);
+                Ok(TokenKind::DollarVar(name))
+            }
+            // Positional parameter $0..$9. POSIX takes a single digit for the
+            // bare form (use ${12} for multi-digit), so consume exactly one.
+            Some(ch) if ch.is_ascii_digit() => {
                 let mut name = String::new();
                 name.push(self.advance().unwrap() as char);
                 Ok(TokenKind::DollarVar(name))

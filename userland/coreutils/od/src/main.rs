@@ -13,9 +13,15 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     } else {
         for i in 1..argc {
             let file_ptr = unsafe { *argv.add(i as usize) };
-            if file_ptr.is_null() { continue; }
+            if file_ptr.is_null() {
+                continue;
+            }
             let mut len = 0;
-            unsafe { while *file_ptr.add(len) != 0 { len += 1; } }
+            unsafe {
+                while *file_ptr.add(len) != 0 {
+                    len += 1;
+                }
+            }
             let path = unsafe { core::slice::from_raw_parts(file_ptr, len + 1) };
             match libc_lite::open(path, 0, 0) {
                 Ok(fd) => {

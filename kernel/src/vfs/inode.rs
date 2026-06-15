@@ -15,13 +15,13 @@ pub type InodeNum = u64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum FileType {
-    Regular    = 0o100000,
-    Directory  = 0o040000,
+    Regular = 0o100000,
+    Directory = 0o040000,
     CharDevice = 0o020000,
-    BlockDevice= 0o060000,
-    Pipe       = 0o010000,
-    Socket     = 0o140000,
-    Symlink    = 0o120000,
+    BlockDevice = 0o060000,
+    Pipe = 0o010000,
+    Socket = 0o140000,
+    Symlink = 0o120000,
 }
 
 /// File permissions.
@@ -33,9 +33,15 @@ impl FileMode {
         FileMode(mode & 0o7777)
     }
 
-    pub fn owner_read(&self) -> bool { self.0 & 0o400 != 0 }
-    pub fn owner_write(&self) -> bool { self.0 & 0o200 != 0 }
-    pub fn owner_exec(&self) -> bool { self.0 & 0o100 != 0 }
+    pub fn owner_read(&self) -> bool {
+        self.0 & 0o400 != 0
+    }
+    pub fn owner_write(&self) -> bool {
+        self.0 & 0o200 != 0
+    }
+    pub fn owner_exec(&self) -> bool {
+        self.0 & 0o100 != 0
+    }
 }
 
 /// Inode metadata.

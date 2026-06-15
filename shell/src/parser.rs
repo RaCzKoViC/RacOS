@@ -131,9 +131,16 @@ impl Parser {
                     if self.at_end()
                         || matches!(
                             self.peek(),
-                            TokenKind::RParen | TokenKind::RBrace | TokenKind::Fi
-                                | TokenKind::Done | TokenKind::Else | TokenKind::Elif
-                                | TokenKind::Esac | TokenKind::DSemi
+                            TokenKind::RParen
+                                | TokenKind::RBrace
+                                | TokenKind::Then
+                                | TokenKind::Do
+                                | TokenKind::Fi
+                                | TokenKind::Done
+                                | TokenKind::Else
+                                | TokenKind::Elif
+                                | TokenKind::Esac
+                                | TokenKind::DSemi
                         )
                     {
                         break;
@@ -151,8 +158,13 @@ impl Parser {
                     if self.at_end()
                         || matches!(
                             self.peek(),
-                            TokenKind::RParen | TokenKind::RBrace | TokenKind::Fi
-                                | TokenKind::Done | TokenKind::Esac
+                            TokenKind::RParen
+                                | TokenKind::RBrace
+                                | TokenKind::Then
+                                | TokenKind::Do
+                                | TokenKind::Fi
+                                | TokenKind::Done
+                                | TokenKind::Esac
                         )
                     {
                         // Trailing & — background the left
@@ -253,8 +265,39 @@ impl Parser {
             TokenKind::For => self.parse_for(),
             TokenKind::Case => self.parse_case(),
             TokenKind::Function => self.parse_function_def(),
+            // POSIX function definition: `name () compound-command`.
+            TokenKind::Word(_) if self.is_posix_function_def() => self.parse_posix_function_def(),
             _ => self.parse_simple_command(),
         }
+    }
+
+    /// Lookahead for the POSIX `name ( )` function-definition prefix.
+    fn is_posix_function_def(&self) -> bool {
+        matches!(self.peek(), TokenKind::Word(_))
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::LParen)
+            )
+            && matches!(
+                self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                Some(TokenKind::RParen)
+            )
+    }
+
+    /// Parse `name () compound-command` (POSIX function definition).
+    fn parse_posix_function_def(&mut self) -> Result<AstNode, ParseError> {
+        let name = match self.advance().kind.clone() {
+            TokenKind::Word(s) => s,
+            _ => return Err(self.error("Expected function name")),
+        };
+        self.expect(&TokenKind::LParen)?;
+        self.expect(&TokenKind::RParen)?;
+        self.skip_newlines();
+        let body = self.parse_command()?;
+        Ok(AstNode::FunctionDef {
+            name,
+            body: Box::new(body),
+        })
     }
 
     // ─────────────────────────────────────────────
@@ -270,15 +313,32 @@ impl Parser {
         loop {
             match self.peek() {
                 TokenKind::AssignmentWord { .. } => {
-                    if let TokenKind::AssignmentWord { name, value } = self.advance().kind.clone() {
+                    let tok = self.advance().clone();
+                    if let TokenKind::AssignmentWord { name, value } = tok.kind {
+                        // The value may continue into adjacent expansion tokens
+                        // (e.g. `PATH=$PATH:/x` lexes as AssignmentWord{PATH,""}
+                        // followed by $PATH). Build a multi-part value word.
+                        let mut parts = Vec::new();
+                        if !value.is_empty() {
+                            parts.push(WordPart::Literal(value));
+                        }
+                        let end = tok.span.offset + tok.span.len;
+                        self.merge_adjacent(&mut parts, end);
+                        if parts.is_empty() {
+                            parts.push(WordPart::Literal(String::new()));
+                        }
                         assignments.push(Assignment {
                             name,
-                            value: Word::literal(&value),
+                            value: Word::from_parts(parts),
                         });
                     }
                 }
-                TokenKind::Less | TokenKind::Great | TokenKind::DGreat
-                | TokenKind::LessAnd | TokenKind::GreatAnd | TokenKind::IoNumber(_) => {
+                TokenKind::Less
+                | TokenKind::Great
+                | TokenKind::DGreat
+                | TokenKind::LessAnd
+                | TokenKind::GreatAnd
+                | TokenKind::IoNumber(_) => {
                     redirects.push(self.parse_redirect()?);
                 }
                 _ => break,
@@ -289,6 +349,7 @@ impl Parser {
         loop {
             match self.peek() {
                 TokenKind::Word(_)
+                | TokenKind::AssignmentWord { .. }
                 | TokenKind::SingleQuoted(_)
                 | TokenKind::DoubleQuoted(_)
                 | TokenKind::DollarVar(_)
@@ -296,11 +357,16 @@ impl Parser {
                 | TokenKind::DollarBrace(_)
                 | TokenKind::Backquote(_)
                 | TokenKind::GlobStar
-                | TokenKind::GlobQuestion => {
+                | TokenKind::GlobQuestion
+                | TokenKind::GlobBracket(_) => {
                     words.push(self.parse_word()?);
                 }
-                TokenKind::Less | TokenKind::Great | TokenKind::DGreat
-                | TokenKind::LessAnd | TokenKind::GreatAnd | TokenKind::IoNumber(_) => {
+                TokenKind::Less
+                | TokenKind::Great
+                | TokenKind::DGreat
+                | TokenKind::LessAnd
+                | TokenKind::GreatAnd
+                | TokenKind::IoNumber(_) => {
                     redirects.push(self.parse_redirect()?);
                 }
                 _ => break,
@@ -318,26 +384,42 @@ impl Parser {
         })
     }
 
-    /// Parse a single word (may be multi-part).
+    /// Parse a single shell word. Tokens that abut with no intervening
+    /// whitespace (tracked via source spans) are concatenated into one word —
+    /// so `pre${VAR}.txt`, `"a"b`, `$x$y` and `def=${VAR}` each become a single
+    /// multi-part word, matching shell word-splitting semantics.
     fn parse_word(&mut self) -> Result<Word, ParseError> {
         let mut parts = Vec::new();
 
-        match self.advance().kind.clone() {
-            TokenKind::Word(s) => parts.push(WordPart::Literal(s)),
-            TokenKind::SingleQuoted(s) => parts.push(WordPart::SingleQuoted(s)),
-            TokenKind::DoubleQuoted(s) => parts.push(WordPart::DoubleQuoted(s)),
-            TokenKind::DollarVar(s) => parts.push(WordPart::Variable(s)),
-            TokenKind::DollarParen(s) => parts.push(WordPart::CommandSub(s)),
-            TokenKind::DollarBrace(s) => parts.push(WordPart::BraceExpansion(s)),
-            TokenKind::Backquote(s) => parts.push(WordPart::CommandSub(s)),
-            TokenKind::GlobStar => parts.push(WordPart::Glob(GlobPattern::Star)),
-            TokenKind::GlobQuestion => parts.push(WordPart::Glob(GlobPattern::Question)),
-            other => {
-                return Err(self.error(&alloc::format!("Expected word, got {:?}", other)));
-            }
+        let first = self.advance().clone();
+        let word_end = first.span.offset + first.span.len;
+        if !push_word_part(&first.kind, &mut parts) {
+            return Err(self.error(&alloc::format!("Expected word, got {:?}", first.kind)));
         }
 
+        // Greedily merge immediately-adjacent word-like tokens.
+        self.merge_adjacent(&mut parts, word_end);
+
         Ok(Word::from_parts(parts))
+    }
+
+    /// Consume tokens that begin exactly where the previous one ended (no
+    /// intervening whitespace) and append their word parts to `parts`.
+    fn merge_adjacent(&mut self, parts: &mut Vec<WordPart>, mut word_end: usize) {
+        loop {
+            let tok = self.current_token();
+            if tok.span.offset != word_end {
+                break;
+            }
+            let mut more = Vec::new();
+            if push_word_part(&tok.kind, &mut more) {
+                word_end = tok.span.offset + tok.span.len;
+                parts.extend(more);
+                self.advance();
+            } else {
+                break;
+            }
+        }
     }
 
     /// Parse a redirect: [N]< | > | >> | <& | >& WORD
@@ -393,8 +475,11 @@ impl Parser {
         let mut redirects = Vec::new();
         while matches!(
             self.peek(),
-            TokenKind::Less | TokenKind::Great | TokenKind::DGreat
-                | TokenKind::LessAnd | TokenKind::GreatAnd
+            TokenKind::Less
+                | TokenKind::Great
+                | TokenKind::DGreat
+                | TokenKind::LessAnd
+                | TokenKind::GreatAnd
         ) {
             redirects.push(self.parse_redirect()?);
         }
@@ -415,8 +500,11 @@ impl Parser {
         let mut redirects = Vec::new();
         while matches!(
             self.peek(),
-            TokenKind::Less | TokenKind::Great | TokenKind::DGreat
-                | TokenKind::LessAnd | TokenKind::GreatAnd
+            TokenKind::Less
+                | TokenKind::Great
+                | TokenKind::DGreat
+                | TokenKind::LessAnd
+                | TokenKind::GreatAnd
         ) {
             redirects.push(self.parse_redirect()?);
         }
@@ -595,6 +683,32 @@ impl Parser {
             body: Box::new(body),
         })
     }
+}
+
+/// Append a token's word part(s) to `parts`. Returns `false` if the token is
+/// not word-like (so callers know to stop merging). An `AssignmentWord` in word
+/// position (i.e. after the command name) is a plain `name=value` literal.
+fn push_word_part(kind: &TokenKind, parts: &mut Vec<WordPart>) -> bool {
+    match kind {
+        TokenKind::Word(s) => parts.push(WordPart::Literal(s.clone())),
+        TokenKind::AssignmentWord { name, value } => {
+            let mut lit = name.clone();
+            lit.push('=');
+            lit.push_str(value);
+            parts.push(WordPart::Literal(lit));
+        }
+        TokenKind::SingleQuoted(s) => parts.push(WordPart::SingleQuoted(s.clone())),
+        TokenKind::DoubleQuoted(s) => parts.push(WordPart::DoubleQuoted(s.clone())),
+        TokenKind::DollarVar(s) => parts.push(WordPart::Variable(s.clone())),
+        TokenKind::DollarParen(s) => parts.push(WordPart::CommandSub(s.clone())),
+        TokenKind::DollarBrace(s) => parts.push(WordPart::BraceExpansion(s.clone())),
+        TokenKind::Backquote(s) => parts.push(WordPart::CommandSub(s.clone())),
+        TokenKind::GlobStar => parts.push(WordPart::Glob(GlobPattern::Star)),
+        TokenKind::GlobQuestion => parts.push(WordPart::Glob(GlobPattern::Question)),
+        TokenKind::GlobBracket(s) => parts.push(WordPart::Glob(GlobPattern::Bracket(s.clone()))),
+        _ => return false,
+    }
+    true
 }
 
 #[cfg(test)]

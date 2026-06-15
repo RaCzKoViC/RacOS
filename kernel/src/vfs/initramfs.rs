@@ -90,17 +90,18 @@ impl Initramfs {
 
         self.entries[0].children.push(ino);
 
-        crate::serial::serial_println!(
-            "[INITRAMFS] Added directory '{}' (inode {})",
-            name,
-            ino
-        );
+        crate::serial::serial_println!("[INITRAMFS] Added directory '{}' (inode {})", name, ino);
 
         ino
     }
 
     /// Add a file as child of a directory.
-    pub fn add_file_to(&mut self, parent_ino: InodeNum, name: &str, data: &'static [u8]) -> InodeNum {
+    pub fn add_file_to(
+        &mut self,
+        parent_ino: InodeNum,
+        name: &str,
+        data: &'static [u8],
+    ) -> InodeNum {
         let ino = self.entries.len() as InodeNum;
         self.entries.push(InitramfsEntry {
             name: String::from(name),
@@ -180,9 +181,8 @@ impl Initramfs {
 
         // SAFETY: The bootloader allocated these pages as LOADER_DATA.
         // After ExitBootServices they belong to us permanently — treat as 'static.
-        let data: &'static [u8] = unsafe {
-            core::slice::from_raw_parts(base as *const u8, size as usize)
-        };
+        let data: &'static [u8] =
+            unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) };
 
         // Validate magic "RACRAMFS"
         if &data[0..8] != b"RACRAMFS" {
@@ -230,14 +230,16 @@ impl Initramfs {
             if offset + data_len > data.len() {
                 break;
             }
-            let file_data: &'static [u8] = unsafe {
-                core::slice::from_raw_parts(data.as_ptr().add(offset), data_len)
-            };
+            let file_data: &'static [u8] =
+                unsafe { core::slice::from_raw_parts(data.as_ptr().add(offset), data_len) };
             offset += data_len;
 
             crate::serial::serial_println!(
                 "[INITRAMFS]   [{}/{}] {} ({} bytes)",
-                i + 1, count, name, data_len
+                i + 1,
+                count,
+                name,
+                data_len
             );
             fs.add_path(name, file_data);
         }
@@ -339,6 +341,10 @@ impl Filesystem for Initramfs {
     fn name(&self) -> &str {
         "initramfs"
     }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
 /// Wrapper that holds Arc<Initramfs> for proper Filesystem + InodeOps implementation.
@@ -378,5 +384,9 @@ impl Filesystem for InitramfsFs {
 
     fn name(&self) -> &str {
         "initramfs"
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }

@@ -21,13 +21,13 @@ pub fn init() {
     // These ports are standard PC serial controller registers.
     unsafe {
         crate::arch::outb(COM1_PORT + 1, 0x00); // Disable interrupts
-        crate::arch::outb(COM1_PORT + 3, 0x80); // Enable DLAB (set baud rate divisor)       
+        crate::arch::outb(COM1_PORT + 3, 0x80); // Enable DLAB (set baud rate divisor)
         crate::arch::outb(COM1_PORT + 0, 0x01); // Divisor low byte: 115200 baud
         crate::arch::outb(COM1_PORT + 1, 0x00); // Divisor high byte
         crate::arch::outb(COM1_PORT + 3, 0x03); // 8 bits, no parity, one stop bit
-        crate::arch::outb(COM1_PORT + 2, 0xC7); // Enable FIFO, clear, 14-byte threshold     
+        crate::arch::outb(COM1_PORT + 2, 0xC7); // Enable FIFO, clear, 14-byte threshold
         crate::arch::outb(COM1_PORT + 4, 0x0B); // IRQs enabled, RTS/DSR set
-        // Enable Received Data Available interrupt
+                                                // Enable Received Data Available interrupt
         crate::arch::outb(COM1_PORT + 1, 0x01);
     }
 }
@@ -92,9 +92,7 @@ pub fn handle_irq() {
 
             // Ctrl-C (0x03) → send SIGINT to foreground process
             if byte == 0x03 {
-                crate::task::scheduler::signal_foreground(
-                    crate::task::signal::Signal::SIGINT,
-                );
+                crate::task::scheduler::signal_foreground(crate::task::signal::Signal::SIGINT);
                 continue;
             }
 

@@ -3,7 +3,6 @@
 ///
 /// This crate provides the service management logic used by the
 /// kernel-side init task (PID 1) during early development.
-
 extern crate alloc;
 
 use alloc::string::String;

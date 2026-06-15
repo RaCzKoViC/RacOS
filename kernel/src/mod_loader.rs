@@ -2,8 +2,8 @@
 //
 // Placeholder for dynamic extension loading (ADR-002: Modular Monolithic).
 
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 pub struct KernelModule {
     pub name: String,

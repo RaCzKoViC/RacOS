@@ -3,7 +3,6 @@
 /// RacTerm — RacOS Terminal Emulator (ADR-016, TERMINAL_PROTOCOLS.md)
 ///
 /// Layers: Input → Escape Parser → Screen Buffer + Cursor → Renderer.
-
 extern crate alloc;
 
 pub mod buffer;

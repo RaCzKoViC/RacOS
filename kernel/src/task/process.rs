@@ -11,13 +11,13 @@
 
 extern crate alloc;
 
-use crate::arch::gdt;
-use crate::elf::LoadedElf;
-use crate::mm::{phys, virt};
-use crate::mm::virt::flags as vflags;
-use super::task::{Task, TaskState, KERNEL_STACK_PAGES, KERNEL_STACK_SIZE};
 use super::context::TaskContext;
 use super::signal::SignalState;
+use super::task::{Task, TaskState, KERNEL_STACK_PAGES, KERNEL_STACK_SIZE};
+use crate::arch::gdt;
+use crate::elf::LoadedElf;
+use crate::mm::virt::flags as vflags;
+use crate::mm::{phys, virt};
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -72,8 +72,8 @@ impl UserProcess {
         let alloc_frame = phys::alloc_contiguous(total_pages)
             .map_err(|_| "Failed to allocate kernel stack + guard")?;
         let alloc_base = alloc_frame.addr();
-        let kernel_stack_base = alloc_base
-            + (super::task::KERNEL_STACK_GUARD_PAGES * phys::FRAME_SIZE) as u64;
+        let kernel_stack_base =
+            alloc_base + (super::task::KERNEL_STACK_GUARD_PAGES * phys::FRAME_SIZE) as u64;
         let kernel_stack_top = kernel_stack_base + KERNEL_STACK_SIZE as u64;
 
         unsafe {
@@ -86,7 +86,8 @@ impl UserProcess {
         }
         crate::serial::serial_println!(
             "[ USERPROC ] kernel stack @ 0x{:X} (guard @ 0x{:X})",
-            kernel_stack_base, alloc_base
+            kernel_stack_base,
+            alloc_base
         );
 
         // ── Push argv onto the user stack ─────────────────────────────────
@@ -108,9 +109,8 @@ impl UserProcess {
         // of [user_rsp+0] and _start would read 0 (alignment pad) as argc.
 
         let stack_virt_base = loaded.stack_virt_top - loaded.stack_size as u64;
-        let virt_to_phys = |vaddr: u64| -> u64 {
-            loaded.stack_phys_base + (vaddr - stack_virt_base)
-        };
+        let virt_to_phys =
+            |vaddr: u64| -> u64 { loaded.stack_phys_base + (vaddr - stack_virt_base) };
 
         let mut sp = loaded.stack_virt_top;
         let argc = argv.len();
@@ -119,7 +119,9 @@ impl UserProcess {
         let mut string_vaddrs = alloc::vec::Vec::with_capacity(argc);
         for arg in argv.iter().rev() {
             sp -= 1;
-            unsafe { *(virt_to_phys(sp) as *mut u8) = 0; }
+            unsafe {
+                *(virt_to_phys(sp) as *mut u8) = 0;
+            }
             sp -= arg.len() as u64;
             unsafe {
                 core::ptr::copy_nonoverlapping(
@@ -160,7 +162,9 @@ impl UserProcess {
 
         crate::serial::serial_println!(
             "[ USERPROC ] argv/user stack prepared rsp=0x{:X} argc={} block_bytes={}",
-            user_rsp, argc, block_bytes_aligned,
+            user_rsp,
+            argc,
+            block_bytes_aligned,
         );
 
         // Set up the IRETQ frame at the top of the kernel stack.
@@ -173,13 +177,16 @@ impl UserProcess {
         unsafe {
             let frame = iret_frame_start as *mut u64;
             // IRETQ pops: RIP, CS, RFLAGS, RSP, SS (in that order)
-            *frame.add(0) = loaded.entry_point;            // RIP
-            *frame.add(1) = gdt::USER_CS as u64;           // CS
-            *frame.add(2) = user_rflags;                   // RFLAGS
-            *frame.add(3) = user_rsp;                      // RSP (adjusted for argv)
-            *frame.add(4) = gdt::USER_DS as u64;            // SS
+            *frame.add(0) = loaded.entry_point; // RIP
+            *frame.add(1) = gdt::USER_CS as u64; // CS
+            *frame.add(2) = user_rflags; // RFLAGS
+            *frame.add(3) = user_rsp; // RSP (adjusted for argv)
+            *frame.add(4) = gdt::USER_DS as u64; // SS
         }
-        crate::serial::serial_println!("[ USERPROC ] iret frame prepared @ 0x{:X}", iret_frame_start);
+        crate::serial::serial_println!(
+            "[ USERPROC ] iret frame prepared @ 0x{:X}",
+            iret_frame_start
+        );
 
         // Set up the task context so context_switch will jump to our trampoline.
         // The trampoline will set up segments and execute IRETQ.
@@ -198,13 +205,16 @@ impl UserProcess {
             seg_bases[i] = loaded.segments[i].paddr;
             seg_sizes[i] = loaded.segments[i].memsz;
         }
-        crate::serial::serial_println!("[ USERPROC ] segment metadata captured (count={})", loaded.segment_count);
+        crate::serial::serial_println!(
+            "[ USERPROC ] segment metadata captured (count={})",
+            loaded.segment_count
+        );
 
         // ── Create user page table ─────────────────────────────────────────
         // Clone the kernel's current PML4 so the process inherits kernel
         // mappings needed for syscall entry/exit code.
-        let pml4_phys = virt::create_user_page_table()
-            .map_err(|_| "Failed to create user page table")?;
+        let pml4_phys =
+            virt::create_user_page_table().map_err(|_| "Failed to create user page table")?;
         crate::serial::serial_println!("[ USERPROC ] user page table created @ 0x{:X}", pml4_phys);
 
         // ── Map ELF segments into the user page table ──────────────────────
@@ -229,7 +239,8 @@ impl UserProcess {
                     seg.paddr,
                     (pages * phys::FRAME_SIZE) as u64,
                     page_flags,
-                ).map_err(|_| "Failed to map ELF segment")?;
+                )
+                .map_err(|_| "Failed to map ELF segment")?;
             }
             crate::serial::serial_println!(
                 "[ USERPROC ] mapped seg {} v=0x{:X} p=0x{:X} size=0x{:X}",
@@ -250,7 +261,8 @@ impl UserProcess {
                 loaded.stack_phys_base,
                 loaded.stack_size as u64,
                 vflags::USER_DATA,
-            ).map_err(|_| "Failed to map user stack")?;
+            )
+            .map_err(|_| "Failed to map user stack")?;
         }
         crate::serial::serial_println!(
             "[ USERPROC ] mapped user stack v=0x{:X} p=0x{:X} size=0x{:X}",

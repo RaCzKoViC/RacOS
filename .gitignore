@@ -19,10 +19,12 @@ Thumbs.db
 *.qcow2
 *.raw
 *.iso
+*.img
 !images/*.iso
 
 # Debug
 *.log
+*.pcap
 core.*
 crash-*.dump
 build_error.txt

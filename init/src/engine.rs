@@ -6,9 +6,9 @@
 
 extern crate alloc;
 
+use crate::{parse_unit, RestartPolicy, ServiceType, Unit, UnitState, UnitType};
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::{Unit, UnitState, UnitType, ServiceType, RestartPolicy, parse_unit};
 
 /// Maximum number of units the engine can manage.
 const _MAX_UNITS: usize = 32;
@@ -33,11 +33,7 @@ impl Engine {
     pub fn load_units_from(&mut self, dir: &str) {
         // Read directory entries via VFS
         // For MVP: try to open known unit files
-        let known_units = [
-            "console.service",
-            "shell.service",
-            "base.target",
-        ];
+        let known_units = ["console.service", "shell.service", "base.target"];
 
         for name in &known_units {
             let mut path = String::with_capacity(dir.len() + 1 + name.len() + 1);

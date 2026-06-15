@@ -1,0 +1,13 @@
+[package]
+name = "racos-mkfs-racfs"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+# Cargo rejects '.' in crate names — published as mkfs_racfs in target/, then
+# renamed to mkfs.racfs when copied into the initramfs.
+name = "mkfs_racfs"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

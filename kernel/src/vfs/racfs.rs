@@ -60,9 +60,9 @@ struct Superblock {
     total_sectors: u32,
     inode_count: u32,
     data_block_count: u32,
-    bitmap_start: u32,   // sector offset
-    inode_start: u32,     // sector offset
-    data_start: u32,      // sector offset
+    bitmap_start: u32, // sector offset
+    inode_start: u32,  // sector offset
+    data_start: u32,   // sector offset
     free_inodes: u32,
     free_blocks: u32,
     _pad: [u8; 512 - 40],
@@ -72,16 +72,16 @@ struct Superblock {
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct DiskInode {
-    itype: u8,           // ITYPE_*
-    mode: u16,           // permission bits
+    itype: u8, // ITYPE_*
+    mode: u16, // permission bits
     _pad1: u8,
-    size: u32,           // file size in bytes
+    size: u32, // file size in bytes
     nlink: u16,
     _pad2: u16,
     uid: u32,
     gid: u32,
     /// Direct block indices (relative to data_start).
-    direct: [u32; DIRECT_BLOCKS],  // 32 bytes
+    direct: [u32; DIRECT_BLOCKS], // 32 bytes
     /// Number of directory entries (for dirs).
     dir_entry_count: u32,
     _reserved: [u8; 128 - 56],
@@ -110,11 +110,15 @@ fn read_u32_le(buf: &[u8], off: usize) -> u32 {
 }
 fn write_u16_le(buf: &mut [u8], off: usize, v: u16) {
     let b = v.to_le_bytes();
-    buf[off] = b[0]; buf[off + 1] = b[1];
+    buf[off] = b[0];
+    buf[off + 1] = b[1];
 }
 fn write_u32_le(buf: &mut [u8], off: usize, v: u32) {
     let b = v.to_le_bytes();
-    buf[off] = b[0]; buf[off + 1] = b[1]; buf[off + 2] = b[2]; buf[off + 3] = b[3];
+    buf[off] = b[0];
+    buf[off + 1] = b[1];
+    buf[off + 2] = b[2];
+    buf[off + 3] = b[3];
 }
 
 fn superblock_from_sector(buf: &[u8; SECTOR_SIZE]) -> Superblock {
@@ -217,6 +221,34 @@ unsafe impl Send for Racfs {}
 unsafe impl Sync for Racfs {}
 
 impl Racfs {
+    /// Mount an existing racfs from `device` without touching its contents.
+    /// Returns Err(IoError) if the superblock magic / version does not match,
+    /// which the caller may use to fall back to `format_and_new`.
+    pub fn open(device: Arc<dyn BlockDevice>) -> VfsResult<Arc<Self>> {
+        let mut cache = BlockCache::new(device);
+        let mut buf = [0u8; SECTOR_SIZE];
+        cache
+            .read_sector(0, &mut buf)
+            .map_err(|_| VfsError::IoError)?;
+        let sb = superblock_from_sector(&buf);
+        if sb.magic != RACFS_MAGIC || sb.version != RACFS_VERSION {
+            return Err(VfsError::IoError);
+        }
+        Ok(Arc::new(Racfs {
+            cache: UnsafeCell::new(cache),
+            sb: UnsafeCell::new(sb),
+        }))
+    }
+
+    /// Probe `device` for a valid racfs superblock; if absent, format it.
+    /// Returns the resulting filesystem either way.
+    pub fn open_or_format(device: Arc<dyn BlockDevice>) -> VfsResult<Arc<Self>> {
+        match Self::open(device.clone()) {
+            Ok(fs) => Ok(fs),
+            Err(_) => Self::format_and_new(device),
+        }
+    }
+
     /// Format and mount a block device as racfs.
     pub fn format_and_new(device: Arc<dyn BlockDevice>) -> VfsResult<Arc<Self>> {
         let total_sectors = device.sector_count() as u32;
@@ -247,15 +279,20 @@ impl Racfs {
 
         // Write superblock.
         let sb_buf = superblock_to_sector(&sb);
-        cache.write_sector(0, &sb_buf).map_err(|_| VfsError::IoError)?;
+        cache
+            .write_sector(0, &sb_buf)
+            .map_err(|_| VfsError::IoError)?;
 
         // Zero bitmap.
         let zero = [0u8; SECTOR_SIZE];
-        cache.write_sector(bitmap_start as u64, &zero).map_err(|_| VfsError::IoError)?;
+        cache
+            .write_sector(bitmap_start as u64, &zero)
+            .map_err(|_| VfsError::IoError)?;
 
         // Zero inode table.
         for s in 0..inode_sectors {
-            cache.write_sector((inode_start as usize + s) as u64, &zero)
+            cache
+                .write_sector((inode_start as usize + s) as u64, &zero)
                 .map_err(|_| VfsError::IoError)?;
         }
 
@@ -282,7 +319,9 @@ impl Racfs {
 
         crate::serial::serial_println!(
             "[  RACFS  ] Formatted: {} sectors, {} data blocks, {} inodes",
-            total_sectors, data_block_count, MAX_INODES
+            total_sectors,
+            data_block_count,
+            MAX_INODES
         );
 
         Ok(fs)
@@ -300,10 +339,38 @@ impl Racfs {
         unsafe { &mut *self.sb.get() }
     }
 
+    /// Public stats snapshot (total_blocks, free_blocks, total_inodes, free_inodes).
+    /// Block size is SECTOR_SIZE (512 B). Used by /proc/diskstats.
+    pub fn stats(&self) -> (u32, u32, u32, u32) {
+        let sb = self.sb();
+        (
+            sb.data_block_count,
+            sb.free_blocks,
+            sb.inode_count,
+            sb.free_inodes,
+        )
+    }
+
+    /// Force all dirty cache entries to disk. Idempotent — no-op if nothing
+    /// is dirty. Called by sys_sync and the periodic flushd kernel task.
+    pub fn sync(&self) -> VfsResult<()> {
+        self.cache_mut().flush().map_err(|_| VfsError::IoError)
+    }
+
+    /// Cache counters: (hits, misses, cached_entries, dirty_entries).
+    /// Used by /proc/cachestats.
+    pub fn cache_stats(&self) -> (u64, u64, usize, usize) {
+        let cache = self.cache_mut();
+        let (h, m, e) = cache.stats();
+        (h, m, e, cache.dirty_count())
+    }
+
     /// Flush the superblock to disk.
     fn flush_sb(&self) -> VfsResult<()> {
         let buf = superblock_to_sector(self.sb());
-        self.cache_mut().write_sector(0, &buf).map_err(|_| VfsError::IoError)
+        self.cache_mut()
+            .write_sector(0, &buf)
+            .map_err(|_| VfsError::IoError)
     }
 
     /// Read an on-disk inode by number.
@@ -316,8 +383,12 @@ impl Racfs {
         let offset_in_sector = (ino as usize % INODES_PER_SECTOR) * INODE_DISK_SIZE;
 
         let mut buf = [0u8; SECTOR_SIZE];
-        self.cache_mut().read_sector(sector, &mut buf).map_err(|_| VfsError::IoError)?;
-        Ok(inode_from_bytes(&buf[offset_in_sector..offset_in_sector + INODE_DISK_SIZE]))
+        self.cache_mut()
+            .read_sector(sector, &mut buf)
+            .map_err(|_| VfsError::IoError)?;
+        Ok(inode_from_bytes(
+            &buf[offset_in_sector..offset_in_sector + INODE_DISK_SIZE],
+        ))
     }
 
     /// Write an on-disk inode by number.
@@ -327,10 +398,14 @@ impl Racfs {
         let offset_in_sector = (ino as usize % INODES_PER_SECTOR) * INODE_DISK_SIZE;
 
         let mut buf = [0u8; SECTOR_SIZE];
-        self.cache_mut().read_sector(sector, &mut buf).map_err(|_| VfsError::IoError)?;
+        self.cache_mut()
+            .read_sector(sector, &mut buf)
+            .map_err(|_| VfsError::IoError)?;
         let inode_bytes = inode_to_bytes(inode);
         buf[offset_in_sector..offset_in_sector + INODE_DISK_SIZE].copy_from_slice(&inode_bytes);
-        self.cache_mut().write_sector(sector, &buf).map_err(|_| VfsError::IoError)
+        self.cache_mut()
+            .write_sector(sector, &buf)
+            .map_err(|_| VfsError::IoError)
     }
 
     /// Allocate a free inode. Returns inode number.
@@ -374,7 +449,8 @@ impl Racfs {
             return Err(VfsError::NoSpace);
         }
         let mut bitmap = [0u8; SECTOR_SIZE];
-        self.cache_mut().read_sector(sb.bitmap_start as u64, &mut bitmap)
+        self.cache_mut()
+            .read_sector(sb.bitmap_start as u64, &mut bitmap)
             .map_err(|_| VfsError::IoError)?;
 
         let total = sb.data_block_count as usize;
@@ -392,7 +468,8 @@ impl Racfs {
                 }
                 if bitmap[byte_idx] & (1 << bit) == 0 {
                     bitmap[byte_idx] |= 1 << bit;
-                    self.cache_mut().write_sector(sb.bitmap_start as u64, &bitmap)
+                    self.cache_mut()
+                        .write_sector(sb.bitmap_start as u64, &bitmap)
                         .map_err(|_| VfsError::IoError)?;
                     self.sb_mut().free_blocks -= 1;
                     // Data block indices are 1-based (0 = "no block").
@@ -411,12 +488,14 @@ impl Racfs {
         let idx = (block - 1) as usize;
         let sb = self.sb();
         let mut bitmap = [0u8; SECTOR_SIZE];
-        self.cache_mut().read_sector(sb.bitmap_start as u64, &mut bitmap)
+        self.cache_mut()
+            .read_sector(sb.bitmap_start as u64, &mut bitmap)
             .map_err(|_| VfsError::IoError)?;
         let byte_idx = idx / 8;
         let bit = idx % 8;
         bitmap[byte_idx] &= !(1u8 << bit);
-        self.cache_mut().write_sector(sb.bitmap_start as u64, &bitmap)
+        self.cache_mut()
+            .write_sector(sb.bitmap_start as u64, &bitmap)
             .map_err(|_| VfsError::IoError)?;
         self.sb_mut().free_blocks += 1;
         Ok(())
@@ -433,7 +512,8 @@ impl Racfs {
             *out = [0u8; SECTOR_SIZE];
             return Ok(());
         }
-        self.cache_mut().read_sector(self.data_sector(block), out)
+        self.cache_mut()
+            .read_sector(self.data_sector(block), out)
             .map_err(|_| VfsError::IoError)
     }
 
@@ -442,7 +522,8 @@ impl Racfs {
         if block == 0 {
             return Err(VfsError::InvalidArgument);
         }
-        self.cache_mut().write_sector(self.data_sector(block), data)
+        self.cache_mut()
+            .write_sector(self.data_sector(block), data)
             .map_err(|_| VfsError::IoError)
     }
 
@@ -500,8 +581,7 @@ impl Racfs {
         if parent.itype != ITYPE_DIR {
             return Err(VfsError::NotADirectory);
         }
-        let child_ino = self.dir_lookup(&parent, name)?
-            .ok_or(VfsError::NotFound)?;
+        let child_ino = self.dir_lookup(&parent, name)?.ok_or(VfsError::NotFound)?;
         let child = self.read_inode(child_ino)?;
 
         // If directory, must be empty.
@@ -709,7 +789,9 @@ impl Racfs {
             if inode.itype != ITYPE_DIR {
                 return Err(VfsError::NotADirectory);
             }
-            current = self.dir_lookup(&inode, component)?.ok_or(VfsError::NotFound)?;
+            current = self
+                .dir_lookup(&inode, component)?
+                .ok_or(VfsError::NotFound)?;
         }
         Ok(current)
     }
@@ -824,7 +906,10 @@ impl InodeOps for RacfsInode {
         if di.itype != ITYPE_DIR {
             return Err(VfsError::NotADirectory);
         }
-        self.fs.dir_lookup(&di, name)?.ok_or(VfsError::NotFound).map(|i| i as InodeNum)
+        self.fs
+            .dir_lookup(&di, name)?
+            .ok_or(VfsError::NotFound)
+            .map(|i| i as InodeNum)
     }
 
     fn readdir(&self) -> VfsResult<Vec<DirEntry>> {
@@ -845,11 +930,20 @@ impl RacfsFilesystem {
     pub fn new(racfs: Arc<Racfs>) -> Arc<Self> {
         Arc::new(RacfsFilesystem { inner: racfs })
     }
+
+    /// Access the concrete Racfs backing this mount. Used by syscall handlers
+    /// to route create/mkdir/unlink to the right disk, not a global singleton.
+    pub fn inner(&self) -> Arc<Racfs> {
+        self.inner.clone()
+    }
 }
 
 impl Filesystem for RacfsFilesystem {
     fn root_inode(&self) -> Arc<dyn InodeOps> {
-        Arc::new(RacfsInode { ino: 0, fs: self.inner.clone() })
+        Arc::new(RacfsInode {
+            ino: 0,
+            fs: self.inner.clone(),
+        })
     }
 
     fn get_inode(&self, ino: InodeNum) -> VfsResult<Arc<dyn InodeOps>> {
@@ -858,11 +952,18 @@ impl Filesystem for RacfsFilesystem {
         if di.itype == ITYPE_FREE {
             return Err(VfsError::NotFound);
         }
-        Ok(Arc::new(RacfsInode { ino: ino as u32, fs: self.inner.clone() }))
+        Ok(Arc::new(RacfsInode {
+            ino: ino as u32,
+            fs: self.inner.clone(),
+        }))
     }
 
     fn name(&self) -> &str {
         "racfs"
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }
 
@@ -875,13 +976,13 @@ static mut RACFS_INSTANCE: Option<Arc<Racfs>> = None;
 /// # Safety
 /// Must be called once during kernel init after block devices are ready.
 pub unsafe fn init() -> Arc<Racfs> {
-    let dev = crate::drivers::block::find("ram0")
-        .expect("racfs: no ram0 block device found");
-    let racfs = Racfs::format_and_new(dev)
-        .expect("racfs: format failed");
+    let dev = crate::drivers::block::find("ram0").expect("racfs: no ram0 block device found");
+    let racfs = Racfs::format_and_new(dev).expect("racfs: format failed");
     let inst = &mut *core::ptr::addr_of_mut!(RACFS_INSTANCE);
     *inst = Some(racfs.clone());
-    crate::serial::serial_println!("[  0.000360] RACORE: racfs initialized (block-device-backed on ram0)");
+    crate::serial::serial_println!(
+        "[  0.000360] RACORE: racfs initialized (block-device-backed on ram0)"
+    );
     racfs
 }
 
@@ -893,3 +994,44 @@ pub unsafe fn instance() -> &'static Arc<Racfs> {
     (*core::ptr::addr_of!(RACFS_INSTANCE)).as_ref().unwrap()
 }
 
+/// Persistence smoke test for a mounted racfs. Looks up `boot-counter` in the
+/// root; if it exists, reads the integer, increments it and writes it back; if
+/// not, creates it with `1`. Run on each boot to show that file contents
+/// survive reboots across the entire on-disk format (inodes, bitmap, data
+/// blocks, directory entries).
+pub fn persistence_test(fs: &Racfs, label: &str) {
+    use alloc::string::ToString;
+    const NAME: &str = "boot-counter";
+    match fs.lookup_path(NAME) {
+        Ok(ino) => {
+            let mut buf = [0u8; 16];
+            let n = fs.read_file(ino, 0, &mut buf).unwrap_or(0);
+            let text = core::str::from_utf8(&buf[..n]).unwrap_or("0");
+            let value: u32 = text.trim().parse().unwrap_or(0);
+            let next = value.saturating_add(1);
+            let s = next.to_string();
+            // Write the new counter back over the old contents.
+            let _ = fs.write_file(ino, 0, s.as_bytes());
+            crate::serial::serial_println!(
+                "[ RACFS {} ] boot-counter = {} (was {}, file survived reboot)",
+                label,
+                next,
+                value,
+            );
+        }
+        Err(_) => match fs.create_file(0, NAME) {
+            Ok(ino) => {
+                let _ = fs.write_file(ino, 0, b"1");
+                crate::serial::serial_println!(
+                    "[ RACFS {} ] created boot-counter = 1 (first boot)",
+                    label
+                );
+            }
+            Err(e) => crate::serial::serial_println!(
+                "[ RACFS {} ] create boot-counter failed: {:?}",
+                label,
+                e
+            ),
+        },
+    }
+}

@@ -100,7 +100,7 @@ const EXECUTABLE: u8 = 0x08;
 const READ_WRITE: u8 = 0x02;
 
 // Granularity byte flags
-const LONG_MODE: u8 = 0x20;   // 64-bit code segment
+const LONG_MODE: u8 = 0x20; // 64-bit code segment
 const GRANULARITY_4K: u8 = 0x80;
 
 // TSS type: 0x89 = Present + 64-bit Available TSS
@@ -108,13 +108,19 @@ const TSS_PRESENT_TYPE: u8 = 0x89;
 
 /// GDT: 5 normal entries + 2 entries for TSS (16-byte descriptor) = 7 slots
 static mut GDT: [GdtEntry; 7] = [
-    GdtEntry::null(),                                                              // 0x00: Null
-    GdtEntry::new(PRESENT | DPL_RING0 | SEGMENT | EXECUTABLE | READ_WRITE, LONG_MODE | GRANULARITY_4K), // 0x08: Kernel code
-    GdtEntry::new(PRESENT | DPL_RING0 | SEGMENT | READ_WRITE, GRANULARITY_4K),     // 0x10: Kernel data
-    GdtEntry::new(PRESENT | DPL_RING3 | SEGMENT | READ_WRITE, GRANULARITY_4K),     // 0x18: User data (before user code for SYSRET)
-    GdtEntry::new(PRESENT | DPL_RING3 | SEGMENT | EXECUTABLE | READ_WRITE, LONG_MODE | GRANULARITY_4K), // 0x20: User code
-    GdtEntry::null(),                                                              // 0x28: TSS low (filled at runtime)
-    GdtEntry::null(),                                                              // 0x30: TSS high (filled at runtime)
+    GdtEntry::null(), // 0x00: Null
+    GdtEntry::new(
+        PRESENT | DPL_RING0 | SEGMENT | EXECUTABLE | READ_WRITE,
+        LONG_MODE | GRANULARITY_4K,
+    ), // 0x08: Kernel code
+    GdtEntry::new(PRESENT | DPL_RING0 | SEGMENT | READ_WRITE, GRANULARITY_4K), // 0x10: Kernel data
+    GdtEntry::new(PRESENT | DPL_RING3 | SEGMENT | READ_WRITE, GRANULARITY_4K), // 0x18: User data (before user code for SYSRET)
+    GdtEntry::new(
+        PRESENT | DPL_RING3 | SEGMENT | EXECUTABLE | READ_WRITE,
+        LONG_MODE | GRANULARITY_4K,
+    ), // 0x20: User code
+    GdtEntry::null(), // 0x28: TSS low (filled at runtime)
+    GdtEntry::null(), // 0x30: TSS high (filled at runtime)
 ];
 
 /// Global TSS instance.
@@ -130,6 +136,49 @@ pub const TSS_SELECTOR: u16 = 0x28;
 pub unsafe fn set_kernel_stack(rsp0: u64) {
     let tss = &mut *core::ptr::addr_of_mut!(TSS);
     tss.rsp0 = rsp0;
+}
+
+/// Read the current TSS.RSP0 (kernel stack pointer for ring 3 → ring 0).
+pub fn current_kernel_stack() -> u64 {
+    unsafe { (*core::ptr::addr_of!(TSS)).rsp0 }
+}
+
+/// Load the BSP's kernel GDT on the running CPU and reload all segment
+/// registers (including CS via a far return) to point at it. Called from
+/// `ap_entry` after long-mode bring-up so the AP stops using its
+/// trampoline GDT — that one has 0x08 as a *32-bit* code segment, which
+/// triple-faults the moment an IRQ tries to load CS = 0x08 from the IDT.
+///
+/// # Safety
+/// Must run on an AP in long mode, before that AP loads the IDT or takes
+/// any interrupt. Interrupts must be disabled (no IDT loaded yet either way).
+pub unsafe fn load_kernel_gdt_for_this_cpu() {
+    #[allow(static_mut_refs)]
+    let gdt_ptr = GdtPointer {
+        limit: (size_of::<[GdtEntry; 7]>() - 1) as u16,
+        base: (*core::ptr::addr_of!(GDT)).as_ptr() as u64,
+    };
+    core::arch::asm!(
+        "lgdt [{}]",
+        // Reload CS via far return to the kernel 64-bit code segment.
+        "push 0x08",
+        "lea rax, [rip + 2f]",
+        "push rax",
+        "retfq",
+        "2:",
+        // Reload data segment registers to kernel data.
+        "mov ax, 0x10",
+        "mov ds, ax",
+        "mov es, ax",
+        "mov fs, ax",
+        // Don't touch GS — the AP has already pointed IA32_GS_BASE at its
+        // own PerCpu slot via percpu::init_for_this_cpu and the visible
+        // descriptor only matters for non-64-bit code segments anyway.
+        "mov ss, ax",
+        in(reg) &gdt_ptr,
+        out("rax") _,
+        options(nostack),
+    );
 }
 
 /// Install the TSS descriptor into the GDT and load it.

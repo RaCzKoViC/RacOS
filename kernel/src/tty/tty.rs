@@ -5,8 +5,8 @@
 
 extern crate alloc;
 
-use alloc::string::String;
 use super::line_discipline::{LineDiscipline, LineMode, WinSize};
+use alloc::string::String;
 
 /// A TTY device representing one terminal session.
 pub struct Tty {

@@ -1,0 +1,11 @@
+[package]
+name = "racos-sync"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "sync"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

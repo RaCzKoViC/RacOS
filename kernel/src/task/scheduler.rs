@@ -14,11 +14,11 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-use super::task::{Task, TaskState, Pid};
 use super::context;
 use super::process::UserProcess;
+use super::task::{Pid, Task, TaskState};
 use crate::mm::virt;
+use alloc::vec::Vec;
 
 /// Time quantum in ticks (10ms at 1000 Hz).
 const TIME_QUANTUM: u64 = 10;
@@ -83,11 +83,7 @@ impl Scheduler {
             None => self.tasks.push(Some(task)),
         }
 
-        crate::serial::serial_println!(
-            "[  SCHED  ] Task '{}' spawned (PID {})",
-            name,
-            pid
-        );
+        crate::serial::serial_println!("[  SCHED  ] Task '{}' spawned (PID {})", name, pid);
 
         Ok(pid)
     }
@@ -117,17 +113,18 @@ impl Scheduler {
             None => self.tasks.push(Some(process.task)),
         }
 
-        crate::serial::serial_println!(
-            "[  SCHED  ] User process '{}' spawned (PID {})",
-            name,
-            pid
-        );
+        crate::serial::serial_println!("[  SCHED  ] User process '{}' spawned (PID {})", name, pid);
 
         Ok(pid)
     }
 
     /// Spawn a new user thread within an existing process space.
-    pub fn spawn_thread(&mut self, routine: u64, arg: u64, parent_task: &Task) -> Result<Pid, &'static str> {
+    pub fn spawn_thread(
+        &mut self,
+        routine: u64,
+        arg: u64,
+        parent_task: &Task,
+    ) -> Result<Pid, &'static str> {
         let _ = (routine, arg, parent_task);
         Err("pthread_create thread bootstrap not wired yet")
     }
@@ -207,7 +204,9 @@ impl Scheduler {
             // SAFETY: new_pt was created by virt::create_user_page_table() and
             // contains valid kernel mappings so the subsequent context_switch
             // (kernel code) remains reachable after the CR3 write.
-            unsafe { virt::write_cr3(new_pt); }
+            unsafe {
+                virt::write_cr3(new_pt);
+            }
         } else if new_pt == 0 && old_pt != 0 {
             // Switching back to a kernel task — keep current CR3. Kernel
             // mappings are shared in every process page table so this is safe.
@@ -222,7 +221,8 @@ impl Scheduler {
             .map(|t| {
                 if t.kernel_stack_base != 0 {
                     t.kernel_stack_base
-                        + crate::mm::phys::FRAME_SIZE as u64 * super::task::KERNEL_STACK_PAGES as u64
+                        + crate::mm::phys::FRAME_SIZE as u64
+                            * super::task::KERNEL_STACK_PAGES as u64
                 } else {
                     0
                 }
@@ -293,7 +293,9 @@ impl Scheduler {
             task.state = TaskState::Zombie;
             task.exit_status = status;
             (task.pid, task.parent_pid)
-        } else { (0, 0) };
+        } else {
+            (0, 0)
+        };
 
         // Reparent orphan children to init (PID 100) so they can be reaped.
         const INIT_PID: Pid = 100;
@@ -334,7 +336,10 @@ impl Scheduler {
             -1 => true,
             0 => task.pgid == parent_pgid,
             p if p > 0 => task.pid == p as Pid,
-            p if p < -1 => p.checked_neg().map(|g| task.pgid == g as Pid).unwrap_or(false),
+            p if p < -1 => p
+                .checked_neg()
+                .map(|g| task.pgid == g as Pid)
+                .unwrap_or(false),
             _ => false,
         }
     }
@@ -362,16 +367,19 @@ impl Scheduler {
 
                     // Free the user page table (and all mapped user frames)
                     if page_table_phys != 0 {
-                        unsafe { crate::mm::virt::free_page_table(page_table_phys, true); }
+                        unsafe {
+                            crate::mm::virt::free_page_table(page_table_phys, true);
+                        }
                     }
 
                     // Free the kernel stack PLUS the guard page that lives
                     // immediately below it (same single contiguous alloc).
                     if kernel_stack_base != 0 {
                         let alloc_base = kernel_stack_base
-                            - (super::task::KERNEL_STACK_GUARD_PAGES * crate::mm::phys::FRAME_SIZE) as u64;
-                        let total_pages = super::task::KERNEL_STACK_PAGES
-                            + super::task::KERNEL_STACK_GUARD_PAGES;
+                            - (super::task::KERNEL_STACK_GUARD_PAGES * crate::mm::phys::FRAME_SIZE)
+                                as u64;
+                        let total_pages =
+                            super::task::KERNEL_STACK_PAGES + super::task::KERNEL_STACK_GUARD_PAGES;
                         for i in 0..total_pages {
                             let addr = alloc_base + (i * crate::mm::phys::FRAME_SIZE) as u64;
                             let _ = crate::mm::phys::free_frame(
@@ -388,7 +396,12 @@ impl Scheduler {
     }
 
     /// Check whether `parent_pid` has a child matching the wait filter.
-    pub fn has_children_filtered(&self, parent_pid: Pid, pid_filter: i32, parent_pgid: Pid) -> bool {
+    pub fn has_children_filtered(
+        &self,
+        parent_pid: Pid,
+        pid_filter: i32,
+        parent_pgid: Pid,
+    ) -> bool {
         self.tasks
             .iter()
             .flatten()
@@ -416,31 +429,49 @@ impl Scheduler {
 
     /// Get the PID of the current task.
     pub fn current_pid(&self) -> Pid {
-        self.tasks[self.current].as_ref().map(|t| t.pid).unwrap_or(0)
+        self.tasks[self.current]
+            .as_ref()
+            .map(|t| t.pid)
+            .unwrap_or(0)
     }
 
     /// Get the physical address of the current task's page table (0 = kernel task).
     pub fn current_page_table_phys(&self) -> u64 {
-        self.tasks[self.current].as_ref().map(|t| t.page_table_phys).unwrap_or(0)
+        self.tasks[self.current]
+            .as_ref()
+            .map(|t| t.page_table_phys)
+            .unwrap_or(0)
     }
 
     /// Get the kernel stack top of the current task (for TSS RSP0 updates).
     pub fn current_kernel_stack_top(&self) -> u64 {
-        self.tasks[self.current].as_ref().map(|t| {
-            if t.kernel_stack_base != 0 {
-                t.kernel_stack_base + (super::task::KERNEL_STACK_PAGES * crate::mm::phys::FRAME_SIZE) as u64
-            } else { 0 }
-        }).unwrap_or(0)
+        self.tasks[self.current]
+            .as_ref()
+            .map(|t| {
+                if t.kernel_stack_base != 0 {
+                    t.kernel_stack_base
+                        + (super::task::KERNEL_STACK_PAGES * crate::mm::phys::FRAME_SIZE) as u64
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0)
     }
 
     /// Get the process group ID of the current task.
     pub fn current_pgid(&self) -> Pid {
-        self.tasks[self.current].as_ref().map(|t| t.pgid).unwrap_or(0)
+        self.tasks[self.current]
+            .as_ref()
+            .map(|t| t.pgid)
+            .unwrap_or(0)
     }
 
     /// Get the session ID of the current task.
     pub fn current_session_id(&self) -> Pid {
-        self.tasks[self.current].as_ref().map(|t| t.session_id).unwrap_or(0)
+        self.tasks[self.current]
+            .as_ref()
+            .map(|t| t.session_id)
+            .unwrap_or(0)
     }
 
     /// Set the process group ID of a task.
@@ -457,12 +488,18 @@ impl Scheduler {
 
     /// Get the process group ID of a task.
     pub fn get_pgid(&self, pid: Pid) -> Option<Pid> {
-        self.tasks.iter().flatten().find(|t| t.pid == pid).map(|t| t.pgid)
+        self.tasks
+            .iter()
+            .flatten()
+            .find(|t| t.pid == pid)
+            .map(|t| t.pgid)
     }
 
     /// Collect all PIDs in a given process group.
     pub fn pids_in_group(&self, pgid: Pid) -> alloc::vec::Vec<Pid> {
-        self.tasks.iter().flatten()
+        self.tasks
+            .iter()
+            .flatten()
             .filter(|t| t.pgid == pgid)
             .map(|t| t.pid)
             .collect()
@@ -476,7 +513,9 @@ impl Scheduler {
             task.session_id = task.pid;
             task.pgid = task.pid;
             task.pid
-        } else { 0 }
+        } else {
+            0
+        }
     }
 
     /// Send a signal to all tasks in a process group.
@@ -502,17 +541,20 @@ impl Scheduler {
             if old_pt != 0 {
                 // SAFETY: old_pt was allocated by create_user_page_table and
                 // is no longer in use after we load the new CR3.
-                unsafe { crate::mm::virt::free_page_table(old_pt, true); }
+                unsafe {
+                    crate::mm::virt::free_page_table(old_pt, true);
+                }
             }
             // Free old kernel stack (and its guard page) if it exists.
             if task.kernel_stack_base != 0 {
                 let alloc_base = task.kernel_stack_base
                     - (super::task::KERNEL_STACK_GUARD_PAGES * crate::mm::phys::FRAME_SIZE) as u64;
-                let total_pages = super::task::KERNEL_STACK_PAGES
-                    + super::task::KERNEL_STACK_GUARD_PAGES;
+                let total_pages =
+                    super::task::KERNEL_STACK_PAGES + super::task::KERNEL_STACK_GUARD_PAGES;
                 for i in 0..total_pages {
                     let addr = alloc_base + (i * crate::mm::phys::FRAME_SIZE) as u64;
-                    let _ = crate::mm::phys::free_frame(crate::mm::phys::PhysFrame::containing(addr));
+                    let _ =
+                        crate::mm::phys::free_frame(crate::mm::phys::PhysFrame::containing(addr));
                 }
             }
 
@@ -548,10 +590,7 @@ impl Scheduler {
             None => self.tasks.push(Some(task)),
         }
 
-        crate::serial::serial_println!(
-            "[  SCHED  ] Forked process spawned (PID {})",
-            pid,
-        );
+        crate::serial::serial_println!("[  SCHED  ] Forked process spawned (PID {})", pid,);
 
         Ok(pid)
     }
@@ -630,21 +669,30 @@ pub unsafe fn exit_current(status: i32) {
 /// Get the current PID.
 pub fn current_pid() -> Pid {
     unsafe {
-        (*core::ptr::addr_of!(SCHEDULER)).as_ref().map(|s| s.current_pid()).unwrap_or(0)
+        (*core::ptr::addr_of!(SCHEDULER))
+            .as_ref()
+            .map(|s| s.current_pid())
+            .unwrap_or(0)
     }
 }
 
 /// Get the physical address of the current task's page table (0 = kernel task).
 pub fn current_page_table_phys() -> u64 {
     unsafe {
-        (*core::ptr::addr_of!(SCHEDULER)).as_ref().map(|s| s.current_page_table_phys()).unwrap_or(0)
+        (*core::ptr::addr_of!(SCHEDULER))
+            .as_ref()
+            .map(|s| s.current_page_table_phys())
+            .unwrap_or(0)
     }
 }
 
 /// Get the kernel stack top of the current task.
 pub fn current_kernel_stack_top() -> u64 {
     unsafe {
-        (*core::ptr::addr_of!(SCHEDULER)).as_ref().map(|s| s.current_kernel_stack_top()).unwrap_or(0)
+        (*core::ptr::addr_of!(SCHEDULER))
+            .as_ref()
+            .map(|s| s.current_kernel_stack_top())
+            .unwrap_or(0)
     }
 }
 
@@ -653,7 +701,9 @@ pub fn current_kernel_stack_top() -> u64 {
 /// # Safety
 /// Must be called with interrupts disabled.
 pub unsafe fn reap_zombie_child(parent_pid: Pid) -> Option<(Pid, i32)> {
-    (*core::ptr::addr_of_mut!(SCHEDULER)).as_mut().and_then(|s| s.reap_zombie_child(parent_pid))
+    (*core::ptr::addr_of_mut!(SCHEDULER))
+        .as_mut()
+        .and_then(|s| s.reap_zombie_child(parent_pid))
 }
 
 /// Reap a zombie child matching a waitpid-style filter.
@@ -681,7 +731,10 @@ pub unsafe fn reap_zombie_child_filtered(
 /// # Safety
 /// Must be called with interrupts disabled.
 pub unsafe fn has_children(parent_pid: Pid) -> bool {
-    (*core::ptr::addr_of!(SCHEDULER)).as_ref().map(|s| s.has_children(parent_pid)).unwrap_or(false)
+    (*core::ptr::addr_of!(SCHEDULER))
+        .as_ref()
+        .map(|s| s.has_children(parent_pid))
+        .unwrap_or(false)
 }
 
 /// Check if `parent_pid` has any child matching a waitpid-style filter.
@@ -767,10 +820,12 @@ pub unsafe fn with_current_fd_table<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut crate::vfs::file::FdTable) -> R,
 {
-    (*core::ptr::addr_of_mut!(SCHEDULER)).as_mut().and_then(|s| {
-        let idx = s.current;
-        s.tasks[idx].as_mut().map(|t| f(&mut t.fd_table))
-    })
+    (*core::ptr::addr_of_mut!(SCHEDULER))
+        .as_mut()
+        .and_then(|s| {
+            let idx = s.current;
+            s.tasks[idx].as_mut().map(|t| f(&mut t.fd_table))
+        })
 }
 
 /// Get the process group ID of a task. Returns None if not found.
@@ -778,7 +833,9 @@ where
 /// # Safety
 /// Must be called with interrupts disabled.
 pub unsafe fn get_pgid(pid: Pid) -> Option<Pid> {
-    (*core::ptr::addr_of!(SCHEDULER)).as_ref().and_then(|s| s.get_pgid(pid))
+    (*core::ptr::addr_of!(SCHEDULER))
+        .as_ref()
+        .and_then(|s| s.get_pgid(pid))
 }
 
 /// Set the process group ID of a task. Returns false if not found.
@@ -786,7 +843,10 @@ pub unsafe fn get_pgid(pid: Pid) -> Option<Pid> {
 /// # Safety
 /// Must be called with interrupts disabled.
 pub unsafe fn set_pgid(pid: Pid, pgid: Pid) -> bool {
-    (*core::ptr::addr_of_mut!(SCHEDULER)).as_mut().map(|s| s.set_pgid(pid, pgid)).unwrap_or(false)
+    (*core::ptr::addr_of_mut!(SCHEDULER))
+        .as_mut()
+        .map(|s| s.set_pgid(pid, pgid))
+        .unwrap_or(false)
 }
 
 /// Create a new session for the current task. Returns the new session ID.
@@ -794,13 +854,19 @@ pub unsafe fn set_pgid(pid: Pid, pgid: Pid) -> bool {
 /// # Safety
 /// Must be called with interrupts disabled.
 pub unsafe fn create_session() -> Pid {
-    (*core::ptr::addr_of_mut!(SCHEDULER)).as_mut().map(|s| s.create_session()).unwrap_or(0)
+    (*core::ptr::addr_of_mut!(SCHEDULER))
+        .as_mut()
+        .map(|s| s.create_session())
+        .unwrap_or(0)
 }
 
 /// Get the current task's process group ID.
 pub fn current_pgid() -> Pid {
     unsafe {
-        (*core::ptr::addr_of!(SCHEDULER)).as_ref().map(|s| s.current_pgid()).unwrap_or(0)
+        (*core::ptr::addr_of!(SCHEDULER))
+            .as_ref()
+            .map(|s| s.current_pgid())
+            .unwrap_or(0)
     }
 }
 
@@ -819,7 +885,10 @@ pub unsafe fn send_signal_to_group(pgid: Pid, sig: super::signal::Signal) {
 /// # Safety
 /// Must be called with interrupts disabled.
 pub unsafe fn pids_in_group(pgid: Pid) -> alloc::vec::Vec<Pid> {
-    (*core::ptr::addr_of!(SCHEDULER)).as_ref().map(|s| s.pids_in_group(pgid)).unwrap_or_default()
+    (*core::ptr::addr_of!(SCHEDULER))
+        .as_ref()
+        .map(|s| s.pids_in_group(pgid))
+        .unwrap_or_default()
 }
 
 /// Replace the current task's execution image (for sys_exec).
@@ -838,7 +907,9 @@ pub unsafe fn replace_current_task(new_task: super::task::Task) {
 /// # Safety
 /// Must be called with interrupts disabled to avoid race conditions.
 pub unsafe fn get_instance() -> &'static mut Scheduler {
-    (*core::ptr::addr_of_mut!(SCHEDULER)).as_mut().expect("Scheduler not initialized")
+    (*core::ptr::addr_of_mut!(SCHEDULER))
+        .as_mut()
+        .expect("Scheduler not initialized")
 }
 
 /// jump to the new entry point after this returns.
@@ -891,10 +962,12 @@ pub unsafe fn with_current_task_mut<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut super::task::Task) -> R,
 {
-    (*core::ptr::addr_of_mut!(SCHEDULER)).as_mut().and_then(|s| {
-        let idx = s.current;
-        s.tasks[idx].as_mut().map(|t| f(t))
-    })
+    (*core::ptr::addr_of_mut!(SCHEDULER))
+        .as_mut()
+        .and_then(|s| {
+            let idx = s.current;
+            s.tasks[idx].as_mut().map(|t| f(t))
+        })
 }
 
 /// Run a closure with read access to a task identified by PID.
@@ -906,7 +979,11 @@ where
     F: FnOnce(&super::task::Task) -> R,
 {
     (*core::ptr::addr_of!(SCHEDULER)).as_ref().and_then(|s| {
-        s.tasks.iter().flatten().find(|t| t.pid == pid).map(|t| f(t))
+        s.tasks
+            .iter()
+            .flatten()
+            .find(|t| t.pid == pid)
+            .map(|t| f(t))
     })
 }
 
@@ -916,14 +993,20 @@ where
 /// # Safety
 /// Must be called with interrupts disabled.
 pub unsafe fn get_cwd(buf: &mut [u8]) -> usize {
-    (*core::ptr::addr_of!(SCHEDULER)).as_ref().map(|s| {
-        let idx = s.current;
-        s.tasks[idx].as_ref().map(|t| {
-            let len = t.cwd_len.min(buf.len());
-            buf[..len].copy_from_slice(&t.cwd[..len]);
-            len
-        }).unwrap_or(0)
-    }).unwrap_or(0)
+    (*core::ptr::addr_of!(SCHEDULER))
+        .as_ref()
+        .map(|s| {
+            let idx = s.current;
+            s.tasks[idx]
+                .as_ref()
+                .map(|t| {
+                    let len = t.cwd_len.min(buf.len());
+                    buf[..len].copy_from_slice(&t.cwd[..len]);
+                    len
+                })
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
 }
 
 /// Set the current task's working directory.
@@ -931,17 +1014,20 @@ pub unsafe fn get_cwd(buf: &mut [u8]) -> usize {
 /// # Safety
 /// Must be called with interrupts disabled.
 pub unsafe fn set_cwd(path: &[u8]) -> bool {
-    (*core::ptr::addr_of_mut!(SCHEDULER)).as_mut().map(|s| {
-        let idx = s.current;
-        if let Some(ref mut t) = s.tasks[idx] {
-            let len = path.len().min(255);
-            t.cwd[..len].copy_from_slice(&path[..len]);
-            t.cwd_len = len;
-            true
-        } else {
-            false
-        }
-    }).unwrap_or(false)
+    (*core::ptr::addr_of_mut!(SCHEDULER))
+        .as_mut()
+        .map(|s| {
+            let idx = s.current;
+            if let Some(ref mut t) = s.tasks[idx] {
+                let len = path.len().min(255);
+                t.cwd[..len].copy_from_slice(&path[..len]);
+                t.cwd_len = len;
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
 }
 
 /// Send a signal to the foreground process (most recently spawned non-idle
@@ -971,7 +1057,12 @@ pub fn signal_foreground(sig: super::signal::Signal) {
             } else {
                 // Current is kernel task — find any running/ready user task
                 for slot in sched.tasks.iter_mut().flatten() {
-                    if slot.pid >= 100 && matches!(slot.state, TaskState::Running | TaskState::Ready | TaskState::Blocked) {
+                    if slot.pid >= 100
+                        && matches!(
+                            slot.state,
+                            TaskState::Running | TaskState::Ready | TaskState::Blocked
+                        )
+                    {
                         slot.signals.send(sig);
                         if matches!(slot.state, TaskState::Blocked) {
                             slot.state = TaskState::Ready;
@@ -986,9 +1077,9 @@ pub fn signal_foreground(sig: super::signal::Signal) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::task::Task;
     use super::super::context::TaskContext;
+    use super::super::task::Task;
+    use super::*;
 
     fn create_test_task(pid: Pid, name: &str) -> Task {
         let mut task = Task::new_kernel(name, || loop {}).unwrap();
@@ -1000,7 +1091,7 @@ mod tests {
     #[test]
     fn test_scheduler_basic() {
         let mut scheduler = Scheduler::new();
-        
+
         // Add idle task (PID 0)
         let idle_task = create_test_task(0, "idle");
         scheduler.tasks.push(Some(idle_task));
@@ -1019,7 +1110,7 @@ mod tests {
     #[test]
     fn test_scheduler_timer_tick() {
         let mut scheduler = Scheduler::new();
-        
+
         // Add idle task
         let idle_task = create_test_task(0, "idle");
         scheduler.tasks.push(Some(idle_task));
@@ -1040,7 +1131,7 @@ mod tests {
     #[test]
     fn test_scheduler_find_slot() {
         let mut scheduler = Scheduler::new();
-        
+
         // Add some tasks with gaps
         scheduler.tasks.push(Some(create_test_task(0, "idle")));
         scheduler.tasks.push(None); // Gap

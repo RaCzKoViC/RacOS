@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use libc_lite::{open, close, getdents, println, print, exit};
+use libc_lite::{close, exit, getdents, open, print, println};
 
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
@@ -10,7 +10,11 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         let arg_ptr = unsafe { *argv.add(1) };
         if !arg_ptr.is_null() {
             let mut len = 0;
-            unsafe { while *arg_ptr.add(len) != 0 { len += 1; } }
+            unsafe {
+                while *arg_ptr.add(len) != 0 {
+                    len += 1;
+                }
+            }
             unsafe { core::slice::from_raw_parts(arg_ptr, len + 1) } // includes null
         } else {
             b".\0"

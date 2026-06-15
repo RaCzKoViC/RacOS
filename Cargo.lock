@@ -120,6 +120,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-df"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-dig"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-dirname"
 version = "0.1.0"
 dependencies = [
@@ -211,6 +225,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-mkfs-fat32"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-mkfs-racfs"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-mount"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-mv"
 version = "0.1.0"
 dependencies = [
@@ -254,6 +289,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-sync"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-tail"
 version = "0.1.0"
 dependencies = [
@@ -282,6 +324,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-umount"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-uniq"
 version = "0.1.0"
 dependencies = [
@@ -297,6 +346,13 @@ dependencies = [
 
 [[package]]
 name = "racos-wc"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-wget"
 version = "0.1.0"
 dependencies = [
  "libc-lite",

@@ -4,16 +4,15 @@
 ///
 /// Provides lexer, parser, AST, and expansion modules.
 /// The shell can operate in both interactive and script mode.
-
 extern crate alloc;
 
-pub mod token;
-pub mod lexer;
 pub mod ast;
-pub mod parser;
-pub mod expand;
 pub mod builtin;
 pub mod exec;
+pub mod expand;
+pub mod lexer;
+pub mod parser;
 pub mod readline;
+pub mod token;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

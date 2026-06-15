@@ -4,12 +4,12 @@
 
 extern crate alloc;
 
-use alloc::sync::Arc;
-use crate::task::task::{Task, TaskState, Credentials, Pid};
-use crate::task::context::TaskContext;
 use crate::mm::phys::{self, FRAME_SIZE};
-use crate::vfs::file::FdTable;
+use crate::task::context::TaskContext;
 use crate::task::signal::SignalState;
+use crate::task::task::{Credentials, Pid, Task, TaskState};
+use crate::vfs::file::FdTable;
+use alloc::sync::Arc;
 
 pub struct UserThread {
     pub tid: Pid,

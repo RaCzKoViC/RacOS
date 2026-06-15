@@ -61,9 +61,25 @@ static mut IDT: [IdtEntry; IDT_ENTRIES] = [IdtEntry::missing(); IDT_ENTRIES];
 macro_rules! exception_handler {
     ($name:ident, $vector:expr, $msg:expr) => {
         extern "x86-interrupt" fn $name(
-            _stack_frame: &InterruptStackFrame,
+            stack_frame: &InterruptStackFrame,
         ) {
-            crate::serial::serial_println!("!!! EXCEPTION #{}: {} !!!", $vector, $msg);
+            // Note: in older Rust nightlies, `stack_frame` was a reference to
+            // the IRET frame the CPU pushed; in newer nightlies the
+            // `extern "x86-interrupt"` ABI passes the same frame but the
+            // `InterruptStackFrame` struct fields read back garbage for
+            // some toolchains. Fall back to reading the canonical CPU-pushed
+            // frame from TSS.RSP0 - 40 so the printout is always correct.
+            let rsp0 = crate::arch::gdt::current_kernel_stack();
+            let frame_words: [u64; 5] = unsafe {
+                core::ptr::read_unaligned(rsp0.wrapping_sub(40) as *const [u64; 5])
+            };
+            let _ = stack_frame;
+            crate::serial::serial_println!(
+                "!!! EXCEPTION #{}: {} !!! rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x} pid={}",
+                $vector, $msg,
+                frame_words[0], frame_words[1], frame_words[2], frame_words[3], frame_words[4],
+                crate::task::scheduler::current_pid(),
+            );
             loop {
                 unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
             }
@@ -73,13 +89,17 @@ macro_rules! exception_handler {
 
 macro_rules! exception_handler_with_error {
     ($name:ident, $vector:expr, $msg:expr) => {
-        extern "x86-interrupt" fn $name(
-            _stack_frame: &InterruptStackFrame,
-            error_code: u64,
-        ) {
-            crate::serial::serial_println!("!!! EXCEPTION #{}: {} (error: 0x{:X}) !!!", $vector, $msg, error_code);
+        extern "x86-interrupt" fn $name(_stack_frame: &InterruptStackFrame, error_code: u64) {
+            crate::serial::serial_println!(
+                "!!! EXCEPTION #{}: {} (error: 0x{:X}) !!!",
+                $vector,
+                $msg,
+                error_code
+            );
             loop {
-                unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
+                unsafe {
+                    core::arch::asm!("cli; hlt", options(nomem, nostack));
+                }
             }
         }
     };
@@ -111,16 +131,13 @@ exception_handler_with_error!(stack_segment_fault, 12, "Stack-Segment Fault");
 exception_handler_with_error!(general_protection, 13, "General Protection Fault");
 
 /// Page Fault handler — if user space, kill process; if kernel, halt.
-extern "x86-interrupt" fn page_fault(
-    stack_frame: &InterruptStackFrame,
-    error_code: u64,
-) {
+extern "x86-interrupt" fn page_fault(stack_frame: &InterruptStackFrame, error_code: u64) {
     let rip = stack_frame.instruction_pointer;
     let cs = stack_frame.code_segment;
     let cpl = cs & 0x3;
     let current_pid = crate::task::scheduler::current_pid();
-    let current_is_user_task = current_pid >= 100
-        && crate::task::scheduler::current_page_table_phys() != 0;
+    let current_is_user_task =
+        current_pid >= 100 && crate::task::scheduler::current_page_table_phys() != 0;
     let fault_addr: u64;
     unsafe {
         core::arch::asm!("mov {}, cr2", out(reg) fault_addr, options(nomem, nostack));
@@ -138,7 +155,9 @@ extern "x86-interrupt" fn page_fault(
         );
         // Signal handling is not complete yet; terminate immediately to avoid
         // fault loops on the same instruction.
-        unsafe { crate::task::scheduler::exit_current(128 + 11); }
+        unsafe {
+            crate::task::scheduler::exit_current(128 + 11);
+        }
     }
 
     // Fault in kernel space — this is a kernel bug
@@ -150,7 +169,9 @@ extern "x86-interrupt" fn page_fault(
         error_code,
     );
     loop {
-        unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("cli; hlt", options(nomem, nostack));
+        }
     }
 }
 exception_handler!(x87_floating_point, 16, "x87 Floating-Point");
@@ -168,7 +189,9 @@ pub unsafe fn com1_poke(byte: u8) {
     loop {
         let status: u8;
         core::arch::asm!("in al, dx", in("dx") 0x3FDu16, out("al") status, options(nomem, nostack, preserves_flags));
-        if status & 0x20 != 0 { break; }
+        if status & 0x20 != 0 {
+            break;
+        }
     }
     core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") byte, options(nomem, nostack, preserves_flags));
 }
@@ -181,6 +204,12 @@ extern "x86-interrupt" fn default_handler(_stack_frame: &InterruptStackFrame) {
 /// Timer IRQ handler (vector 32 = IRQ0).
 extern "x86-interrupt" fn timer_handler(_stack_frame: &InterruptStackFrame) {
     crate::interrupts::pit::tick();
+    // NOTE: net::stack::poll() is intentionally NOT called here. It would
+    // need to acquire STACK.lock(), which user-mode wait loops (resolve,
+    // sys_connect, sys_recv) briefly hold. On single-core, the spin would
+    // deadlock. Polling is done explicitly from idle_loop and from user
+    // wait loops instead.
+    crate::net::tcp::tick();
     crate::task::scheduler::timer_tick();
     crate::interrupts::pic::send_eoi(0);
 }
@@ -195,6 +224,26 @@ extern "x86-interrupt" fn serial_handler(_stack_frame: &InterruptStackFrame) {
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: &InterruptStackFrame) {
     crate::drivers::ps2_keyboard::handle_irq_input();
     crate::interrupts::pic::send_eoi(1);
+}
+
+/// Per-CPU LAPIC timer IRQ handler (vector 0x40, see G.4.1).
+///
+/// Bumps the running CPU's `tick_count` via its own GS base — single
+/// memory bus operation, no scheduler call, no shared lock. Every CPU
+/// runs this same handler against its own PerCpu slot, so there's no
+/// cross-CPU contention even when N CPUs all fire the timer at once.
+extern "x86-interrupt" fn lapic_timer_handler(_stack_frame: &InterruptStackFrame) {
+    // Bump this CPU's own counter via GS base. No `lock` prefix: only the
+    // owning CPU writes its tick_count, so an atomic RMW is overkill and
+    // we want a single non-locked memory op in the IRQ fast path.
+    unsafe {
+        core::arch::asm!(
+            "inc qword ptr gs:[{off}]",
+            off = const crate::arch::percpu::OFFSET_TICK_COUNT,
+            options(nostack, preserves_flags),
+        );
+    }
+    crate::arch::lapic::eoi();
 }
 
 /// Load the IDT with exception handlers.
@@ -238,6 +287,14 @@ pub fn init() {
         // IRQ4 = vector 36 (COM1 serial)
         IDT[36].set_handler(serial_handler as u64, 0x08, 0, 0);
 
+        // G.4.1: per-CPU LAPIC timer at vector 0x40.
+        IDT[crate::arch::lapic::LAPIC_TIMER_VECTOR as usize].set_handler(
+            lapic_timer_handler as u64,
+            0x08,
+            0,
+            0,
+        );
+
         #[allow(static_mut_refs)]
         let idt_ptr = IdtPointer {
             limit: (size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,
@@ -248,4 +305,21 @@ pub fn init() {
     }
 
     crate::serial::serial_println!("[  0.000070] RACORE: IDT loaded ({} entries)", IDT_ENTRIES);
+}
+
+/// Load the IDT on the running CPU. Called from `ap_entry` after the AP
+/// has its per-CPU slot and LAPIC enabled. The IDT itself is shared with
+/// the BSP — every CPU just needs its own `lidt` so IRQs route into our
+/// handlers instead of triple-faulting against an empty IDTR.
+///
+/// # Safety
+/// Must run with interrupts disabled (caller's responsibility) and after
+/// `init()` has populated the IDT entries on the BSP.
+pub unsafe fn load_on_this_cpu() {
+    #[allow(static_mut_refs)]
+    let idt_ptr = IdtPointer {
+        limit: (size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,
+        base: IDT.as_ptr() as u64,
+    };
+    core::arch::asm!("lidt [{}]", in(reg) &idt_ptr, options(nostack));
 }

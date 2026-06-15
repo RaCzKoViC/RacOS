@@ -15,3 +15,7 @@ relocation-model = "static"
 [features]
 default = []
 test_runner = []
+# Compile-time gate for the CI boot smoke. When enabled, the kernel runs a
+# battery of synchronous assertions right after VFS bring-up and exits the
+# guest via isa-debug-exit (port 0xf4) instead of spawning init.
+ci-smoke = []

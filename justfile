@@ -12,7 +12,6 @@ arch      := "x86_64"
 qemu      := "qemu-system-x86_64"
 target    := "x86_64-unknown-none"
 uefi_target := "x86_64-unknown-uefi"
-userland_target := "x86_64-racos-user.json"
 target_dir := env_var_or_default("RACOS_TARGET_DIR", "target")
 
 # Pin cargo's output dir to target_dir so RACOS_TARGET_DIR flows into the
@@ -35,7 +34,7 @@ build-boot:
 
 # Build userland crates (default members)
 build-userland:
-    cargo build --workspace --exclude racore --exclude racos-boot --exclude rpkg --exclude rapt --target {{userland_target}} -Zjson-target-spec -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
+    cargo build --workspace --exclude racore --exclude racos-boot --exclude rpkg --exclude rapt --target {{target}} -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
     cargo build --package rpkg --package rapt
 
 # Run all tests

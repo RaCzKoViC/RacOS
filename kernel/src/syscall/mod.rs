@@ -9,7 +9,7 @@
 //   Return in RAX (>= 0 success, < 0 negated error code)
 //   RCX and R11 are clobbered by the SYSCALL instruction itself.
 
+pub mod dispatch;
 pub mod entry;
 pub mod error;
-pub mod dispatch;
 pub mod handlers;

@@ -46,11 +46,11 @@ impl Word {
 /// Redirect direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedirectOp {
-    Input,      // <
-    Output,     // >
-    Append,     // >>
-    DupInput,   // <&
-    DupOutput,  // >&
+    Input,     // <
+    Output,    // >
+    Append,    // >>
+    DupInput,  // <&
+    DupOutput, // >&
 }
 
 /// I/O redirect.
@@ -151,19 +151,11 @@ pub enum AstNode {
     },
 
     /// Case statement
-    Case {
-        word: Word,
-        items: Vec<CaseItem>,
-    },
+    Case { word: Word, items: Vec<CaseItem> },
 
     /// Function definition
-    FunctionDef {
-        name: String,
-        body: Box<AstNode>,
-    },
+    FunctionDef { name: String, body: Box<AstNode> },
 
     /// A list of commands (program root).
-    Program {
-        commands: Vec<AstNode>,
-    },
+    Program { commands: Vec<AstNode> },
 }

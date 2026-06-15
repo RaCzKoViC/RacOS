@@ -185,7 +185,8 @@ fn runtime_vaddr(addr: u64, load_bias: u64) -> Result<u64, ElfError> {
     if addr >= load_bias {
         Ok(addr)
     } else {
-        addr.checked_add(load_bias).ok_or(ElfError::RelocationFailed)
+        addr.checked_add(load_bias)
+            .ok_or(ElfError::RelocationFailed)
     }
 }
 
@@ -277,7 +278,8 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
     }
 
     // SAFETY: We verified the buffer is large enough
-    let hdr: Elf64Header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Elf64Header) };
+    let hdr: Elf64Header =
+        unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Elf64Header) };
 
     // Copy fields from packed struct to avoid unaligned reference errors
     let e_ident = hdr.e_ident;
@@ -308,7 +310,11 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
         return Err(ElfError::NoEntry);
     }
 
-    let load_bias = if e_type == ET_DYN { ET_DYN_LOAD_BIAS } else { 0 };
+    let load_bias = if e_type == ET_DYN {
+        ET_DYN_LOAD_BIAS
+    } else {
+        0
+    };
     let entry_point = e_entry
         .checked_add(load_bias)
         .ok_or(ElfError::SegmentOutOfBounds)?;
@@ -336,7 +342,8 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
         };
 
         if phdr.p_type == PT_DYNAMIC {
-            let dyn_vaddr = phdr.p_vaddr
+            let dyn_vaddr = phdr
+                .p_vaddr
                 .checked_add(load_bias)
                 .ok_or(ElfError::SegmentOutOfBounds)?;
             dynamic_vaddr = Some(dyn_vaddr);
@@ -367,13 +374,16 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
             .ok_or(ElfError::SegmentOutOfBounds)?;
 
         // Validate segment is in user space
-        let seg_end = eff_vaddr.checked_add(p_memsz).ok_or(ElfError::SegmentOutOfBounds)?;
+        let seg_end = eff_vaddr
+            .checked_add(p_memsz)
+            .ok_or(ElfError::SegmentOutOfBounds)?;
         if seg_end > USER_SPACE_MAX {
             return Err(ElfError::SegmentNotInUserSpace);
         }
 
         // Validate file data is within bounds
-        let file_end = (p_offset as usize).checked_add(p_filesz as usize)
+        let file_end = (p_offset as usize)
+            .checked_add(p_filesz as usize)
             .ok_or(ElfError::SegmentOutOfBounds)?;
         if file_end > data.len() {
             return Err(ElfError::SegmentOutOfBounds);
@@ -419,7 +429,9 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
 
         crate::serial::serial_println!(
             "[   ELF   ] Loaded segment: vaddr=0x{:X} paddr=0x{:X} memsz=0x{:X} flags={}{}{}",
-            map_vaddr, phys_addr, total_mem,
+            map_vaddr,
+            phys_addr,
+            total_mem,
             if p_flags & PF_R != 0 { "R" } else { "-" },
             if p_flags & PF_W != 0 { "W" } else { "-" },
             if p_flags & PF_X != 0 { "X" } else { "-" },
@@ -444,7 +456,9 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
 
     crate::serial::serial_println!(
         "[   ELF   ] Entry=0x{:X}, {} segments, stack at phys=0x{:X}",
-        entry_point, seg_count, stack_phys
+        entry_point,
+        seg_count,
+        stack_phys
     );
 
     Ok(LoadedElf {

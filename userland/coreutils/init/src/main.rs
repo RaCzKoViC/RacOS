@@ -14,11 +14,13 @@
 
 #![no_std]
 #![no_main]
+#![deny(unsafe_code)]
 
 extern crate libc_lite;
 
 const SHELL_PATH: &[u8] = b"/bin/sh\0";
 
+#[allow(unsafe_code)] // C ABI entry point: linker symbol exemption only
 #[no_mangle]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let _ = libc_lite::write(1, b"[init] RacInit starting (PID 1)\n");

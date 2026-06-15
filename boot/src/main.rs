@@ -19,13 +19,13 @@ use alloc::vec::Vec;
 use core::panic::PanicInfo;
 use core::ptr;
 use log::info;
+use uefi::boot::{AllocateType, MemoryType as UefiMemType};
+use uefi::mem::memory_map::MemoryMap;
 use uefi::prelude::*;
 use uefi::println;
 use uefi::proto::console::gop::GraphicsOutput;
-use uefi::proto::media::file::{File, FileAttribute, FileMode, FileInfo};
+use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
 use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::boot::{AllocateType, MemoryType as UefiMemType};
-use uefi::mem::memory_map::MemoryMap;
 use uefi::table::cfg::ACPI2_GUID;
 use uefi::CStr16;
 
@@ -106,7 +106,10 @@ fn efi_main() -> Status {
     // Step 6: Load initramfs (optional)
     let (initramfs_base, initramfs_size) = load_initramfs_if_present();
     if initramfs_size > 0 {
-        println!("Initramfs: {} bytes @ 0x{:016X}", initramfs_size, initramfs_base);
+        println!(
+            "Initramfs: {} bytes @ 0x{:016X}",
+            initramfs_size, initramfs_base
+        );
     } else {
         println!("Initramfs: not found, using kernel built-in");
     }
@@ -243,7 +246,11 @@ fn load_elf_segments(data: &[u8], info: &elf::Elf64Info) -> u64 {
         if phdr.p_type != PT_LOAD || phdr.p_memsz == 0 {
             continue;
         }
-        let paddr = if phdr.p_paddr == 0 { phdr.p_vaddr } else { phdr.p_paddr };
+        let paddr = if phdr.p_paddr == 0 {
+            phdr.p_vaddr
+        } else {
+            phdr.p_paddr
+        };
         let end = paddr + phdr.p_memsz;
         if paddr < lowest_addr {
             lowest_addr = paddr;
@@ -275,7 +282,11 @@ fn load_elf_segments(data: &[u8], info: &elf::Elf64Info) -> u64 {
             continue;
         }
 
-        let dst = (if phdr.p_paddr == 0 { phdr.p_vaddr } else { phdr.p_paddr }) as *mut u8;
+        let dst = (if phdr.p_paddr == 0 {
+            phdr.p_vaddr
+        } else {
+            phdr.p_paddr
+        }) as *mut u8;
         let file_offset = phdr.p_offset as usize;
         let file_size = phdr.p_filesz as usize;
         let mem_size = phdr.p_memsz as usize;
@@ -283,11 +294,7 @@ fn load_elf_segments(data: &[u8], info: &elf::Elf64Info) -> u64 {
         // Copy file data
         if file_size > 0 {
             unsafe {
-                ptr::copy_nonoverlapping(
-                    data[file_offset..].as_ptr(),
-                    dst,
-                    file_size,
-                );
+                ptr::copy_nonoverlapping(data[file_offset..].as_ptr(), dst, file_size);
             }
         }
 
@@ -348,8 +355,7 @@ fn setup_framebuffer() -> FramebufferInfo {
 
 /// Find the ACPI RSDP pointer from UEFI configuration tables.
 fn find_rsdp() -> u64 {
-    let st = uefi::table::system_table_raw()
-        .expect("Failed to get system table");
+    let st = uefi::table::system_table_raw().expect("Failed to get system table");
 
     // SAFETY: The system table is valid throughout UEFI boot.
     unsafe {
@@ -457,6 +463,8 @@ unsafe fn jump_to_kernel(entry_point: u64, boot_info: *const BootInfo) -> ! {
 fn panic(info: &PanicInfo) -> ! {
     log::error!("BOOTLOADER PANIC: {}", info);
     loop {
-        unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("cli; hlt", options(nomem, nostack));
+        }
     }
 }

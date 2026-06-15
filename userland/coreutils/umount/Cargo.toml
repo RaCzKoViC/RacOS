@@ -1,0 +1,11 @@
+[package]
+name = "racos-umount"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "umount"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

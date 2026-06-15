@@ -112,7 +112,8 @@ impl BitmapAllocator {
         }
 
         let start_frame = (base / FRAME_SIZE as u64) as usize;
-        let end_frame = (((base + size + FRAME_SIZE as u64 - 1) / FRAME_SIZE as u64) as usize).min(MAX_FRAMES);
+        let end_frame =
+            (((base + size + FRAME_SIZE as u64 - 1) / FRAME_SIZE as u64) as usize).min(MAX_FRAMES);
 
         for frame in start_frame..end_frame {
             let idx = frame / 64;

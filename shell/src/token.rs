@@ -27,26 +27,26 @@ pub enum TokenKind {
     AssignmentWord { name: String, value: String },
 
     // Operators
-    Pipe,       // |
-    AndIf,      // &&
-    OrIf,       // ||
-    Semi,       // ;
-    Amp,        // &
+    Pipe,  // |
+    AndIf, // &&
+    OrIf,  // ||
+    Semi,  // ;
+    Amp,   // &
     Newline,
 
     // Redirections
-    Less,       // <
-    Great,      // >
-    DGreat,     // >>
-    LessAnd,    // <&
-    GreatAnd,   // >&
+    Less,     // <
+    Great,    // >
+    DGreat,   // >>
+    LessAnd,  // <&
+    GreatAnd, // >&
     IoNumber(u32),
 
     // Grouping
-    LParen,     // (
-    RParen,     // )
-    LBrace,     // {
-    RBrace,     // }
+    LParen, // (
+    RParen, // )
+    LBrace, // {
+    RBrace, // }
 
     // Keywords
     If,
@@ -61,7 +61,7 @@ pub enum TokenKind {
     In,
     Case,
     Esac,
-    DSemi,      // ;;
+    DSemi, // ;;
     Function,
 
     // Quoting

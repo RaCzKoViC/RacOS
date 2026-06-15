@@ -66,7 +66,12 @@ impl Terminal {
         match action {
             Action::Print(ch) => self.print(ch),
             Action::Execute(byte) => self.execute_control(byte),
-            Action::CsiDispatch { params, intermediates: _, final_byte, private } => {
+            Action::CsiDispatch {
+                params,
+                intermediates: _,
+                final_byte,
+                private,
+            } => {
                 self.execute_csi(&params, final_byte, private);
             }
             Action::OscDispatch(s) => self.execute_osc(&s),
@@ -79,7 +84,8 @@ impl Terminal {
         if self.cursor.wrap_pending {
             let needs_scroll = self.cursor.do_wrap();
             if needs_scroll {
-                self.buffer.scroll_up(1, self.cursor.scroll_top, self.cursor.scroll_bottom);
+                self.buffer
+                    .scroll_up(1, self.cursor.scroll_top, self.cursor.scroll_bottom);
             }
         }
 
@@ -104,7 +110,8 @@ impl Terminal {
                 // LF, VT, FF — all treated as line feed
                 let needs_scroll = self.cursor.line_feed();
                 if needs_scroll {
-                    self.buffer.scroll_up(1, self.cursor.scroll_top, self.cursor.scroll_bottom);
+                    self.buffer
+                        .scroll_up(1, self.cursor.scroll_top, self.cursor.scroll_bottom);
                 }
             }
             0x0D => self.cursor.carriage_return(),
@@ -137,38 +144,54 @@ impl Terminal {
                 self.cursor.set_position(row, col);
             }
             // ED — Erase Display
-            b'J' => {
-                match p1 {
-                    0 => self.buffer.clear_below(self.cursor.row, self.cursor.col),
-                    1 => self.buffer.clear_above(self.cursor.row, self.cursor.col),
-                    2 | 3 => self.buffer.clear(),
-                    _ => {}
-                }
-            }
+            b'J' => match p1 {
+                0 => self.buffer.clear_below(self.cursor.row, self.cursor.col),
+                1 => self.buffer.clear_above(self.cursor.row, self.cursor.col),
+                2 | 3 => self.buffer.clear(),
+                _ => {}
+            },
             // EL — Erase Line
-            b'K' => {
-                match p1 {
-                    0 => self.buffer.clear_line(self.cursor.row, self.cursor.col, self.buffer.cols),
-                    1 => self.buffer.clear_line(self.cursor.row, 0, self.cursor.col + 1),
-                    2 => self.buffer.clear_line(self.cursor.row, 0, self.buffer.cols),
-                    _ => {}
-                }
-            }
+            b'K' => match p1 {
+                0 => self
+                    .buffer
+                    .clear_line(self.cursor.row, self.cursor.col, self.buffer.cols),
+                1 => self
+                    .buffer
+                    .clear_line(self.cursor.row, 0, self.cursor.col + 1),
+                2 => self.buffer.clear_line(self.cursor.row, 0, self.buffer.cols),
+                _ => {}
+            },
             // IL — Insert Lines
             b'L' => {
-                self.buffer.insert_lines(self.cursor.row, p1.max(1) as usize, self.cursor.scroll_bottom);
+                self.buffer.insert_lines(
+                    self.cursor.row,
+                    p1.max(1) as usize,
+                    self.cursor.scroll_bottom,
+                );
             }
             // DL — Delete Lines
             b'M' => {
-                self.buffer.delete_lines(self.cursor.row, p1.max(1) as usize, self.cursor.scroll_bottom);
+                self.buffer.delete_lines(
+                    self.cursor.row,
+                    p1.max(1) as usize,
+                    self.cursor.scroll_bottom,
+                );
             }
             // SU — Scroll Up
             b'S' => {
-                self.buffer.scroll_up(p1.max(1) as usize, self.cursor.scroll_top, self.cursor.scroll_bottom);
+                self.buffer.scroll_up(
+                    p1.max(1) as usize,
+                    self.cursor.scroll_top,
+                    self.cursor.scroll_bottom,
+                );
             }
             // SD — Scroll Down
             b'T' => {
-                self.buffer.scroll_down(p1.max(1) as usize, self.cursor.scroll_top, self.cursor.scroll_bottom);
+                self.buffer.scroll_down(
+                    p1.max(1) as usize,
+                    self.cursor.scroll_top,
+                    self.cursor.scroll_bottom,
+                );
             }
             // SGR — Select Graphic Rendition
             b'm' => self.execute_sgr(params),
@@ -196,12 +219,14 @@ impl Terminal {
             // ICH — Insert Characters
             b'@' => {
                 let n = p1.max(1) as usize;
-                self.buffer.insert_chars(self.cursor.row, self.cursor.col, n);
+                self.buffer
+                    .insert_chars(self.cursor.row, self.cursor.col, n);
             }
             // DCH — Delete Characters
             b'P' => {
                 let n = p1.max(1) as usize;
-                self.buffer.delete_chars(self.cursor.row, self.cursor.col, n);
+                self.buffer
+                    .delete_chars(self.cursor.row, self.cursor.col, n);
             }
             // ECH — Erase Characters
             b'X' => {
@@ -215,7 +240,11 @@ impl Terminal {
             // DECSTBM — Set Scroll Region
             b'r' => {
                 let top = p1.max(1) as usize;
-                let bottom = if p2 == 0 { self.buffer.rows } else { p2 as usize };
+                let bottom = if p2 == 0 {
+                    self.buffer.rows
+                } else {
+                    p2 as usize
+                };
                 self.cursor.set_scroll_region(top, bottom);
             }
             _ => {} // Unrecognized — ignore
@@ -356,7 +385,8 @@ impl Terminal {
             b'D' => {
                 let needs_scroll = self.cursor.line_feed();
                 if needs_scroll {
-                    self.buffer.scroll_up(1, self.cursor.scroll_top, self.cursor.scroll_bottom);
+                    self.buffer
+                        .scroll_up(1, self.cursor.scroll_top, self.cursor.scroll_bottom);
                 }
             }
             // NEL — Next Line (CR + LF)
@@ -364,14 +394,16 @@ impl Terminal {
                 self.cursor.carriage_return();
                 let needs_scroll = self.cursor.line_feed();
                 if needs_scroll {
-                    self.buffer.scroll_up(1, self.cursor.scroll_top, self.cursor.scroll_bottom);
+                    self.buffer
+                        .scroll_up(1, self.cursor.scroll_top, self.cursor.scroll_bottom);
                 }
             }
             // RI — Reverse Index
             b'M' => {
                 let needs_scroll = self.cursor.reverse_index();
                 if needs_scroll {
-                    self.buffer.scroll_down(1, self.cursor.scroll_top, self.cursor.scroll_bottom);
+                    self.buffer
+                        .scroll_down(1, self.cursor.scroll_top, self.cursor.scroll_bottom);
                 }
             }
             _ => {}

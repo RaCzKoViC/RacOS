@@ -72,8 +72,10 @@ pub enum PixelFormat {
 /// Panics if magic is invalid or version is unsupported.
 pub fn validate(info: &BootInfo) {
     if info.magic != BOOT_INFO_MAGIC {
-        panic!("Invalid BootInfo magic: expected 0x{:016X}, got 0x{:016X}",
-            BOOT_INFO_MAGIC, info.magic);
+        panic!(
+            "Invalid BootInfo magic: expected 0x{:016X}, got 0x{:016X}",
+            BOOT_INFO_MAGIC, info.magic
+        );
     }
     if info.version < 1 {
         panic!("Unsupported BootInfo version: {}", info.version);
