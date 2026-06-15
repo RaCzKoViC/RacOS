@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/racoslogo.jpeg" alt="RacOS logo">
+</p>
+
 # RacOS
 
 **Autorski system operacyjny z architekturą warstwową inspirowaną Ubuntu.**
