@@ -37,8 +37,18 @@ impl Tty {
     }
 
     pub fn set_winsize(&mut self, rows: u16, cols: u16) {
+        let changed = self.winsize.rows != rows || self.winsize.cols != cols;
         self.winsize = WinSize { rows, cols };
-        // TODO: deliver SIGWINCH to foreground process group
+        if changed && self.foreground_pgid > 0 {
+            unsafe {
+                core::arch::asm!("cli", options(nomem, nostack));
+                crate::task::scheduler::send_signal_to_group(
+                    self.foreground_pgid as u32,
+                    crate::task::signal::Signal::SIGWINCH,
+                );
+                core::arch::asm!("sti", options(nomem, nostack));
+            }
+        }
     }
 
     pub fn set_mode(&mut self, mode: LineMode) {

@@ -23,7 +23,7 @@ use super::mount::Filesystem;
 
 static PTY_MASTER: SpinLock<Option<crate::tty::pty::PtyMaster>> = SpinLock::new(None);
 
-fn with_pty_master<R>(f: impl FnOnce(&mut crate::tty::pty::PtyMaster) -> R) -> R {
+pub fn with_pty_master_mut<R>(f: impl FnOnce(&mut crate::tty::pty::PtyMaster) -> R) -> R {
     let mut guard = PTY_MASTER.lock();
     if guard.is_none() {
         let (master, _slave) = crate::tty::pty::alloc_pty();
@@ -174,7 +174,7 @@ pub struct PtmxDevice;
 impl DeviceOps for PtmxDevice {
     fn read(&self, _offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
         loop {
-            let n = with_pty_master(|master| master.read_output(buf));
+            let n = with_pty_master_mut(|master| master.read_output(buf));
             if n > 0 {
                 return Ok(n);
             }
@@ -183,7 +183,7 @@ impl DeviceOps for PtmxDevice {
     }
 
     fn write(&self, _offset: u64, buf: &[u8]) -> VfsResult<usize> {
-        with_pty_master(|master| {
+        with_pty_master_mut(|master| {
             let echo = master.write_input(buf);
             if !echo.is_empty() {
                 let _ = master.slave_write(&echo);
@@ -199,7 +199,7 @@ pub struct PtySlaveDevice;
 impl DeviceOps for PtySlaveDevice {
     fn read(&self, _offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
         loop {
-            let n = with_pty_master(|master| master.slave_read(buf));
+            let n = with_pty_master_mut(|master| master.slave_read(buf));
             if n > 0 {
                 return Ok(n);
             }
@@ -208,7 +208,7 @@ impl DeviceOps for PtySlaveDevice {
     }
 
     fn write(&self, _offset: u64, buf: &[u8]) -> VfsResult<usize> {
-        let n = with_pty_master(|master| master.slave_write(buf));
+        let n = with_pty_master_mut(|master| master.slave_write(buf));
         Ok(n)
     }
 }
@@ -388,6 +388,11 @@ impl InodeOps for DevfsInode {
     fn ioctl(&self, request: u64, arg: u64) -> VfsResult<i64> {
         let dev = &self.fs.devices[self.idx];
         dev.ops.ioctl(request, arg)
+    }
+
+    fn is_pty(&self) -> bool {
+        let dev = &self.fs.devices[self.idx];
+        dev.name == "ptmx" || dev.name == "pts0"
     }
 }
 

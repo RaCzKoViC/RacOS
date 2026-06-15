@@ -1300,9 +1300,15 @@ const TIOCSPGRP: u32 = 0x5410;
 pub fn sys_ioctl(fd: i32, request: u32, arg: u64) -> SyscallResult {
     match request {
         TIOCGWINSZ => {
-            // Get window size — return default 80x25 for now
             validate_user_ptr(arg, 4)?;
-            let ws = crate::tty::line_discipline::WinSize::default();
+            let ws = unsafe {
+                core::arch::asm!("cli", options(nomem, nostack));
+                let ws =
+                    crate::task::scheduler::with_current_pty_master_mut(fd, |pty| pty.winsize());
+                core::arch::asm!("sti", options(nomem, nostack));
+                ws
+            }
+            .unwrap_or_default();
             unsafe {
                 let ptr = arg as *mut u16;
                 *ptr = ws.rows;
@@ -1317,26 +1323,46 @@ pub fn sys_ioctl(fd: i32, request: u32, arg: u64) -> SyscallResult {
                 let ptr = arg as *const u16;
                 (*ptr, *ptr.add(1))
             };
-            // TODO: find the TTY associated with this fd and update winsize
-            // For now, just deliver SIGWINCH to current process group
-            let pgid = crate::task::scheduler::current_pgid();
-            if pgid != 0 {
-                unsafe {
-                    core::arch::asm!("cli", options(nomem, nostack));
-                    crate::task::scheduler::send_signal_to_group(
-                        pgid,
-                        crate::task::signal::Signal::SIGWINCH,
-                    );
-                    core::arch::asm!("sti", options(nomem, nostack));
+            if rows == 0 || cols == 0 || rows >= 10_000 || cols >= 10_000 {
+                return Err(SyscallError::EINVAL);
+            }
+
+            let updated = unsafe {
+                core::arch::asm!("cli", options(nomem, nostack));
+                let updated = crate::task::scheduler::with_current_pty_master_mut(fd, |pty| {
+                    pty.set_winsize(rows, cols);
+                });
+                core::arch::asm!("sti", options(nomem, nostack));
+                updated
+            };
+            if updated.is_none() {
+                let pgid = crate::task::scheduler::current_pgid();
+                if pgid != 0 {
+                    unsafe {
+                        core::arch::asm!("cli", options(nomem, nostack));
+                        crate::task::scheduler::send_signal_to_group(
+                            pgid,
+                            crate::task::signal::Signal::SIGWINCH,
+                        );
+                        core::arch::asm!("sti", options(nomem, nostack));
+                    }
                 }
             }
-            let _ = (rows, cols);
             Ok(0)
         }
         TIOCGPGRP => {
             // Get foreground process group
             validate_user_ptr(arg, 4)?;
-            let pgid = crate::task::scheduler::current_pgid();
+            let pgid = unsafe {
+                core::arch::asm!("cli", options(nomem, nostack));
+                let pgid = crate::task::scheduler::with_current_pty_master_mut(fd, |pty| {
+                    pty.foreground_pgid
+                });
+                core::arch::asm!("sti", options(nomem, nostack));
+                pgid
+            }
+            .and_then(|pgid| if pgid > 0 { Some(pgid as u32) } else { None })
+            .unwrap_or_else(crate::task::scheduler::current_pgid);
             unsafe {
                 *(arg as *mut u32) = pgid;
             }
@@ -1346,8 +1372,33 @@ pub fn sys_ioctl(fd: i32, request: u32, arg: u64) -> SyscallResult {
             // Set foreground process group
             validate_user_ptr(arg, 4)?;
             let pgid = unsafe { *(arg as *const u32) };
-            // TODO: update the TTY's foreground pgid
-            let _ = pgid;
+            if pgid == 0 {
+                return Err(SyscallError::EINVAL);
+            }
+
+            let caller_session = crate::task::scheduler::current_session_id();
+            let valid = unsafe {
+                core::arch::asm!("cli", options(nomem, nostack));
+                let pids = crate::task::scheduler::pids_in_group(pgid);
+                let same_session = pids.iter().any(|pid| {
+                    crate::task::scheduler::session_id_of(*pid)
+                        .map(|session| session == caller_session)
+                        .unwrap_or(false)
+                });
+                core::arch::asm!("sti", options(nomem, nostack));
+                !pids.is_empty() && same_session
+            };
+            if !valid {
+                return Err(SyscallError::EPERM);
+            }
+
+            unsafe {
+                core::arch::asm!("cli", options(nomem, nostack));
+                let _ = crate::task::scheduler::with_current_pty_master_mut(fd, |pty| {
+                    pty.set_foreground(pgid as i32);
+                });
+                core::arch::asm!("sti", options(nomem, nostack));
+            }
             Ok(0)
         }
         _ => {

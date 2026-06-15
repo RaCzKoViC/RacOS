@@ -510,6 +510,29 @@ impl Scheduler {
             .collect()
     }
 
+    /// Return the session ID of a task.
+    pub fn session_id_of(&self, pid: Pid) -> Option<Pid> {
+        self.tasks
+            .iter()
+            .flatten()
+            .find(|t| t.pid == pid)
+            .map(|t| t.session_id)
+    }
+
+    /// Run a closure against the PTY backing the current task's fd.
+    pub fn with_current_pty_master_mut<R>(
+        &mut self,
+        fd: i32,
+        f: impl FnOnce(&mut crate::tty::pty::PtyMaster) -> R,
+    ) -> Option<R> {
+        let task = self.tasks.get(self.current)?.as_ref()?;
+        let file = task.fd_table.get(fd).ok()?;
+        if !file.inode.is_pty() {
+            return None;
+        }
+        Some(crate::vfs::devfs::with_pty_master_mut(f))
+    }
+
     /// Create a new session: set the current task's session_id and pgid to its own PID.
     /// Returns the new session ID (== current PID).
     pub fn create_session(&mut self) -> Pid {
@@ -833,6 +856,19 @@ where
         })
 }
 
+/// Run a closure with the PTY backing the current task's file descriptor.
+///
+/// # Safety
+/// Must be called with interrupts disabled.
+pub unsafe fn with_current_pty_master_mut<R>(
+    fd: i32,
+    f: impl FnOnce(&mut crate::tty::pty::PtyMaster) -> R,
+) -> Option<R> {
+    (*core::ptr::addr_of_mut!(SCHEDULER))
+        .as_mut()
+        .and_then(|s| s.with_current_pty_master_mut(fd, f))
+}
+
 /// Get the process group ID of a task. Returns None if not found.
 ///
 /// # Safety
@@ -875,6 +911,16 @@ pub fn current_pgid() -> Pid {
     }
 }
 
+/// Get the current task's session ID.
+pub fn current_session_id() -> Pid {
+    unsafe {
+        (*core::ptr::addr_of!(SCHEDULER))
+            .as_ref()
+            .map(|s| s.current_session_id())
+            .unwrap_or(0)
+    }
+}
+
 /// Send a signal to all tasks in a process group.
 ///
 /// # Safety
@@ -894,6 +940,16 @@ pub unsafe fn pids_in_group(pgid: Pid) -> alloc::vec::Vec<Pid> {
         .as_ref()
         .map(|s| s.pids_in_group(pgid))
         .unwrap_or_default()
+}
+
+/// Return the session ID of a task by PID.
+///
+/// # Safety
+/// Must be called with interrupts disabled.
+pub unsafe fn session_id_of(pid: Pid) -> Option<Pid> {
+    (*core::ptr::addr_of!(SCHEDULER))
+        .as_ref()
+        .and_then(|s| s.session_id_of(pid))
 }
 
 /// Replace the current task's execution image (for sys_exec).

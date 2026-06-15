@@ -140,6 +140,11 @@ pub trait InodeOps: Send + Sync {
         Err(VfsError::NotImplemented)
     }
 
+    /// Return true when this inode is backed by the PTY subsystem.
+    fn is_pty(&self) -> bool {
+        false
+    }
+
     /// Flush pending file metadata/data to backing storage.
     fn sync(&self) -> VfsResult<()> {
         Err(VfsError::NotImplemented)

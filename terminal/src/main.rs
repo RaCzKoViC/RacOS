@@ -6,6 +6,7 @@ extern crate racterm;
 
 const O_RDWR: u32 = 0x0002;
 const SIGTERM: i32 = 15;
+const TIOCSPGRP: u32 = 0x5410;
 
 const PTMX_PATH: &[u8] = b"/dev/ptmx\0";
 const PTS0_PATH: &[u8] = b"/dev/pts0\0";
@@ -99,6 +100,10 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
 fn spawn_shell_child(ptmx_fd: i32, pts_fd: i32) -> ! {
     let _ = libc_lite::setsid();
+    if let Ok(pgid) = libc_lite::getpgid(0) {
+        let pgid_slot = pgid;
+        let _ = libc_lite::ioctl(pts_fd, TIOCSPGRP, &pgid_slot as *const u32 as u64);
+    }
 
     let _ = libc_lite::dup2(pts_fd, 0);
     let _ = libc_lite::dup2(pts_fd, 1);
