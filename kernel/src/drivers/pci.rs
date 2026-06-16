@@ -44,6 +44,7 @@ impl PciDevice {
             | ((self.func as u32) << 8)
             | ((offset as u32) & 0xFC)
             | 0x80000000;
+        // SAFETY: PCI configuration space CF8/CFC ports — architectural.
         unsafe {
             outl(PCI_CONFIG_ADDRESS, address);
             inl(PCI_CONFIG_DATA)
@@ -56,6 +57,7 @@ impl PciDevice {
             | ((self.func as u32) << 8)
             | ((offset as u32) & 0xFC)
             | 0x80000000;
+        // SAFETY: PCI configuration space CF8/CFC ports — architectural.
         unsafe {
             outl(PCI_CONFIG_ADDRESS, address);
             outl(PCI_CONFIG_DATA, value);
@@ -165,6 +167,7 @@ fn pci_read_u16(bus: u8, slot: u8, func: u8, offset: u8) -> u16 {
         | ((func as u32) << 8)
         | ((offset as u32) & 0xFC)
         | 0x80000000;
+    // SAFETY: PCI configuration space CF8/CFC ports — architectural.
     unsafe {
         outl(PCI_CONFIG_ADDRESS, address);
         let val = inl(PCI_CONFIG_DATA);
@@ -178,6 +181,7 @@ fn pci_read_u32(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
         | ((func as u32) << 8)
         | ((offset as u32) & 0xFC)
         | 0x80000000;
+    // SAFETY: PCI configuration space CF8/CFC ports — architectural.
     unsafe {
         outl(PCI_CONFIG_ADDRESS, address);
         inl(PCI_CONFIG_DATA)

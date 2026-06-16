@@ -40,6 +40,7 @@ impl Tty {
         let changed = self.winsize.rows != rows || self.winsize.cols != cols;
         self.winsize = WinSize { rows, cols };
         if changed && self.foreground_pgid > 0 {
+            // SAFETY: cli/sti window so SIGWINCH delivery is atomic.
             unsafe {
                 core::arch::asm!("cli", options(nomem, nostack));
                 crate::task::scheduler::send_signal_to_group(

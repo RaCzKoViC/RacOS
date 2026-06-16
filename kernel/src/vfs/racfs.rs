@@ -328,14 +328,17 @@ impl Racfs {
     }
 
     fn cache_mut(&self) -> &mut BlockCache {
+        // SAFETY: racfs is single-CPU MVP; callers run inside their own syscall.
         unsafe { &mut *self.cache.get() }
     }
 
     fn sb(&self) -> &Superblock {
+        // SAFETY: see cache_mut().
         unsafe { &*self.sb.get() }
     }
 
     fn sb_mut(&self) -> &mut Superblock {
+        // SAFETY: see cache_mut().
         unsafe { &mut *self.sb.get() }
     }
 

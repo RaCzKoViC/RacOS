@@ -32,6 +32,7 @@ impl ModuleManager {
 static mut MODULE_MANAGER: Option<ModuleManager> = None;
 
 pub fn init() {
+    // SAFETY: boot-once MODULE_MANAGER initialisation.
     unsafe {
         MODULE_MANAGER = Some(ModuleManager::new());
     }

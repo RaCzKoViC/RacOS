@@ -93,6 +93,7 @@ impl UserProcess {
         //   would have us scribbling over someone else's stack. Mitigated by
         //   alloc_contiguous tracking and the guard page byte pattern that
         //   surfaces overflows on the next context switch.
+        // SAFETY: see the WHY/INVARIANT/FAILURE block above.
         unsafe {
             core::ptr::write_bytes(
                 alloc_base as *mut u8,
@@ -162,6 +163,7 @@ impl UserProcess {
             //   by the user-side path computing block_bytes_aligned before
             //   this loop and the caller (sys_spawn) capping argv at
             //   MAX_ARGS = 64.
+            // SAFETY: see the WHY/INVARIANT/FAILURE block above.
             unsafe {
                 *(virt_to_phys(sp) as *mut u8) = 0;
             }
@@ -174,6 +176,7 @@ impl UserProcess {
             //   The two ranges cannot overlap because the destination is
             //   user-virtual + identity-mapped, the source is kernel-heap.
             // FAILURE: same overflow story as above; mitigated the same way.
+            // SAFETY: see the WHY/INVARIANT/FAILURE block above.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     arg.as_ptr(),
@@ -240,6 +243,7 @@ impl UserProcess {
         //   leak unrelated stack content into the argc/argv view
         //   _start sees. Mitigated by the block_bytes formula matching the
         //   index arithmetic line-for-line.
+        // SAFETY: see the WHY/INVARIANT/FAILURE block above.
         unsafe {
             // argc at [rsp+0]
             *(virt_to_phys(user_rsp) as *mut u64) = argc as u64;
@@ -288,6 +292,7 @@ impl UserProcess {
         // FAILURE: a wrong frame layout (re-ordering RIP/CS/RFLAGS/RSP/SS)
         //   would IRETQ to a garbage RIP and triple-fault. Mitigated by
         //   matching the Intel SDM Vol 1 §6.14 order documented inline.
+        // SAFETY: see the WHY/INVARIANT/FAILURE block above.
         unsafe {
             let frame = iret_frame_start as *mut u64;
             // IRETQ pops: RIP, CS, RFLAGS, RSP, SS (in that order)
@@ -360,6 +365,7 @@ impl UserProcess {
             //   user code escalate. Mitigated by USER_CODE/USER_DATA flag
             //   selection above and by validate_user_ptr checks in the
             //   syscall path.
+            // SAFETY: see the WHY/INVARIANT/FAILURE block above.
             unsafe {
                 virt::map_range(
                     pml4_phys,

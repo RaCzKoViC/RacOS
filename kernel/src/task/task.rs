@@ -137,6 +137,7 @@ impl Task {
         let stack_base = alloc_base + (KERNEL_STACK_GUARD_PAGES * phys::FRAME_SIZE) as u64;
         let stack_top = stack_base + KERNEL_STACK_SIZE as u64;
 
+        // SAFETY: freshly-allocated guard+stack pages, exclusively owned.
         unsafe {
             // Guard page: fill with sentinel byte so scheduler.check_kernel_stack_guard
             // can detect an overflow at the next context switch.
@@ -158,6 +159,7 @@ impl Task {
         // RSP points to where we've set up our fake stack frame
         // We push a return address (entry_fn) onto the stack
         let initial_rsp = stack_top - 8; // Space for the "return address"
+                                         // SAFETY: writing into top-of-stack we just allocated above.
         unsafe {
             // The trampoline will read RBX as the real entry function
             *(initial_rsp as *mut u64) = 0; // Dummy return address (task_entry_trampoline never returns)

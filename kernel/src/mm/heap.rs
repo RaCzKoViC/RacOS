@@ -95,6 +95,7 @@ impl KernelHeapAllocator {
                 if prev.is_null() {
                     self.head = block.next;
                 } else {
+                    // SAFETY: prev is a valid free-block pointer from the walk above.
                     unsafe {
                         (*prev).next = block.next;
                     }
@@ -103,6 +104,7 @@ impl KernelHeapAllocator {
 
                 // If there's enough space after the allocation, create a new free block
                 if remaining >= MIN_BLOCK_SIZE {
+                    // SAFETY: alloc_end < block_end (checked), enough room for FreeBlock header.
                     unsafe {
                         let new_block = alloc_end as *mut FreeBlock;
                         (*new_block).size = remaining;
@@ -113,6 +115,7 @@ impl KernelHeapAllocator {
 
                 // If there's enough space before the allocation (alignment padding), keep it
                 if front_padding >= MIN_BLOCK_SIZE {
+                    // SAFETY: block_start is the original free-block address; we're reusing it.
                     unsafe {
                         let front_block = block_start as *mut FreeBlock;
                         (*front_block).size = front_padding;
@@ -202,6 +205,7 @@ impl KernelHeapAllocator {
         match phys::alloc_contiguous(frames_needed) {
             Ok(frame) => {
                 let base = frame.addr() as usize;
+                // SAFETY: freshly-allocated frames; identity-mapped; exclusively owned.
                 unsafe {
                     let block = base as *mut FreeBlock;
                     (*block).size = frames_needed * FRAME_SIZE;

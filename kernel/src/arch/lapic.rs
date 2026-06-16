@@ -140,6 +140,7 @@ pub fn is_enabled() -> bool {
     if base == 0 {
         return false;
     }
+    // SAFETY: LAPIC_BASE is non-zero, set once by init_bsp.
     unsafe { read_reg(LAPIC_REG_SVR) & SVR_ENABLE != 0 }
 }
 
@@ -151,6 +152,7 @@ pub fn current_apic_id() -> u32 {
     if base == 0 {
         return 0;
     }
+    // SAFETY: LAPIC_BASE non-zero; ID register read.
     unsafe { (read_reg(LAPIC_REG_ID) >> 24) & 0xFF }
 }
 
@@ -203,6 +205,7 @@ pub fn eoi() {
     if base == 0 {
         return;
     }
+    // SAFETY: LAPIC_BASE non-zero; EOI write is idempotent.
     unsafe {
         write_reg(LAPIC_REG_EOI, 0);
     }
@@ -215,6 +218,7 @@ pub fn eoi() {
 /// after ~1M spins so a wedged controller can't hang the kernel.
 fn wait_delivery() -> Result<(), &'static str> {
     for _ in 0..1_000_000u32 {
+        // SAFETY: LAPIC_BASE is set by init_bsp before any IPI helper is called.
         let v = unsafe { read_reg(LAPIC_REG_ICR_LOW) };
         if v & ICR_STATUS_PENDING == 0 {
             return Ok(());

@@ -230,6 +230,8 @@ impl Initramfs {
             if offset + data_len > data.len() {
                 break;
             }
+            // SAFETY: offset + data_len bounded by the offset check above; the
+            // slice borrows the static initramfs blob.
             let file_data: &'static [u8] =
                 unsafe { core::slice::from_raw_parts(data.as_ptr().add(offset), data_len) };
             offset += data_len;

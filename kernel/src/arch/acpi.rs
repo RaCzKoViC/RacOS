@@ -210,6 +210,7 @@ pub unsafe fn init(rsdp_addr: u64) {
 }
 
 pub fn get_info() -> Option<&'static AcpiInfo> {
+    // SAFETY: ACPI_INFO is set once by arch::acpi::init at boot.
     unsafe { ACPI_INFO.as_ref() }
 }
 

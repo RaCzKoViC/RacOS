@@ -145,6 +145,7 @@ pub fn started_count() -> usize {
     let n = cpu_count();
     let mut c = 0usize;
     for i in 0..n {
+        // SAFETY: i < cpu_count <= MAX_CPUS; CPUS slot's `started` is its own atomic.
         unsafe {
             if CPUS[i].started.load(Ordering::SeqCst) {
                 c += 1;
@@ -164,6 +165,7 @@ pub fn bsp_apic_id() -> u32 {
 pub fn mark_started(apic_id: u32) {
     let n = cpu_count();
     for i in 0..n {
+        // SAFETY: i < cpu_count <= MAX_CPUS; slot apic_id+started both atomic.
         unsafe {
             if CPUS[i].apic_id == apic_id {
                 CPUS[i].started.store(true, Ordering::SeqCst);
@@ -177,6 +179,7 @@ pub fn mark_started(apic_id: u32) {
 pub fn for_each_cpu<R, F: FnMut(&CpuState) -> Option<R>>(mut f: F) -> Option<R> {
     let n = cpu_count();
     for i in 0..n {
+        // SAFETY: i < cpu_count <= MAX_CPUS.
         unsafe {
             if let Some(r) = f(&CPUS[i]) {
                 return Some(r);

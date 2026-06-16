@@ -262,6 +262,7 @@ impl ProcFileInode {
             INO_MOUNTS => {
                 // device mountpoint fstype options 0 0
                 let mut out = String::new();
+                // SAFETY: mount_table singleton initialised at boot.
                 unsafe {
                     let mt = super::mount::mount_table();
                     for m in mt.entries() {
@@ -288,6 +289,7 @@ impl ProcFileInode {
             INO_CACHESTATS => {
                 let mut out =
                     String::from("# mount hits misses cached_entries dirty_entries hit_rate%\n");
+                // SAFETY: mount_table singleton.
                 unsafe {
                     let mt = super::mount::mount_table();
                     for m in mt.entries() {
@@ -311,6 +313,7 @@ impl ProcFileInode {
                 // Block size is 512 B. Only racfs mounts report real numbers — other
                 // filesystems are reported as 0 since they aren't block-backed.
                 let mut out = String::from("# mount total_blocks used_blocks free_blocks total_inodes free_inodes (block=512B)\n");
+                // SAFETY: mount_table singleton.
                 unsafe {
                     let mt = super::mount::mount_table();
                     for m in mt.entries() {
@@ -411,6 +414,7 @@ impl ProcPidFileInode {
         match self.sub {
             1 => {
                 // status
+                // SAFETY: cli/sti window so the task-table read is consistent.
                 unsafe {
                     core::arch::asm!("cli", options(nomem, nostack));
                     let info = crate::task::scheduler::with_task_by_pid(self.pid, |t| {
@@ -440,6 +444,7 @@ impl ProcPidFileInode {
             }
             2 => {
                 // cmdline
+                // SAFETY: cli/sti window so the task-table read is consistent.
                 unsafe {
                     core::arch::asm!("cli", options(nomem, nostack));
                     let result = crate::task::scheduler::with_task_by_pid(self.pid, |t| {

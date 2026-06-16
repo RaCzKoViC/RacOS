@@ -88,6 +88,7 @@ pub fn enable_irq(irq: u8) {
 pub fn disable_irq(irq: u8) {
     let port = if irq < 8 { PIC1_DATA } else { PIC2_DATA };
     let line = if irq < 8 { irq } else { irq - 8 };
+    // SAFETY: PIC data port I/O — architectural fixed ports 0x21/0xA1.
     unsafe {
         let mask = inb(port);
         outb(port, mask | (1 << line));
@@ -107,6 +108,7 @@ pub fn send_eoi(irq: u8) {
 
 /// Mask all IRQs (disable all).
 pub fn disable_all() {
+    // SAFETY: PIC data port I/O — masks all IRQs at the PICs.
     unsafe {
         outb(PIC1_DATA, 0xFF);
         outb(PIC2_DATA, 0xFF);

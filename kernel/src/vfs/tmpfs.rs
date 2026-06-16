@@ -72,18 +72,23 @@ impl Tmpfs {
     }
 
     fn nodes(&self) -> &Vec<TmpfsNode> {
+        // SAFETY: tmpfs is single-CPU MVP; mutators take exclusive access via CLI/STI
+        // at syscall entry, readers only run during their own syscall.
         unsafe { &*self.nodes.get() }
     }
 
     fn nodes_mut(&self) -> &mut Vec<TmpfsNode> {
+        // SAFETY: see nodes().
         unsafe { &mut *self.nodes.get() }
     }
 
     fn total_bytes(&self) -> usize {
+        // SAFETY: see nodes().
         unsafe { *self.total_bytes.get() }
     }
 
     fn set_total_bytes(&self, v: usize) {
+        // SAFETY: see nodes().
         unsafe {
             *self.total_bytes.get() = v;
         }

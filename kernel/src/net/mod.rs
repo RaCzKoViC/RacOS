@@ -159,6 +159,7 @@ impl NetState {
 static mut NET_STATE: Option<NetState> = None;
 
 fn state_mut() -> &'static mut NetState {
+    // SAFETY: NET_STATE singleton initialised lazily; single-CPU MVP.
     unsafe {
         if (*core::ptr::addr_of!(NET_STATE)).is_none() {
             *core::ptr::addr_of_mut!(NET_STATE) = Some(NetState::new());

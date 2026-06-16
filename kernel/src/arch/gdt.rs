@@ -140,6 +140,7 @@ pub unsafe fn set_kernel_stack(rsp0: u64) {
 
 /// Read the current TSS.RSP0 (kernel stack pointer for ring 3 → ring 0).
 pub fn current_kernel_stack() -> u64 {
+    // SAFETY: TSS is a static singleton, this is a single field read.
     unsafe { (*core::ptr::addr_of!(TSS)).rsp0 }
 }
 
@@ -209,11 +210,13 @@ unsafe fn install_tss() {
         // bytes 4-7 are reserved (0)
         buf
     };
+    // SAFETY: GdtEntry is 8 bytes repr(C) of plain integer fields; high_bytes is [u8; 8].
     gdt[6] = unsafe { core::mem::transmute(high_bytes) };
 }
 
 /// Load the GDT, set segment registers, install and load TSS.
 pub fn init() {
+    // SAFETY: boot-once GDT install + segment reload + LTR; called before IRQs.
     unsafe {
         // Install TSS descriptor into GDT slots 5-6
         install_tss();
