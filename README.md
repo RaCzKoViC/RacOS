@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/racoslogo.jpeg" alt="RacOS logo">
+  <img src="docs/assets/racoslogo1.jpeg" alt="RacOS logo">
 </p>
 
 # RacOS
