@@ -1,22 +1,32 @@
 #![no_std]
 #![no_main]
-#![deny(unsafe_code)]
 
-use libc_lite;
-
-/// env — print environment (stub: prints PWD and PATH from getcwd).
-/// In RacOS userland, env vars aren't inherited yet, so this is minimal.
-#[allow(unsafe_code)] // C ABI entry point: linker symbol exemption only
+/// env — print the inherited environment, one `KEY=VALUE` line per entry.
+///
+/// Walks the `environ` block that libc-lite's `_start` recorded from the
+/// argv/envp layout the kernel placed on this process's stack
+/// (kernel/src/task/process.rs). If no environment was inherited (e.g.
+/// invoked directly by the kernel with no envp), prints nothing and
+/// exits 0.
 #[no_mangle]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    // Print PWD
-    let mut buf = [0u8; 256];
-    if let Ok(n) = libc_lite::getcwd(&mut buf) {
-        let _ = libc_lite::write(1, b"PWD=");
-        let _ = libc_lite::write(1, &buf[..n]);
-        let _ = libc_lite::write(1, b"\n");
+    let mut p = libc_lite::environ();
+    if p.is_null() {
+        return 0;
     }
-    // Print PATH (hardcoded default since env inheritance not yet implemented)
-    let _ = libc_lite::write(1, b"PATH=/bin:/sbin\n");
+    loop {
+        let entry = unsafe { *p };
+        if entry.is_null() {
+            break;
+        }
+        let mut len = 0usize;
+        while unsafe { *entry.add(len) } != 0 {
+            len += 1;
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(entry, len) };
+        let _ = libc_lite::write(1, bytes);
+        let _ = libc_lite::write(1, b"\n");
+        p = unsafe { p.add(1) };
+    }
     0
 }

@@ -397,6 +397,12 @@ fn exec_external(path: &str, args: &[String], redirects: &[Redirect], env: &Env)
     }
     argv_ptrs.push(core::ptr::null()); // NULL terminator
 
+    // Build envp from the shell's variables. For MVP we send every set
+    // variable through; the POSIX exported-vs-shell-local distinction is
+    // tracked separately. `_env_bufs` owns the backing storage that
+    // `envp_ptrs` points into and must outlive the spawn syscall.
+    let (_env_bufs, envp_ptrs) = build_envp(env);
+
     // Set up redirections before spawn. If any redirect fails to open we
     // refuse to run the command — otherwise the redirect quietly evaporates
     // and the user gets the false impression their `>` write succeeded.
@@ -408,7 +414,7 @@ fn exec_external(path: &str, args: &[String], redirects: &[Redirect], env: &Env)
         }
     };
 
-    let result = match libc_lite::spawn_args(&path_buf, &argv_ptrs) {
+    let result = match libc_lite::spawn_args_envp(&path_buf, &argv_ptrs, &envp_ptrs) {
         Ok(_child_pid) => {
             // Wait for child
             let mut status: i32 = 0;
@@ -590,7 +596,8 @@ fn exec_background(node: &AstNode, env: &mut Env) {
                 argv_ptrs.push(buf.as_ptr());
             }
             argv_ptrs.push(core::ptr::null());
-            match libc_lite::spawn_args(&path_buf, &argv_ptrs) {
+            let (_env_bufs, envp_ptrs) = build_envp(env);
+            match libc_lite::spawn_args_envp(&path_buf, &argv_ptrs, &envp_ptrs) {
                 Ok(pid) => {
                     let job_id = add_job(pid as u32, &expanded[0]);
                     let _ = libc_lite::write(1, b"[");
@@ -767,7 +774,8 @@ fn exec_pipeline(commands: &[AstNode], env: &mut Env) -> i32 {
                     };
 
                     if let Some(saved_redirects) = saved_redirects {
-                        match libc_lite::spawn_args(&path_buf, &argv_ptrs) {
+                        let (_pipe_env_bufs, pipe_envp_ptrs) = build_envp(env);
+                        match libc_lite::spawn_args_envp(&path_buf, &argv_ptrs, &pipe_envp_ptrs) {
                             Ok(pid) => {
                                 child_pids.push(pid);
                             }
@@ -846,4 +854,24 @@ fn exec_pipeline(commands: &[AstNode], env: &mut Env) -> i32 {
     }
 
     last_status
+}
+
+/// Build the envp arrays (owned buffers + borrowed pointer table) that
+/// libc-lite's `spawn_args_envp` expects. Each entry is a NUL-terminated
+/// `KEY=VALUE` byte string; the pointer array is NULL-terminated. MVP:
+/// send every variable the shell knows about — POSIX export-only is a
+/// follow-up.
+fn build_envp(env: &Env) -> (Vec<Vec<u8>>, Vec<*const u8>) {
+    let mut bufs: Vec<Vec<u8>> = Vec::new();
+    for (k, v) in env.vars() {
+        let mut entry = Vec::with_capacity(k.len() + 1 + v.len() + 1);
+        entry.extend_from_slice(k.as_bytes());
+        entry.push(b'=');
+        entry.extend_from_slice(v.as_bytes());
+        entry.push(0);
+        bufs.push(entry);
+    }
+    let mut ptrs: Vec<*const u8> = bufs.iter().map(|b| b.as_ptr()).collect();
+    ptrs.push(core::ptr::null());
+    (bufs, ptrs)
 }
