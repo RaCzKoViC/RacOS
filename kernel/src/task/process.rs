@@ -81,6 +81,18 @@ impl UserProcess {
             alloc_base + (super::task::KERNEL_STACK_GUARD_PAGES * phys::FRAME_SIZE) as u64;
         let kernel_stack_top = kernel_stack_base + KERNEL_STACK_SIZE as u64;
 
+        // SAFETY: zero/pattern-fill the freshly-allocated kernel stack +
+        // guard frames.
+        // WHY: write_bytes is the only no-alloc way to clear a raw frame range
+        //   that doesn't have a typed reference yet.
+        // INVARIANT: alloc_contiguous(total_pages) above just returned this
+        //   range, so [alloc_base, alloc_base + total_pages * FRAME_SIZE) is
+        //   the exclusive owner of these physical bytes and identity-mapped
+        //   into the kernel address space.
+        // FAILURE: a buggy phys allocator returning an already-owned frame
+        //   would have us scribbling over someone else's stack. Mitigated by
+        //   alloc_contiguous tracking and the guard page byte pattern that
+        //   surfaces overflows on the next context switch.
         unsafe {
             core::ptr::write_bytes(
                 alloc_base as *mut u8,
@@ -137,10 +149,31 @@ impl UserProcess {
         let mut argv_vaddrs = alloc::vec::Vec::with_capacity(argc);
         for arg in argv.iter().rev() {
             sp -= 1;
+            // SAFETY: write the NUL terminator for this argv string.
+            // WHY: raw write into a freshly-allocated user-stack frame —
+            //   no &mut [u8] exists for the mapping yet because nothing has
+            //   set it up as a typed Rust slice.
+            // INVARIANT: virt_to_phys maps sp into [stack_phys_base,
+            //   stack_phys_base + stack_size). Each loop iteration only
+            //   decrements sp, never increments, and the running guards
+            //   (block_bytes_aligned + string lengths) leave headroom.
+            // FAILURE: a too-large argv array would push sp below
+            //   stack_phys_base and corrupt whatever sits there. Mitigated
+            //   by the user-side path computing block_bytes_aligned before
+            //   this loop and the caller (sys_spawn) capping argv at
+            //   MAX_ARGS = 64.
             unsafe {
                 *(virt_to_phys(sp) as *mut u8) = 0;
             }
             sp -= arg.len() as u64;
+            // SAFETY: copy the argv string bytes into user stack at the
+            // address we just reserved.
+            // INVARIANT: arg lives in the kernel heap (alloc::Vec<u8>) and
+            //   the destination range [sp, sp + arg.len()) is fresh user
+            //   stack memory carved out by the just-previous decrements.
+            //   The two ranges cannot overlap because the destination is
+            //   user-virtual + identity-mapped, the source is kernel-heap.
+            // FAILURE: same overflow story as above; mitigated the same way.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     arg.as_ptr(),
@@ -155,10 +188,16 @@ impl UserProcess {
         let mut envp_vaddrs = alloc::vec::Vec::with_capacity(envc);
         for var in envp.iter().rev() {
             sp -= 1;
+            // SAFETY: NUL terminator for this envp entry. Same justification
+            // as the argv NUL write above; envp entries are sized + capped
+            // by sys_spawn's collect_user_envp (MAX_ENV_VARS = 256).
             unsafe {
                 *(virt_to_phys(sp) as *mut u8) = 0;
             }
             sp -= var.len() as u64;
+            // SAFETY: copy envp entry bytes into user stack — same argument
+            // as the argv copy above. Source (kernel heap) and destination
+            // (user stack identity map) cannot alias.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     var.as_ptr(),
@@ -185,6 +224,22 @@ impl UserProcess {
         let user_rsp = sp; // 16-byte aligned
 
         // 4. Populate the block at fixed offsets from user_rsp.
+        //
+        // SAFETY: write argc + argv pointer array + envp pointer array into
+        // the user stack at known offsets.
+        // WHY: at this point no &mut [u64] exists over the freshly-allocated
+        //   user stack — these are raw u64 writes through identity-mapped
+        //   physical addresses.
+        // INVARIANT: sp -= block_bytes_aligned above carved the exact byte
+        //   count needed for `argc, argv[0..N-1], NULL, envp[0..M-1], NULL`
+        //   plus 16-byte alignment padding. Every offset computed below
+        //   (`user_rsp + 8 + 8 * k`) falls within that carved region for
+        //   k in 0..=argc + 1 + envc + 1, which is the loop range used.
+        // FAILURE: a wrong offset arithmetic here would either corrupt the
+        //   string data sitting just above the block (off-by-too-much) or
+        //   leak unrelated stack content into the argc/argv view
+        //   _start sees. Mitigated by the block_bytes formula matching the
+        //   index arithmetic line-for-line.
         unsafe {
             // argc at [rsp+0]
             *(virt_to_phys(user_rsp) as *mut u64) = argc as u64;
@@ -221,6 +276,18 @@ impl UserProcess {
         // RFLAGS: IF set (interrupts enabled), IOPL=0
         let user_rflags: u64 = 0x200; // IF bit
 
+        // SAFETY: write the 5-slot IRETQ frame at the top of the freshly-
+        // allocated kernel stack.
+        // WHY: the trampoline will execute IRETQ over this frame to jump
+        //   into ring-3 — there's no safe Rust wrapper for "transition to
+        //   user mode".
+        // INVARIANT: kernel_stack_top was computed from the contiguous
+        //   allocation above (lines 75-77) and iret_frame_start sits 40
+        //   bytes below it, inside the usable stack region. The frame is
+        //   contiguous and we're the only writer.
+        // FAILURE: a wrong frame layout (re-ordering RIP/CS/RFLAGS/RSP/SS)
+        //   would IRETQ to a garbage RIP and triple-fault. Mitigated by
+        //   matching the Intel SDM Vol 1 §6.14 order documented inline.
         unsafe {
             let frame = iret_frame_start as *mut u64;
             // IRETQ pops: RIP, CS, RFLAGS, RSP, SS (in that order)
@@ -279,6 +346,20 @@ impl UserProcess {
                 vflags::USER_DATA & !vflags::WRITABLE
             };
 
+            // SAFETY: install per-segment user-mode mappings in the
+            // freshly-allocated PML4.
+            // WHY: virt::map_range walks raw paging structures and writes
+            //   table entries — no safe wrapper exists for "edit page tables
+            //   in place".
+            // INVARIANT: pml4_phys was just allocated by
+            //   virt::alloc_page_table above and is exclusively owned by
+            //   this UserProcess until we hand it off to the scheduler;
+            //   seg.paddr came out of elf::load_elf which sized the segment
+            //   to `pages * FRAME_SIZE`.
+            // FAILURE: a mistaken vaddr would shadow kernel memory and let
+            //   user code escalate. Mitigated by USER_CODE/USER_DATA flag
+            //   selection above and by validate_user_ptr checks in the
+            //   syscall path.
             unsafe {
                 virt::map_range(
                     pml4_phys,
@@ -301,6 +382,11 @@ impl UserProcess {
         // ── Map user stack ─────────────────────────────────────────────────
         let stack_pages = loaded.stack_size / phys::FRAME_SIZE;
         let stack_virt_base = loaded.stack_virt_top - loaded.stack_size as u64;
+        // SAFETY: install the user-stack mapping in the same PML4 we just
+        // populated with ELF segments above.
+        // WHY/INVARIANT/FAILURE: same as the per-segment map_range above.
+        //   Mapping is USER_DATA (writable, NX) because the stack is
+        //   non-executable.
         unsafe {
             virt::map_range(
                 pml4_phys,
