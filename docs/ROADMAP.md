@@ -111,10 +111,14 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
   - IPI dla preemption (LAPIC ICR)
   - **Definition of done:** boot QEMU `-smp 4`, parallel test który widzi 4 cpu w `/proc/cpuinfo`
 
-- [ ] **T3.2 — rpkg MVP**
-  - Bez signatures, bez resolvera — sam parser `.rpk` + install/remove/list
-  - Spec referencyjny: `docs/specs/PACKAGE_FORMAT.md`
-  - **Definition of done:** zbudować `.rpk` z testowego userland tool'a, zainstalować, uruchomić, usunąć
+- [x] **T3.2 — rpkg MVP**
+  - Discovery: rpkg lib (246 linii) had the header parser + section extractor + manifest TOML reader + install-plan helper, plus 2 tests. The matching binary skeleton in `pkg/rpkg-bin/` was dead code (wrong libc-lite path, not in workspace, only printed a plan — never wrote anything).
+  - This PR closes the gap:
+    - [x] Extended rpkg lib with `serialize_files_list`/`parse_files_list` (host-testable) + 4 new tests. 6 rpkg tests now run in CI.
+    - [x] Rewrote `pkg/rpkg-bin` end-to-end: install/list/remove subcommands. Install parses the .rpk, writes `manifest.toml` + `files` index + `data` payload into `/var/lib/rpkg/info/<name>/`. List does getdents on the info root. Remove reads the files index, unlinks each path, then drops the info dir.
+    - [x] rpkg-bin wired into workspace, build-image.sh + .ps1 BIN_LIST and Coreutils list (cargo-bin name `rpkg-bin`, installed as `/bin/rpkg`).
+    - [x] `racos-test::test_rpkg_install_list_remove` builds a minimal .rpk in memory, writes it to `/tmp/demo.rpk`, then spawns `/bin/rpkg install /tmp/demo.rpk`, `/bin/rpkg list`, `/bin/rpkg remove demo-rpkg` — asserting exit 0 for each and emitting `T32-RPKG-OK`.
+  - **Pozostałe (deferred):** signature verification (no crypto yet), dependency resolution (rapt territory), repository protocol, multi-file packages (DATA is single-payload in MVP — multi-file would need a real archive format), `/bin/` deployment after T4.x makes initramfs writable or rootfs is on persistent disk.
 
 - [~] **T3.3 — Userland: dokończyć stuby** (ps shipped; env/sed/awk pending)
   - [x] **`ps`** — real procfs reader. Walks `/proc` via getdents, reads `/proc/<pid>/status` for each numeric pid dir, prints `PID PPID STATE NAME` columns.

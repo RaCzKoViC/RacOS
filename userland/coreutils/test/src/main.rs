@@ -110,6 +110,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_shell_control_flow();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
+    test_rpkg_install_list_remove();
     test_exec_loop_memory_cleanup();
     test_tty_ioctl_state();
     test_chdir_getcwd();
@@ -540,6 +541,107 @@ fn test_ps_lists_running_processes() {
     if waited.unwrap_or(-1) == pid && status == 0 {
         println("T33-PS-OK");
     }
+}
+
+/// Smoke for /bin/rpkg: build a minimal valid .rpk in memory, write it to
+/// /tmp, install it, list, remove it, list again. End-to-end exercises
+/// the lib's header parser + section extractor + manifest TOML reader
+/// AND the bin's filesystem write/unlink/getdents path.
+fn test_rpkg_install_list_remove() {
+    println("\n[test] /bin/rpkg install/list/remove cycle");
+
+    // Construct a minimal .rpk: 56-byte header + manifest + signature + data.
+    // Manifest declares name = "demo-rpkg" so install lands at
+    // /var/lib/rpkg/info/demo-rpkg/.
+    let manifest: &[u8] =
+        b"[package]\nname = \"demo-rpkg\"\nversion = \"0.0.1\"\narch = \"x86_64\"\n";
+    let signature: &[u8] = b"x"; // not verified in MVP
+    let data: &[u8] = b"DEMO_RPKG_PAYLOAD\n";
+
+    let mo: u64 = 56;
+    let ms: u64 = manifest.len() as u64;
+    let so: u64 = mo + ms;
+    let ss: u64 = signature.len() as u64;
+    let doff: u64 = so + ss;
+    let ds: u64 = data.len() as u64;
+
+    let mut rpk = [0u8; 256];
+    rpk[0..4].copy_from_slice(&[b'R', b'P', b'K', 0x01]);
+    rpk[4..8].copy_from_slice(&1u32.to_le_bytes());
+    rpk[8..16].copy_from_slice(&mo.to_le_bytes());
+    rpk[16..24].copy_from_slice(&ms.to_le_bytes());
+    rpk[24..32].copy_from_slice(&so.to_le_bytes());
+    rpk[32..40].copy_from_slice(&ss.to_le_bytes());
+    rpk[40..48].copy_from_slice(&doff.to_le_bytes());
+    rpk[48..56].copy_from_slice(&ds.to_le_bytes());
+    let mut p = 56usize;
+    rpk[p..p + manifest.len()].copy_from_slice(manifest);
+    p += manifest.len();
+    rpk[p..p + signature.len()].copy_from_slice(signature);
+    p += signature.len();
+    rpk[p..p + data.len()].copy_from_slice(data);
+    let rpk_len = p + data.len();
+
+    // Write to /tmp/demo.rpk on tmpfs (writable).
+    let rpk_path = b"/tmp/demo.rpk\0";
+    let create_flags = O_RDWR | O_CREAT | O_TRUNC;
+    let fd = match open(rpk_path, create_flags, 0o644) {
+        Ok(fd) => fd,
+        Err(_) => {
+            check!("create /tmp/demo.rpk", false);
+            return;
+        }
+    };
+    let written = write(fd, &rpk[..rpk_len]).unwrap_or(0);
+    let _ = close(fd);
+    check!("wrote full .rpk to /tmp", written == rpk_len);
+
+    // rpkg install /tmp/demo.rpk
+    let rpkg_path = b"/bin/rpkg\0";
+    let arg0 = b"rpkg\0";
+    let install_arg = b"install\0";
+    let path_arg = b"/tmp/demo.rpk\0";
+    let argv_install: [*const u8; 4] = [
+        arg0.as_ptr(),
+        install_arg.as_ptr(),
+        path_arg.as_ptr(),
+        core::ptr::null(),
+    ];
+    let install_exit = run_and_wait(rpkg_path, &argv_install);
+    check!("rpkg install exits 0", install_exit == Some(0));
+
+    // rpkg list (exit code only — output goes to serial, smoke can grep).
+    let list_arg = b"list\0";
+    let argv_list: [*const u8; 3] = [arg0.as_ptr(), list_arg.as_ptr(), core::ptr::null()];
+    let list_exit = run_and_wait(rpkg_path, &argv_list);
+    check!("rpkg list exits 0", list_exit == Some(0));
+
+    // rpkg remove demo-rpkg
+    let remove_arg = b"remove\0";
+    let name_arg = b"demo-rpkg\0";
+    let argv_remove: [*const u8; 4] = [
+        arg0.as_ptr(),
+        remove_arg.as_ptr(),
+        name_arg.as_ptr(),
+        core::ptr::null(),
+    ];
+    let remove_exit = run_and_wait(rpkg_path, &argv_remove);
+    check!("rpkg remove exits 0", remove_exit == Some(0));
+
+    if install_exit == Some(0) && list_exit == Some(0) && remove_exit == Some(0) {
+        println("T32-RPKG-OK");
+    }
+}
+
+/// Spawn `path` with the given argv array, wait for it, return exit status
+/// (Some(status) on success, None on spawn/waitpid failure).
+fn run_and_wait(path: &[u8], argv: &[*const u8]) -> Option<i32> {
+    let pid = spawn_args(path, argv).ok()?;
+    let mut status: i32 = -1;
+    if waitpid(pid, &mut status, 0).is_err() {
+        return None;
+    }
+    Some(status)
 }
 
 fn test_signal_user_handler_reentrant_syscall() {
