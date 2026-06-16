@@ -2,7 +2,7 @@
 
 > Status: Living document
 > Utworzona: 2026-06-16
-> Last updated: 2026-06-16 (T1.1 + T1.2 + T1.3 done — Tier 1 complete)
+> Last updated: 2026-06-16 (Tier 1 complete + T2.1 persistence wired in CI)
 
 Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa praca powinna pasować do jednego z tierów poniżej. Zmiana priorytetów wymaga aktualizacji tego pliku w PR-ze.
 
@@ -74,11 +74,15 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
 
 > Kolejne 1–2 cykle po Tier 1.
 
-- [ ] **T2.1 — VirtIO-block + persistence**
-  - Driver pod `kernel/src/drivers/virtio_blk.rs`
-  - Racfs zmountowane na realnym dysku zamiast ramdiska
-  - `/etc`, `/var`, `/home` przeżywające reboot
-  - **Definition of done:** boot smoke test który zapisuje plik, reboot QEMU, weryfikuje że plik istnieje
+- [x] **T2.1 — Persistence wired in CI**
+  - Discovery showed the heavy lifting was already done: `BlockDevice` trait, AHCI driver (`kernel/src/drivers/ahci.rs`, 522 lines), racfs on `sda` mounted at `/mnt` (`kernel/src/main.rs:322`), and `vfs::racfs::persistence_test` writing a `boot-counter` file that grows by 1 each boot. The actual gap was that CI never attached a disk, so the persistence path was dead code in CI.
+  - This PR fills the gap:
+    - [x] Boot-smoke now creates an empty 16 MiB `disk.img` and attaches it via `-drive file=disk.img,if=ide,format=raw` (q35's built-in ich9-ahci controller → kernel sees `sda`)
+    - [x] CI runs QEMU **twice** with the same image — boot 1 formats + writes counter=1, boot 2 reads it back and bumps to 2
+    - [x] New grep assertions: `created boot-counter = 1 (first boot)` on boot 1, `boot-counter = 2 (was 1, file survived reboot)` on boot 2 — failure mode is explicit ("sda missing or racfs format failed" vs "persistence broken")
+    - [x] All existing kernel/init/racsh banner assertions re-applied to boot 2 (catches regressions caused by disk being present)
+    - [x] Both boot1.log + boot2.log uploaded as artifacts
+  - **Pozostałe (deferred):** VirtIO-block driver as alternative to AHCI (cleaner QEMU integration, mostly cosmetic); userland file-level persistence test via racos-test (kernel-level is sufficient for v0); making `/etc`, `/var`, `/home` persistent (currently initramfs/ram-based; needs init-side migration).
 
 - [ ] **T2.2 — RacTerm: minimal ANSI emulator**
   - CSI (kursor: CUU/CUD/CUF/CUB/CUP, erase: ED/EL, scroll regions: DECSTBM)
