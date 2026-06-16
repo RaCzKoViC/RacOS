@@ -34,9 +34,14 @@ pub enum SectionKind {
 }
 
 #[cfg(not(feature = "std"))]
-use alloc::string::String;
+use alloc::string::{String, ToString};
 #[cfg(feature = "std")]
-use std::string::String;
+use std::string::{String, ToString};
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
+use std::vec::Vec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestSummary {
@@ -196,6 +201,38 @@ pub fn build_install_plan(
     })
 }
 
+/// Serialize a list of installed file paths into the on-disk `files`
+/// index format: one absolute path per line, LF-terminated. Blank
+/// entries are dropped. Used by the rpkg binary to write
+/// `/var/lib/rpkg/info/<name>/files` at install time.
+pub fn serialize_files_list(paths: &[String]) -> String {
+    let mut out = String::new();
+    for p in paths {
+        let trimmed = p.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        out.push_str(trimmed);
+        out.push('\n');
+    }
+    out
+}
+
+/// Parse an on-disk `files` index back into a Vec. Skips blank lines and
+/// comment lines starting with `#`. Returned paths are trimmed. Inverse of
+/// `serialize_files_list` for the no-comments, no-padding case.
+pub fn parse_files_list(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in s.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        out.push(String::from(l));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +279,49 @@ mod tests {
         let m = section(&rpk, &h, SectionKind::Manifest).unwrap();
         let s = manifest_summary(m).unwrap();
         assert_eq!(s.name.as_deref(), Some("demo"));
+    }
+
+    #[test]
+    fn serialize_files_list_writes_one_path_per_line() {
+        let paths = vec![
+            String::from("/var/lib/rpkg/info/demo/manifest.toml"),
+            String::from("/var/lib/rpkg/info/demo/files"),
+            String::from("/var/lib/rpkg/info/demo/data"),
+        ];
+        let s = serialize_files_list(&paths);
+        assert_eq!(
+            s,
+            "/var/lib/rpkg/info/demo/manifest.toml\n\
+             /var/lib/rpkg/info/demo/files\n\
+             /var/lib/rpkg/info/demo/data\n"
+        );
+    }
+
+    #[test]
+    fn serialize_files_list_drops_blank_entries() {
+        let paths = vec![
+            String::from(""),
+            String::from("/a"),
+            String::from("   "),
+            String::from("/b"),
+        ];
+        assert_eq!(serialize_files_list(&paths), "/a\n/b\n");
+    }
+
+    #[test]
+    fn parse_files_list_skips_blank_and_comment_lines() {
+        let s = "/a\n\n# comment\n  /b  \n";
+        let paths = parse_files_list(s);
+        assert_eq!(paths, vec![String::from("/a"), String::from("/b")]);
+    }
+
+    #[test]
+    fn files_list_roundtrips() {
+        let paths = vec![
+            String::from("/var/lib/rpkg/info/x/manifest.toml"),
+            String::from("/var/lib/rpkg/info/x/data"),
+        ];
+        let s = serialize_files_list(&paths);
+        assert_eq!(parse_files_list(&s), paths);
     }
 }
