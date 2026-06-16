@@ -1150,6 +1150,7 @@ impl SockAddrIn {
 /// of ~3 seconds elapses.
 pub fn gethostbyname(name: &[u8]) -> Result<[u8; 4], i64> {
     let mut ip = [0u8; 4];
+    // SAFETY: syscall ABI; name + ip pointers come from &[u8] / &mut [u8; 4].
     let ret = unsafe {
         syscall3(
             SYS_GETHOSTBYNAME,
@@ -1168,6 +1169,7 @@ pub fn gethostbyname(name: &[u8]) -> Result<[u8; 4], i64> {
 /// Unmount a filesystem from `target`. Requires CAP_SYS_ADMIN.
 pub fn umount(target: &[u8]) -> Result<(), i64> {
     // Caller must pass a NUL-terminated byte slice (validate_user_string in kernel).
+    // SAFETY: syscall ABI; target pointer comes from a &[u8].
     let ret = unsafe { syscall1(SYS_UMOUNT, target.as_ptr() as u64) };
     if ret < 0 {
         Err(ret)
@@ -1179,6 +1181,7 @@ pub fn umount(target: &[u8]) -> Result<(), i64> {
 /// Flush all dirty block-cache entries to disk. Returns the number of
 /// mounts synced (block-backed filesystems only).
 pub fn sync() -> Result<i64, i64> {
+    // SAFETY: syscall ABI; no args.
     let ret = unsafe { syscall0(SYS_SYNC) };
     if ret < 0 {
         Err(ret)
@@ -1190,6 +1193,7 @@ pub fn sync() -> Result<i64, i64> {
 /// Format `device` with the given filesystem type ("racfs" currently).
 /// Refuses if the device backs an active mount.
 pub fn mkfs(device: &[u8], fstype: &[u8]) -> Result<(), i64> {
+    // SAFETY: syscall ABI; device + fstype pointers come from &[u8].
     let ret = unsafe {
         syscall4(
             SYS_MKFS,
@@ -1207,6 +1211,7 @@ pub fn mkfs(device: &[u8], fstype: &[u8]) -> Result<(), i64> {
 }
 
 pub fn socket(domain: i32, stype: i32, protocol: i32) -> Result<i32, i64> {
+    // SAFETY: syscall ABI; scalar args only.
     let ret = unsafe { syscall3(SYS_SOCKET, domain as u64, stype as u64, protocol as u64) };
     if ret < 0 {
         Err(ret)
@@ -1216,6 +1221,7 @@ pub fn socket(domain: i32, stype: i32, protocol: i32) -> Result<i32, i64> {
 }
 
 pub fn bind(fd: i32, addr: &SockAddrIn) -> Result<(), i64> {
+    // SAFETY: syscall ABI; addr pointer comes from a &SockAddrIn.
     let ret = unsafe {
         syscall3(
             SYS_BIND,
@@ -1232,6 +1238,7 @@ pub fn bind(fd: i32, addr: &SockAddrIn) -> Result<(), i64> {
 }
 
 pub fn listen(fd: i32, backlog: i32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; scalar args only.
     let ret = unsafe { syscall2(SYS_LISTEN, fd as u64, backlog as u64) };
     if ret < 0 {
         Err(ret)
@@ -1247,6 +1254,8 @@ pub fn accept(fd: i32, addr: Option<&mut SockAddrIn>) -> Result<i32, i64> {
     } else {
         (0u64, 0u64)
     };
+    // SAFETY: syscall ABI; addr_ptr / len_ptr are either both 0 or both
+    // come from &mut references.
     let ret = unsafe { syscall3(SYS_ACCEPT, fd as u64, addr_ptr, len_ptr) };
     if ret < 0 {
         Err(ret)
@@ -1256,6 +1265,7 @@ pub fn accept(fd: i32, addr: Option<&mut SockAddrIn>) -> Result<i32, i64> {
 }
 
 pub fn connect(fd: i32, addr: &SockAddrIn) -> Result<(), i64> {
+    // SAFETY: syscall ABI; addr pointer comes from a &SockAddrIn.
     let ret = unsafe {
         syscall3(
             SYS_CONNECT,
@@ -1272,6 +1282,7 @@ pub fn connect(fd: i32, addr: &SockAddrIn) -> Result<(), i64> {
 }
 
 pub fn send(fd: i32, buf: &[u8], flags: u32) -> Result<usize, i64> {
+    // SAFETY: syscall ABI; buf pointer + length come from a &[u8].
     let ret = unsafe {
         syscall4(
             SYS_SEND,
@@ -1289,6 +1300,7 @@ pub fn send(fd: i32, buf: &[u8], flags: u32) -> Result<usize, i64> {
 }
 
 pub fn recv(fd: i32, buf: &mut [u8], flags: u32) -> Result<usize, i64> {
+    // SAFETY: syscall ABI; buf pointer + length come from a &mut [u8].
     let ret = unsafe {
         syscall4(
             SYS_RECV,
@@ -1306,6 +1318,7 @@ pub fn recv(fd: i32, buf: &mut [u8], flags: u32) -> Result<usize, i64> {
 }
 
 pub fn shutdown(fd: i32, how: i32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; scalar args only.
     let ret = unsafe { syscall2(SYS_SHUTDOWN, fd as u64, how as u64) };
     if ret < 0 {
         Err(ret)
@@ -1316,6 +1329,7 @@ pub fn shutdown(fd: i32, how: i32) -> Result<(), i64> {
 
 pub fn getsockname(fd: i32, addr: &mut SockAddrIn) -> Result<(), i64> {
     let mut len = core::mem::size_of::<SockAddrIn>() as u32;
+    // SAFETY: syscall ABI; addr + len pointers come from &mut references.
     let ret = unsafe {
         syscall3(
             SYS_GETSOCKNAME,
@@ -1333,6 +1347,7 @@ pub fn getsockname(fd: i32, addr: &mut SockAddrIn) -> Result<(), i64> {
 
 pub fn getpeername(fd: i32, addr: &mut SockAddrIn) -> Result<(), i64> {
     let mut len = core::mem::size_of::<SockAddrIn>() as u32;
+    // SAFETY: syscall ABI; addr + len pointers come from &mut references.
     let ret = unsafe {
         syscall3(
             SYS_GETPEERNAME,
@@ -1479,20 +1494,25 @@ pub fn getenv(name: &[u8]) -> Option<&'static [u8]> {
         return None;
     }
     loop {
+        // SAFETY: kernel-supplied envp is a NULL-terminated pointer array;
+        // we stop the first time *p is null below.
         let entry = unsafe { *p };
         if entry.is_null() {
             return None;
         }
         let mut len = 0usize;
+        // SAFETY: each envp entry is a NUL-terminated C string.
         while unsafe { *entry.add(len) } != 0 {
             len += 1;
         }
+        // SAFETY: len is the byte count up to (but not including) the NUL.
         let bytes = unsafe { core::slice::from_raw_parts(entry, len) };
         if let Some(eq) = bytes.iter().position(|&b| b == b'=') {
             if &bytes[..eq] == name {
                 return Some(&bytes[eq + 1..]);
             }
         }
+        // SAFETY: advancing within the NULL-terminated envp array.
         p = unsafe { p.add(1) };
     }
 }
@@ -1555,6 +1575,8 @@ mod bump_alloc {
                     .is_ok()
                 {
                     let heap_ptr = core::ptr::addr_of_mut!(HEAP.data) as *mut u8;
+                    // SAFETY: aligned + size <= HEAP_SIZE checked above; the
+                    // CAS guarantees we own [aligned, new_pos) exclusively.
                     return unsafe { heap_ptr.add(aligned) };
                 }
             }
