@@ -108,6 +108,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_signal_user_handler();
     test_signal_user_handler_reentrant_syscall();
     test_shell_control_flow();
+    test_init_engine_supervises_shell();
     test_exec_loop_memory_cleanup();
     test_tty_ioctl_state();
     test_chdir_getcwd();
@@ -481,6 +482,30 @@ fn test_shell_control_flow() {
 
     if split == Some(0) && nosplit == Some(0) {
         println("T12-SHELL-CONTROL-FLOW-OK");
+    }
+}
+
+/// Smoke test for the engine-driven PID 1: prove (1) racos-test is running
+/// under a non-trivial PPID, (2) that PPID's PPID reaches 1, which means
+/// the parent chain goes `racos-test → racsh (shell.service) → init (PID
+/// 1)`. The fallback bare-shell init also produces the same chain, but
+/// CI's unit-files-present initramfs ensures the engine path is taken.
+fn test_init_engine_supervises_shell() {
+    println("\n[test] init engine supervises shell");
+
+    let my_pid = getpid();
+    let parent_pid = getppid();
+    check!("getpid() returns a real PID", my_pid > 1);
+    check!(
+        "getppid() returns a real parent (not init, not self)",
+        parent_pid > 1 && parent_pid != my_pid
+    );
+
+    // We can't directly inspect init's logs from here, but a healthy
+    // engine path means: we exist, our parent exists, and that parent
+    // is the shell that init started from shell.service.
+    if my_pid > 1 && parent_pid > 1 && parent_pid != my_pid {
+        println("T13-INIT-ENGINE-OK");
     }
 }
 

@@ -88,10 +88,11 @@ echo ""
 echo "[3/4] Assembling initramfs..."
 INITRAMFS_ROOT="$ROOT_DIR/initramfs-root"
 
-# Clean and recreate
-if [[ -e "$INITRAMFS_ROOT" ]]; then
-    rm -rf "$INITRAMFS_ROOT"
-fi
+# Refresh only the directories we own (bin, sbin). Leave config under /etc
+# alone — unit files, hostname, etc. are committed sources of truth that
+# the build script must not silently wipe.
+mkdir -p "$INITRAMFS_ROOT"
+rm -rf "$INITRAMFS_ROOT/bin" "$INITRAMFS_ROOT/sbin"
 mkdir -p "$INITRAMFS_ROOT/bin"
 mkdir -p "$INITRAMFS_ROOT/sbin"
 mkdir -p "$INITRAMFS_ROOT/etc/racinit"
