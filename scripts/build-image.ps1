@@ -63,7 +63,11 @@ Write-Host "`n[3/4] Assembling initramfs..." -ForegroundColor Yellow
 $InitramfsRoot = "$Root\initramfs-root"
 
 # Clean and recreate
-if (Test-Path $InitramfsRoot) { Remove-Item -Recurse -Force $InitramfsRoot }
+# Refresh only the directories we own (bin, sbin). Leave config under \etc
+# alone — unit files, hostname, etc. are committed sources of truth that
+# the build script must not silently wipe.
+if (Test-Path "$InitramfsRoot\bin")  { Remove-Item -Recurse -Force "$InitramfsRoot\bin" }
+if (Test-Path "$InitramfsRoot\sbin") { Remove-Item -Recurse -Force "$InitramfsRoot\sbin" }
 New-Item -ItemType Directory -Force "$InitramfsRoot\bin" | Out-Null
 New-Item -ItemType Directory -Force "$InitramfsRoot\sbin" | Out-Null
 New-Item -ItemType Directory -Force "$InitramfsRoot\etc\racinit" | Out-Null

@@ -1,0 +1,14 @@
+[Unit]
+Description=Default interactive shell
+
+[Dependencies]
+After=base.target
+
+[Service]
+Type=simple
+ExecStart=/bin/sh
+Restart=always
+RestartDelaySec=1
+
+[Install]
+WantedBy=base.target
