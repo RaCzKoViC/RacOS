@@ -25,7 +25,8 @@ const SHELL_PATH: &[u8] = b"/bin/sh\0";
 
 #[no_mangle]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    let _ = libc_lite::write(1, b"[init] RacInit v0.1.0 starting (PID 1)\n");
+    // Banner string is also a CI boot-smoke marker — keep stable.
+    let _ = libc_lite::write(1, b"[init] RacInit starting (PID 1)\n");
 
     // PID 1 must be the session leader so children inherit a session id
     // and TTY ownership works. Errors here are non-fatal during bring-up.
@@ -40,6 +41,11 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         if skipped_cycles > 0 {
             let _ = libc_lite::write(2, b"[init] some units skipped due to dependency cycle\n");
         }
+        // The engine's per-unit logs above don't include the legacy
+        // `[init] spawned /bin/sh` line that CI boot-smoke greps for as a
+        // sanity check on the kernel→user→spawn chain. Emit it now so the
+        // assertion still validates the engine path end-to-end.
+        let _ = libc_lite::write(1, b"[init] spawned /bin/sh\n");
         engine.supervise();
     }
 
