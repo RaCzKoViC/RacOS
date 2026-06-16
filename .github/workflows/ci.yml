@@ -533,9 +533,11 @@ jobs:
       - name: Generate coverage
         # Same test set as the test-unit job above; we just wrap it with
         # cargo-llvm-cov so the percentage shows up in the workflow output.
-        run: cargo llvm-cov --workspace -p racsh -p rpkg -p rapt -p init -p racterm --summary-only
+        # NOTE: `--workspace` and `-p` are mutually exclusive in cargo —
+        # the multi-`-p` form alone is what we want here.
+        run: cargo llvm-cov -p racsh -p rpkg -p rapt -p init -p racterm --summary-only
       - name: Generate LCOV
-        run: cargo llvm-cov --workspace -p racsh -p rpkg -p rapt -p init -p racterm --lcov --output-path lcov.info
+        run: cargo llvm-cov -p racsh -p rpkg -p rapt -p init -p racterm --lcov --output-path lcov.info
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
@@ -564,7 +566,10 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Run cargo audit
-        # --deny warnings would block on yanked-but-not-vulnerable crates;
-        # we want to surface those without breaking CI. Real RUSTSEC
-        # advisories still fail the step.
-        run: cargo audit --deny unsound --deny unmaintained --deny notice
+        # cargo-audit --deny only accepts: warnings, unmaintained, unsound,
+        # yanked. RUSTSEC vulnerability advisories ("notice") fail the step
+        # unconditionally regardless of --deny, so we don't need to list
+        # them. We escalate unmaintained + unsound here because both
+        # indicate active risk; `yanked` is omitted because rolling crates
+        # routinely yank-then-republish and we don't want that to break CI.
+        run: cargo audit --deny unsound --deny unmaintained
