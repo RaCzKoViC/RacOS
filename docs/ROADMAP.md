@@ -181,7 +181,9 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
   - **ADR-007 (scheduler MVP)** — added implementation status: PR #14 shipped AP bring-up, per-CPU GS + LAPIC timers, `/proc/cpuinfo` enumeration, CI `-smp 4`. Per-CPU run queues + IPI preemption still on the scheduler-refactor TODO.
   - **ADR-008 (memory model)** — added note: huge pages stay kernel-internal (identity map only), CoW is still TODO so every `sys_fork` pays a full page-table-copy cost.
   - Lighter check on ADRs 001/002/004/005/009-013/015-020 didn't surface blatant drift.
-  - **Pozostałe (deferred):** sample ADRs 009/011/013/018/019 deeper once the relevant subsystems get follow-up work. `CHANGELOG.md` introduction still pending.
+  - **Second pass:** Implementation-status sections added to ADR-009 (VFS — 6 filesystems mounted, racsysfs collapsed into procfs, no separate dentry cache), ADR-011 (RacInit engine shipped at PID 1; servicectl/.timer/socket activation deferred), ADR-013 (boot-time serial logging shipped, journal/log-levels deferred), ADR-018 (rpkg format shipped; Ed25519 signing gated on T4.1 crypto), ADR-019 (DAC + caps + SMEP/SMAP + NX + validate_user_ptr shipped; ASLR/seccomp/secure-boot deferred).
+  - **CHANGELOG.md** introduced at repo root in Keep-a-Changelog format with the v0.1.0 milestone seeded from the merged PR history (Tier 1-4 entries, Added/Changed/Fixed/Security categories).
+  - **Pozostałe (deferred):** ADR-009 racsysfs decision (drop or add as an ADR amendment), ADR-013 once a real journal exists, ADR-018 once T4.1 crypto lands.
 
 ---
 

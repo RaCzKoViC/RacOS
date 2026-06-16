@@ -51,3 +51,28 @@ VFS dispatches operations to registered filesystem implementations.
 ## Rollback
 
 Individual filesystem implementations can be replaced without changing VFS or syscall layer.
+
+## Implementation status (2026-06-16)
+
+The VFS layer is in place and load-bearing. Most of §Decision is shipped; the racprocfs vs racsysfs split was collapsed into procfs-only.
+
+**Shipped:**
+* `Inode` + `OpenFile` + `FdTable` + `mount_table` singleton in `kernel/src/vfs/`. Operations dispatched through the `Filesystem` and `InodeOps` traits.
+* Path resolution via `mount_table().resolve()` (longest-prefix match) and per-FS `lookup_path` — no separate dentry cache; the per-FS implementations cache their own metadata where it helps (`racfs::metadata_cache`, `fat32::metadata_cache`).
+* Five built-in filesystems mounted at boot from `kernel/src/main.rs:217-318`:
+  - **initramfs** at `/` (read-only, from the bootloader-supplied binary blob)
+  - **devfs** at `/dev` (`/dev/null`, `/dev/zero`, `/dev/console`)
+  - **tmpfs** at `/tmp` (in-memory R/W)
+  - **procfs** at `/proc` (`status`, `cmdline`, `cpuinfo`, `uptime`, `mounts`, `cachestats`, `diskstats`)
+  - **racfs** at `/var` (ramdisk-backed, ephemeral)
+* Two extra filesystems mounted opportunistically:
+  - **fat32** at `/fat` (volatile, formatted fresh each boot on ram1) — `kernel/src/main.rs:296`
+  - **racfs** at `/mnt` (persistent, on AHCI sda) — `kernel/src/main.rs:322`
+* Block device abstraction in `kernel/src/drivers/block.rs`; AHCI driver in `drivers/ahci.rs`; two-boot persistence smoke in CI (T2.1).
+* `sys_mount` / `sys_umount` / `sys_mkfs` accept user-space mount requests for tmpfs/racfs/proc/dev/fat32, gated on `CAP_SYS_ADMIN`.
+
+**Still deferred / different from §Decision:**
+* **racsysfs** was never built. `/sys` doesn't exist; the system-info bits §Decision put under racsysfs ended up in procfs (cpuinfo, uptime, etc.).
+* No separate dentry cache. The hash-map design from §Decision was replaced by per-FS metadata caches plus mount-table resolution, which is faster for the current small-tree workload but doesn't help directory lookups across mount points.
+* racfs journaling is still deferred — racfs writes superblock + extent allocator updates directly. The kernel-side flushd daemon (T2.1, `kernel/src/main.rs:351-362`) flushes dirty cache entries periodically as a partial mitigation.
+* FAT32 supports R/W but the on-disk dir-walk has a cycle guard added after a chase bug — a real journal is post-MVP.
