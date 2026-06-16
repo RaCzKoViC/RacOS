@@ -72,18 +72,18 @@ then exits. The CI smoke is much simpler that way.
 
 **Net-new**:
 
-| Tool | DoD |
-|---|---|
-| `touch` | create empty file or update mtime |
-| `chmod` | accept `0644`-style octal + symbolic `u+x`; `sys_chmod` exists |
-| `chown` | `chown user:group path`; `sys_chown` exists |
-| `kill` | `kill -SIG pid`, default TERM; `sys_kill` exists |
-| `whoami` | print euid → username (needs `/etc/passwd` lookup) |
-| `uname` | `-a` / `-r` / `-m` / `-s`; `sys_uname` exists |
-| `free` | parse a new `/proc/meminfo` (procfs entry to add) |
-| `ln` | hard links via `sys_link`; symlinks deferred until `sys_symlink` |
-| `rmdir` | explicit standalone (not just `rm -d`) |
-| `du` | recursive walk + size aggregation |
+| Tool | Status | DoD / Notes |
+|---|---|---|
+| `touch` | ✅ shipped (v0.2 §2.1) | `T20-TOUCH-OK`. MVP: O_CREAT a missing path; existing path is a no-op exit 0. `utime`/`utimensat` syscall is post-MVP, so `-a`/`-m`/`-t` flags are intentionally absent for now. |
+| `chmod` | ✅ shipped (v0.2 §2.1) | `T20-CHMOD-OK`. Octal mode only (`644`, `0644`, `0o644`). Symbolic `u+x`/`g-w`/`a=rwx` is post-MVP. |
+| `chown` | ✅ shipped (v0.2 §2.1) | `T20-CHOWN-OK`. Numeric `uid` / `uid:gid` / `:gid` only. Symbolic usernames need `/etc/passwd` + `/etc/group` lookup (post-MVP). |
+| `kill` | ⏳ | `kill -SIG pid`, default TERM; `sys_kill` exists |
+| `whoami` | ⏳ | print euid → username (needs `/etc/passwd` lookup) |
+| `uname` | ⏳ | `-a` / `-r` / `-m` / `-s`; `sys_uname` exists |
+| `free` | ⏳ | parse a new `/proc/meminfo` (procfs entry to add) |
+| `ln` | ⏳ | hard links via `sys_link`; symlinks deferred until `sys_symlink` |
+| `rmdir` | ⏳ | explicit standalone (not just `rm -d`) |
+| `du` | ⏳ | recursive walk + size aggregation |
 
 `pwd` and `cd` are already racsh builtins; standalone `/bin/pwd` is
 conventional but not required for v0.2.

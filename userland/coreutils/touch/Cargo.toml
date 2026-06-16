@@ -1,0 +1,11 @@
+[package]
+name = "racos-touch"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "touch"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

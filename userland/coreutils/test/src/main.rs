@@ -116,6 +116,9 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_id_prints_creds();
     test_sort_orders_lines();
     test_top_prints_snapshot();
+    test_touch_creates_file();
+    test_chmod_sets_mode();
+    test_chown_sets_uid_gid();
     test_env_inherits_shell_vars();
     test_exec_loop_memory_cleanup();
     test_tty_ioctl_state();
@@ -816,6 +819,108 @@ fn test_top_prints_snapshot() {
     check!("top output contains the header line", s == Some(0));
     if s == Some(0) {
         println("T20-TOP-OK");
+    }
+}
+
+/// Smoke for /bin/touch (v0.2 §2.1). Asserts: (a) touching a non-existent
+/// path creates the file (verified by stat); (b) touching an existing
+/// path is a no-op that still exits 0.
+fn test_touch_creates_file() {
+    println("\n[test] /bin/touch creates files");
+
+    let path = b"/tmp/t_touch\0";
+    let _ = unlink(path);
+
+    // First touch: create.
+    let s1 = shell_run(b"/bin/touch /tmp/t_touch\0");
+    check!("touch (create) exit 0", s1 == Some(0));
+
+    let mut raw = [0u8; 80];
+    let st_ret = stat(path, &mut raw);
+    check!("stat touched file returns Ok", st_ret.is_ok());
+
+    // Second touch: existing file path, no-op exit 0.
+    let s2 = shell_run(b"/bin/touch /tmp/t_touch\0");
+    check!("touch (existing) exit 0", s2 == Some(0));
+
+    let _ = unlink(path);
+
+    if s1 == Some(0) && s2 == Some(0) && st_ret.is_ok() {
+        println("T20-TOUCH-OK");
+    }
+}
+
+/// Smoke for /bin/chmod (v0.2 §2.1). Creates a file, runs chmod 0600
+/// via shell, stats it back and asserts the mode bits.
+fn test_chmod_sets_mode() {
+    println("\n[test] /bin/chmod sets mode");
+
+    let path = b"/tmp/t_chmod\0";
+    let _ = unlink(path);
+    let fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0o644);
+    check!("setup: open O_CREAT", fd.is_ok());
+    if let Ok(fd) = fd {
+        let _ = close(fd);
+    } else {
+        return;
+    }
+
+    let s = shell_run(b"/bin/chmod 0600 /tmp/t_chmod\0");
+    check!("chmod exit 0", s == Some(0));
+
+    let mut raw = [0u8; 80];
+    let st_ret = stat(path, &mut raw);
+    check!("stat after chmod returns Ok", st_ret.is_ok());
+    let mode_ok = if st_ret.is_ok() {
+        let st = unsafe { &*(raw.as_ptr() as *const StatBuf) };
+        (st.st_mode & 0o777) == 0o600
+    } else {
+        false
+    };
+    check!("mode bits == 0600", mode_ok);
+
+    let _ = unlink(path);
+    if s == Some(0) && mode_ok {
+        println("T20-CHMOD-OK");
+    }
+}
+
+/// Smoke for /bin/chown (v0.2 §2.1). Creates a file, runs chown 1234:5678
+/// via shell, stats it back and asserts uid+gid. Runs as root so chown
+/// to an arbitrary uid is allowed.
+fn test_chown_sets_uid_gid() {
+    println("\n[test] /bin/chown sets uid:gid");
+
+    let path = b"/tmp/t_chown\0";
+    let _ = unlink(path);
+    let fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0o644);
+    check!("setup: open O_CREAT", fd.is_ok());
+    if let Ok(fd) = fd {
+        let _ = close(fd);
+    } else {
+        return;
+    }
+
+    let s = shell_run(b"/bin/chown 1234:5678 /tmp/t_chown\0");
+    check!("chown exit 0", s == Some(0));
+
+    let mut raw = [0u8; 80];
+    let st_ret = stat(path, &mut raw);
+    check!("stat after chown returns Ok", st_ret.is_ok());
+    let (uid_ok, gid_ok) = if st_ret.is_ok() {
+        let st = unsafe { &*(raw.as_ptr() as *const StatBuf) };
+        (st.st_uid == 1234, st.st_gid == 5678)
+    } else {
+        (false, false)
+    };
+    check!("uid == 1234", uid_ok);
+    check!("gid == 5678", gid_ok);
+
+    // Restore so subsequent tests can unlink the file.
+    let _ = chown(path, 0, 0);
+    let _ = unlink(path);
+    if s == Some(0) && uid_ok && gid_ok {
+        println("T20-CHOWN-OK");
     }
 }
 
