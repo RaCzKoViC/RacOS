@@ -435,6 +435,7 @@ pub unsafe fn capture_kernel_cr3() {
 /// Returns the physical address of the new PML4.
 pub fn create_user_page_table() -> Result<u64, &'static str> {
     let new_pml4_phys = alloc_page_table()?;
+    // SAFETY: KERNEL_PML4_PHYS captured once at boot; fallback to CR3 read if zero.
     let kernel_pml4_phys = unsafe {
         let cached = KERNEL_PML4_PHYS;
         if cached != 0 {

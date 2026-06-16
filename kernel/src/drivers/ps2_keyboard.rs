@@ -145,6 +145,7 @@ pub fn handle_irq_input() {
     }
 
     IRQ_COUNT.fetch_add(1, Ordering::AcqRel);
+    // SAFETY: PS/2 I/O port read; called from IRQ context with IF=0.
     unsafe {
         if is_data_available() {
             let scancode = read_scancode();

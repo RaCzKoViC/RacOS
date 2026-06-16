@@ -117,6 +117,7 @@ impl PtyMaster {
         self.winsize = WinSize { rows, cols };
         // Deliver SIGWINCH to slave's foreground process group
         if self.foreground_pgid > 0 {
+            // SAFETY: cli/sti window so SIGWINCH delivery to the pgid is atomic.
             unsafe {
                 core::arch::asm!("cli", options(nomem, nostack));
                 crate::task::scheduler::send_signal_to_group(
@@ -151,6 +152,7 @@ impl PtyMaster {
             TtySignal::Eof => return, // EOF is not a signal
         };
         if self.foreground_pgid > 0 {
+            // SAFETY: cli/sti window so the signal delivery is atomic.
             unsafe {
                 core::arch::asm!("cli", options(nomem, nostack));
                 crate::task::scheduler::send_signal_to_group(self.foreground_pgid as u32, signal);

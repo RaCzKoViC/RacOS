@@ -72,6 +72,7 @@ fn detect_features() -> CpuFeatures {
     // CPUID.0:EAX gives the maximum standard leaf. Bail out early if leaf 7
     // isn't supported (very old CPUs / minimal hypervisor models).
     let max_leaf: u32;
+    // SAFETY: CPUID leaf 0 — always available on x86_64.
     unsafe {
         core::arch::asm!(
             "push rbx",
@@ -92,6 +93,7 @@ fn detect_features() -> CpuFeatures {
     }
     // CPUID leaf 7, sub-leaf 0 → feature bits in EBX.
     let ebx: u32;
+    // SAFETY: CPUID leaf 7 — max_leaf check above confirms it's supported.
     unsafe {
         core::arch::asm!(
             "push rbx",
@@ -140,6 +142,7 @@ fn enable_smep_smap() {
     if f.smap {
         bits |= 1 << 21;
     }
+    // SAFETY: CR4 read+write; only setting SMEP/SMAP bits gated by CPUID detection.
     unsafe {
         let mut cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
@@ -156,6 +159,7 @@ fn enable_smep_smap() {
 /// Halt the CPU until the next interrupt.
 #[inline(always)]
 pub fn halt() {
+    // SAFETY: hlt pauses the CPU until next IRQ; always valid in ring 0.
     unsafe {
         core::arch::asm!("hlt", options(nomem, nostack));
     }

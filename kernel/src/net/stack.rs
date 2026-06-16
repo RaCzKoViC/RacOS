@@ -188,6 +188,7 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     // Wait up to 3 seconds for the reply (or 1 retransmission).
     // The SYSCALL path enters with IF=0 (SFMASK clears it). Enable interrupts
     // for the duration of the wait so the PIT can fire and poll the NIC.
+    // SAFETY: bare sti — explicitly enable IRQs for the resolve spin-wait.
     unsafe {
         core::arch::asm!("sti", options(nomem, nostack));
     }
@@ -222,6 +223,7 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
         poll();
         core::hint::spin_loop();
     };
+    // SAFETY: bare cli — restore SYSCALL-entry IF=0 invariant before SYSRETQ.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
     }

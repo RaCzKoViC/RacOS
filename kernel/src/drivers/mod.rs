@@ -19,6 +19,7 @@ pub mod virtqueue;
 pub static NIC: SpinLock<Option<Box<virtio_net::VirtioNet>>> = SpinLock::new(None);
 
 pub fn init() {
+    // SAFETY: boot-once drivers init sequence; IRQs still off.
     unsafe {
         block::init();
         block::init_default_ramdisk();

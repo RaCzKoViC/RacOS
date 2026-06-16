@@ -115,6 +115,7 @@ pub unsafe fn register(device: Arc<dyn BlockDevice>) {
 }
 
 pub fn count() -> usize {
+    // SAFETY: read-only access to the DEVICES singleton (initialised at boot).
     unsafe {
         (*core::ptr::addr_of!(DEVICES))
             .as_ref()
@@ -125,6 +126,7 @@ pub fn count() -> usize {
 
 /// Get a block device by index.
 pub fn get(index: usize) -> Option<Arc<dyn BlockDevice>> {
+    // SAFETY: read-only access to the DEVICES singleton.
     unsafe {
         (*core::ptr::addr_of!(DEVICES))
             .as_ref()?
@@ -135,6 +137,7 @@ pub fn get(index: usize) -> Option<Arc<dyn BlockDevice>> {
 
 /// Find a block device by name.
 pub fn find(name: &str) -> Option<Arc<dyn BlockDevice>> {
+    // SAFETY: read-only access to the DEVICES singleton.
     let devs = unsafe { (*core::ptr::addr_of!(DEVICES)).as_ref()? };
     devs.iter().find(|d| d.name() == name).cloned()
 }

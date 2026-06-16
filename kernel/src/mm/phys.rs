@@ -341,20 +341,24 @@ pub fn alloc_frame() -> Result<PhysFrame, FrameError> {
 
 /// Allocate `count` contiguous physical frames.
 pub fn alloc_contiguous(count: usize) -> Result<PhysFrame, FrameError> {
+    // SAFETY: FRAME_ALLOCATOR is boot-initialised; methods use atomic counters.
     unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).alloc_contiguous(count) }
 }
 
 /// Free a physical frame.
 pub fn free_frame(frame: PhysFrame) -> Result<(), FrameError> {
+    // SAFETY: FRAME_ALLOCATOR is boot-initialised.
     unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).free(frame) }
 }
 
 /// Number of free frames.
 pub fn free_count() -> usize {
+    // SAFETY: FRAME_ALLOCATOR is boot-initialised; read-only.
     unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).free_frame_count() }
 }
 
 /// Total number of usable frames.
 pub fn total_count() -> usize {
+    // SAFETY: FRAME_ALLOCATOR is boot-initialised; read-only.
     unsafe { (*core::ptr::addr_of!(FRAME_ALLOCATOR)).usable_frame_count() }
 }

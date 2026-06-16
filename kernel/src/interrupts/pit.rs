@@ -34,6 +34,7 @@ static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 /// real time. Same code path is a no-op on hardware without HPET (vendor
 /// reads as 0 or 0xFFFF and we bail).
 pub fn init() {
+    // SAFETY: boot-once PIT init; PIT command/data ports are architectural.
     unsafe {
         disable_hpet_legacy();
     }

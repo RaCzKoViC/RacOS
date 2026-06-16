@@ -26,6 +26,7 @@ fn panic(info: &PanicInfo) -> ! {
 
     // Halt all CPUs: disable interrupts, then halt in loop
     loop {
+        // SAFETY: cli; hlt — kernel panic, park CPU.
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack));
         }

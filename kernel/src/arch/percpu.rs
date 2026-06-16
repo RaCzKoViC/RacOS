@@ -119,6 +119,7 @@ pub unsafe fn init_for_this_cpu(apic_id: u32) {
 #[inline]
 pub fn current() -> &'static PerCpu {
     let ptr: *const PerCpu;
+    // SAFETY: reads GS base — init_for_this_cpu sets it to this CPU's PerCpu slot.
     unsafe {
         core::arch::asm!(
             "mov {}, gs:[0]",

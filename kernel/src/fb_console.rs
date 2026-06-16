@@ -771,6 +771,8 @@ impl FramebufferConsole {
         let stride = self.pitch / 4; // pixels per scanline (accounts for padding)
 
         // Move all lines up by one character row
+        // SAFETY: fb_addr is the bootloader-supplied framebuffer base; the
+        // src/dst ranges are within (rows-1) * char_height * stride pixels.
         unsafe {
             ptr::copy(
                 self.fb_addr.add((self.char_height * stride) as usize),
@@ -782,6 +784,7 @@ impl FramebufferConsole {
         // Clear the bottom line
         let bottom_start = ((self.rows - 1) * self.char_height * stride) as usize;
         for i in 0..(self.char_height * stride) as usize {
+            // SAFETY: bottom_start + i stays within the framebuffer pixel grid.
             unsafe {
                 *self.fb_addr.add(bottom_start + i) = bg_color;
             }
@@ -818,6 +821,8 @@ impl FramebufferConsole {
         }
 
         let offset = (y * (self.pitch / 4) + x) as usize;
+        // SAFETY: bounds check above (x < width, y < height) keeps offset
+        // within the framebuffer pixel grid.
         unsafe {
             *self.fb_addr.add(offset) = color;
         }
@@ -864,6 +869,7 @@ pub unsafe fn init(boot_info: &BootInfo) {
 
 /// Write to framebuffer console (if available).
 pub fn fb_print(s: &str) {
+    // SAFETY: FB_CONSOLE is boot-initialised; single-CPU MVP.
     unsafe {
         if let Some(console) = get_console() {
             console.write_str(s);
@@ -873,6 +879,7 @@ pub fn fb_print(s: &str) {
 
 /// Check if framebuffer console is available.
 pub fn is_available() -> bool {
+    // SAFETY: read-only check of the FB_CONSOLE Option discriminant.
     unsafe { FB_CONSOLE.is_some() }
 }
 

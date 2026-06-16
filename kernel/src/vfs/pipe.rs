@@ -112,6 +112,7 @@ pub struct PipeReadEnd {
 
 impl Drop for PipeReadEnd {
     fn drop(&mut self) {
+        // SAFETY: shared SHM is owned by the pipe pair; Drop is exclusive.
         unsafe {
             self.shared
                 .get_mut()
@@ -167,6 +168,7 @@ pub struct PipeWriteEnd {
 
 impl Drop for PipeWriteEnd {
     fn drop(&mut self) {
+        // SAFETY: shared SHM is owned by the pipe pair; Drop is exclusive.
         unsafe {
             self.shared
                 .get_mut()

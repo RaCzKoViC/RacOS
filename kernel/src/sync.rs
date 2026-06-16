@@ -58,12 +58,14 @@ pub struct SpinLockGuard<'a, T> {
 impl<'a, T> Deref for SpinLockGuard<'a, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
+        // SAFETY: SpinLockGuard's existence proves we hold the lock exclusively.
         unsafe { &*self.lock_ref.data.get() }
     }
 }
 
 impl<'a, T> DerefMut for SpinLockGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: see deref().
         unsafe { &mut *self.lock_ref.data.get() }
     }
 }
