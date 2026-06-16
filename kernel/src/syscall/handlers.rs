@@ -92,6 +92,9 @@ impl WritableStore {
 }
 
 fn current_creds() -> crate::task::task::Credentials {
+    // SAFETY: cli/sti window around scheduler::with_current_task. Single-CPU
+    // MVP makes this a critical section; cli prevents the timer from
+    // re-entering the scheduler mid-read.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let creds = crate::task::scheduler::with_current_task(|t| t.creds)
@@ -102,6 +105,7 @@ fn current_creds() -> crate::task::task::Credentials {
 }
 
 fn current_umask() -> u32 {
+    // SAFETY: same as current_creds — cli/sti guards the scheduler read.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let mask = crate::task::scheduler::with_current_task(|t| t.umask).unwrap_or(0o022);
@@ -179,6 +183,7 @@ fn parse_sockaddr_in(addr: *const u8, len: u32) -> Result<(u16, u32), SyscallErr
         return Err(SyscallError::EINVAL);
     }
     validate_user_ptr(addr as u64, len as usize)?;
+    // SAFETY: validate_user_ptr above bounded [addr, addr+len) to user space.
     let b = unsafe { core::slice::from_raw_parts(addr, len as usize) };
     let family = u16::from_le_bytes([b[0], b[1]]);
     if family as i32 != crate::net::AF_INET {
@@ -199,6 +204,7 @@ fn write_sockaddr_in(
         return Ok(());
     }
     validate_user_ptr(len_ptr as u64, 4)?;
+    // SAFETY: validate_user_ptr above confirms len_ptr points at 4 mapped bytes.
     let in_len = unsafe { *len_ptr };
     let out_len = 8u32;
     if !addr.is_null() && in_len >= out_len {
@@ -215,10 +221,12 @@ fn write_sockaddr_in(
         buf[5] = a[1];
         buf[6] = a[2];
         buf[7] = a[3];
+        // SAFETY: validate_user_ptr just above bounds-checked [addr, addr+out_len).
         unsafe {
             core::ptr::copy_nonoverlapping(buf.as_ptr(), addr, out_len as usize);
         }
     }
+    // SAFETY: len_ptr was bounds-checked at the top of the function.
     unsafe {
         *len_ptr = out_len;
     }
@@ -226,6 +234,7 @@ fn write_sockaddr_in(
 }
 
 fn alloc_fd_for_socket(sock_sid: usize) -> Result<i32, SyscallError> {
+    // SAFETY: mount_table is a kernel singleton initialised once at boot.
     let (fs, ino) = unsafe {
         crate::vfs::mount::mount_table()
             .lookup_path("/dev/null")
@@ -238,6 +247,9 @@ fn alloc_fd_for_socket(sock_sid: usize) -> Result<i32, SyscallError> {
         crate::vfs::file::flags::O_RDWR,
     ));
 
+    // SAFETY: cli/sti window around scheduler + net bind. Single-CPU MVP
+    // serialises here so the fd alloc and the net::bind_fd record stay
+    // consistent.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let pid = crate::task::scheduler::current_pid();
@@ -274,6 +286,7 @@ fn ensure_console_stdio(fds: &mut crate::vfs::file::FdTable) {
         return;
     }
 
+    // SAFETY: mount_table is a kernel singleton initialised once at boot.
     let (fs, ino) = match unsafe { crate::vfs::mount::mount_table().lookup_path("/dev/console") } {
         Ok(v) => v,
         Err(_) => return,
@@ -376,6 +389,7 @@ fn collect_user_argv(
     for i in 0..MAX_ARGS {
         let ptr_addr = argv_ptr + (i * 8) as u64;
         validate_user_ptr(ptr_addr, 8)?;
+        // SAFETY: validate_user_ptr just confirmed ptr_addr points at 8 mapped bytes.
         let str_ptr = unsafe { *(ptr_addr as *const u64) };
 
         if str_ptr == 0 {
@@ -383,6 +397,8 @@ fn collect_user_argv(
         }
 
         let str_len = validate_user_string(str_ptr)?;
+        // SAFETY: validate_user_string above confirmed [str_ptr, str_ptr+str_len)
+        // is user-mapped + NUL-terminated.
         let slice = unsafe { core::slice::from_raw_parts(str_ptr as *const u8, str_len) };
         args.push(alloc::vec::Vec::from(slice));
     }
@@ -410,11 +426,13 @@ fn collect_user_envp(envp_ptr: u64) -> Result<alloc::vec::Vec<alloc::vec::Vec<u8
     for i in 0..MAX_ENV_VARS {
         let ptr_addr = envp_ptr + (i * 8) as u64;
         validate_user_ptr(ptr_addr, 8)?;
+        // SAFETY: validate_user_ptr just confirmed ptr_addr points at 8 mapped bytes.
         let str_ptr = unsafe { *(ptr_addr as *const u64) };
         if str_ptr == 0 {
             break;
         }
         let str_len = validate_user_string(str_ptr)?;
+        // SAFETY: validate_user_string above confirmed the string is in user space.
         let slice = unsafe { core::slice::from_raw_parts(str_ptr as *const u8, str_len) };
         env_vars.push(alloc::vec::Vec::from(slice));
     }
@@ -481,10 +499,14 @@ fn try_deliver_user_handler(
     handler_addr: u64,
     raw_result: i64,
 ) -> bool {
+    // SAFETY: read_syscall_frame_ptr reads gs:[0x10] which syscall_entry
+    // populated with &user_rip on this syscall's kernel stack.
     let frame_ptr = unsafe { read_syscall_frame_ptr() };
     if frame_ptr == 0 {
         return false;
     }
+    // SAFETY: frame_ptr points at the saved SyscallFrame on the kernel stack;
+    // we're the only writer because the dispatcher hasn't returned yet.
     let frame = unsafe { &mut *(frame_ptr as *mut SyscallFrame) };
 
     let user_rsp = frame.user_rsp;
@@ -551,6 +573,8 @@ pub fn deliver_pending_signals(raw_result: i64) -> i64 {
             Some(s) => s,
         };
 
+        // SAFETY: scheduler access — we're already in syscall context with the
+        // task pinned; the closure runs synchronously inside.
         let handler = unsafe {
             crate::task::scheduler::with_current_task(|t| t.signals.get_handler(sig as u8))
                 .unwrap_or(SIG_DFL)
@@ -563,6 +587,9 @@ pub fn deliver_pending_signals(raw_result: i64) -> i64 {
                     sys_exit(-1);
                 }
                 SignalAction::Ignore => continue,
+                // SAFETY: cli + block_and_reschedule. We never return from
+                // here on the same CPL — the scheduler dispatches another
+                // task.
                 SignalAction::Stop => unsafe {
                     core::arch::asm!("cli", options(nomem, nostack));
                     crate::task::scheduler::block_and_reschedule();
@@ -581,6 +608,7 @@ pub fn deliver_pending_signals(raw_result: i64) -> i64 {
                 // the signal's default action.
                 match SignalState::default_action(sig) {
                     SignalAction::Terminate => sys_exit(-1),
+                    // SAFETY: see the matching block above for the Stop path.
                     SignalAction::Stop => unsafe {
                         core::arch::asm!("cli", options(nomem, nostack));
                         crate::task::scheduler::block_and_reschedule();
@@ -601,6 +629,8 @@ pub fn sys_exit(status: i32) -> ! {
     );
 
     // Release all file descriptors now; address space is freed during reaping.
+    // SAFETY: cli/sti window around fd-table access; close_all runs to
+    // completion before the scheduler re-enters.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let _ = crate::task::scheduler::with_current_fd_table(|fds| {
@@ -611,12 +641,16 @@ pub fn sys_exit(status: i32) -> ! {
 
     // Mark task as zombie and schedule away.
     // Parent is notified via SIGCHLD and reaped children are reparented.
+    // SAFETY: exit_current marks zombie + reparents children + reschedules.
+    // It never returns on this CPU's logical thread.
     unsafe {
         crate::task::scheduler::exit_current(status);
     }
 
     // Should not reach here — exit_current never returns
     loop {
+        // SAFETY: park the CPU. cli stops timer IRQs from waking the loop;
+        // hlt is the architectural sleep instruction.
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack));
         }
@@ -631,6 +665,10 @@ pub fn sys_exit(status: i32) -> ! {
 pub fn sys_read(fd: i32, buf: *mut u8, count: usize) -> SyscallResult {
     validate_user_ptr(buf as u64, count)?;
 
+    // SAFETY: cli/sti window around the fd-table lookup; the inner sti
+    // re-enables IRQs during the potentially-blocking file read so the
+    // timer can preempt without losing fd_table consistency. validate_user_ptr
+    // above bounds-checked [buf, buf+count).
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {
@@ -655,6 +693,8 @@ pub fn sys_read(fd: i32, buf: *mut u8, count: usize) -> SyscallResult {
 pub fn sys_write(fd: i32, buf: *const u8, count: usize) -> SyscallResult {
     validate_user_ptr(buf as u64, count)?;
 
+    // SAFETY: see sys_read above for the cli/sti pattern. validate_user_ptr
+    // bounds-checked the user buffer.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {
@@ -693,6 +733,7 @@ pub fn sys_open(path: *const u8, flags: u32, _mode: u32) -> SyscallResult {
             .map_err(|_| SyscallError::EINVAL)?
     };
 
+    // SAFETY: mount_table is a kernel singleton initialised once at boot.
     let lookup_result = unsafe { crate::vfs::mount::mount_table().lookup_path(path_str) };
 
     let (fs, ino, created) = match lookup_result {
@@ -700,6 +741,7 @@ pub fn sys_open(path: *const u8, flags: u32, _mode: u32) -> SyscallResult {
         Err(crate::vfs::inode::VfsError::NotFound)
             if flags & crate::vfs::file::flags::O_CREAT != 0 =>
         {
+            // SAFETY: same singleton mount_table access.
             let mt = unsafe { crate::vfs::mount::mount_table() };
             let (mount, remainder) = mt.resolve(path_str).ok_or(SyscallError::ENOENT)?;
             let store = writable_store_from_mount(mount).ok_or(SyscallError::EACCES)?;
@@ -744,6 +786,7 @@ pub fn sys_open(path: *const u8, flags: u32, _mode: u32) -> SyscallResult {
 
     let of = alloc::sync::Arc::new(crate::vfs::file::OpenFile::new(ino, inode, flags));
 
+    // SAFETY: cli/sti window around fd allocation; closure runs synchronously.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {
@@ -766,6 +809,7 @@ pub fn sys_close(fd: i32) -> SyscallResult {
     if let Some(conn_id) = crate::net::close_fd_tcp(pid, fd) {
         let _ = crate::net::tcp::close(conn_id);
     }
+    // SAFETY: cli/sti window around fd table close; closure runs synchronously.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {
@@ -826,6 +870,8 @@ pub fn sys_mmap(
     let phys_addr = frame.addr();
 
     // Zero the allocation.
+    // SAFETY: phys::alloc_contiguous just returned this exclusive range; no
+    // typed reference exists for it yet.
     unsafe {
         core::ptr::write_bytes(phys_addr as *mut u8, 0, pages * 0x1000);
     }
@@ -858,6 +904,10 @@ pub fn sys_mmap(
             v
         };
 
+        // SAFETY: pt is the current task's page-table root reported by
+        // scheduler::current_page_table_phys; virt_addr was either user-
+        // supplied (and then bumped only if 0) or carved out of the MMAP_BUMP
+        // region, both well below the kernel half.
         if let Err(_) = unsafe {
             virt::map_range(
                 pt,
@@ -933,6 +983,8 @@ pub fn sys_pipe(fds_ptr: *mut i32) -> SyscallResult {
         crate::vfs::file::flags::O_WRONLY,
     ));
 
+    // SAFETY: cli/sti window around fd-table double-alloc; both fds land
+    // atomically from the user's POV.
     let (fd_r, fd_w) = unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let res = crate::task::scheduler::with_current_fd_table(|fds| {
@@ -945,6 +997,8 @@ pub fn sys_pipe(fds_ptr: *mut i32) -> SyscallResult {
         res?
     };
 
+    // SAFETY: validate_user_ptr at the top of the function bounded
+    // [fds_ptr, fds_ptr + 8) to user space.
     unsafe {
         *fds_ptr.add(0) = fd_r;
         *fds_ptr.add(1) = fd_w;
@@ -958,6 +1012,7 @@ pub fn sys_pipe(fds_ptr: *mut i32) -> SyscallResult {
 
 /// Duplicate a file descriptor.
 pub fn sys_dup(oldfd: i32) -> SyscallResult {
+    // SAFETY: cli/sti window around fd-table dup.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {
@@ -975,6 +1030,7 @@ pub fn sys_dup(oldfd: i32) -> SyscallResult {
 
 /// Duplicate `oldfd` to exactly `newfd`.
 pub fn sys_dup2(oldfd: i32, newfd: i32) -> SyscallResult {
+    // SAFETY: cli/sti window around fd-table dup2.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {

@@ -148,14 +148,16 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
 
 - [~] **T4.2 — Audyt `unsafe` pod policy z ARCHITECTURE.md §3.3** (first pass)
   - Discovery: kernel + libs/libc-lite have **457 `unsafe {` blocks** (plus 137 `unsafe fn`). Before this PR only 67 of them had a `// SAFETY:` comment in the preceding window — a 14% coverage rate. Chipping at the backlog rather than gating the policy in CI right away is the right call.
-  - This PR (first sample pass):
+  - First sample pass (PR #18):
     - [x] **`kernel/src/task/process.rs`** — fully annotated, 9 of 9 blocks now have WHY / INVARIANT / FAILURE per the §3.3 format.
     - [x] **`scripts/check-unsafe-safety.sh`** — bash advisory lint. Walks `kernel/` and `libs/`, flags each `unsafe {` whose preceding 5 lines lack `// SAFETY:`. Default exit 0 (informational); a `--strict` flag flips to exit 1 so a future CI gate can pick it up once the backlog is small.
-    - [x] Total after this PR: **76 of 457 covered (381 missing)**. Run `bash scripts/check-unsafe-safety.sh` for the live count.
+  - Second pass (this PR — handlers.rs sample chunk):
+    - [x] **`kernel/src/syscall/handlers.rs`** — top-of-file through sys_dup2 (~24 unsafe blocks). Patterns documented: cli/sti scheduler windows (current_creds / current_umask / sys_read / sys_write / sys_open / sys_close / sys_dup / sys_dup2 / sys_pipe / sys_exit), mount_table singleton accesses, validate_user_ptr-then-deref pattern in argv/envp collection, SyscallFrame access via PER_CPU's gs:[0x10]. handlers.rs now at 41 / 136 covered (95 still missing).
+  - **Total after this PR: 100 of 457 covered (357 missing)**. Run `bash scripts/check-unsafe-safety.sh` for the live count.
   - **To-do queue (sorted by gap size; same script reproduces the list):**
     | File | covered / total | missing |
     |---|---|---|
-    | `kernel/src/syscall/handlers.rs` | 8 / 136 | 128 |
+    | `kernel/src/syscall/handlers.rs` | 41 / 136 | 95 |
     | `libs/libc-lite/src/lib.rs` | 5 / 83 | 78 |
     | `kernel/src/main.rs` | 5 / 41 | 36 |
     | `kernel/src/drivers/ahci.rs` | 5 / 22 | 17 |
