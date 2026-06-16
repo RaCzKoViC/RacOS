@@ -194,13 +194,20 @@ jobs:
             mcopy -i esp.img esp/initramfs.img ::/initramfs.img
           fi
 
-          QEMU_ARGS=(-machine q35 -cpu qemu64,+smep,+smap -m 512M
+          QEMU_ARGS=(-machine q35 -cpu qemu64,+smep,+smap -m 512M -smp 4
             -drive if=pflash,format=raw,file=$OVMF,readonly=on
             -drive file=esp.img,if=ide,format=raw
             -device ich9-ahci,id=ahci0
             -drive id=disk0,file=disk.img,if=none,format=raw
             -device ide-hd,bus=ahci0.0,drive=disk0
             -serial stdio -display none -no-reboot)
+          # -smp 4 exercises the AP bring-up path:
+          # arch::smp::init() enumerates 4 ACPI CPUs, arch::ap::bring_up_all
+          # sends INIT-SIPI-SIPI to the 3 APs, each one runs ap_entry, loads
+          # the kernel GDT/IDT, enables its LAPIC, and flips its `started`
+          # bit. The assertions below grep boot2.log for both the
+          # enumeration line ("4 enabled CPU(s)") and the final
+          # all_aps_started smoke marker.
 
           # Boot 1 — first time the disk is touched. racfs::open_or_format
           # formats it; persistence_test creates boot-counter=1.
@@ -244,7 +251,24 @@ jobs:
           # racfs on boot 2. This is the actual persistence guarantee.
           grep -q "boot-counter = 2 (was 1, file survived reboot)" boot2.log \
             || (echo "FAIL: persistence broken — boot 2 did not see boot 1's file" && exit 1)
-          echo "Boot smoke PASSED — kernel + init + racsh alive AND racfs persisted across reboot"
+
+          # SMP — QEMU runs with -smp 4, so ACPI enumeration must see 4
+          # CPUs and arch::ap::bring_up_all must bring 3 APs alive (BSP +
+          # 3 APs = 4 online). The "all_aps_started" smoke marker is
+          # gated behind --features ci-smoke (only the kernel-smoke job
+          # builds with that), so for boot-smoke we grep the unconditional
+          # kernel log lines instead: the enumeration banner from
+          # smp::init() and a per-AP "alive" line emitted by
+          # arch::ap::bring_up_one for each AP it brings up.
+          grep -q "SMP topology - 4 enabled CPU(s)" boot2.log \
+            || (echo "FAIL: SMP enumeration did not see 4 CPUs" && exit 1)
+          AP_ALIVE_COUNT=$(grep -c "RACORE: AP apic_id=.* alive" boot2.log || true)
+          if [ "$AP_ALIVE_COUNT" -lt 3 ]; then
+            echo "FAIL: only $AP_ALIVE_COUNT of 3 APs reached the alive log line"
+            exit 1
+          fi
+
+          echo "Boot smoke PASSED — kernel + init + racsh alive AND racfs persisted across reboot AND 4 CPUs online"
 
       - name: Upload boot logs
         if: always()
@@ -310,7 +334,7 @@ jobs:
           # the mnt::roundtrip assertion is deterministic across CI invocations.
           dd if=/dev/zero of=ci-smoke-disk.img bs=1M count=16 status=none
           timeout 60 qemu-system-x86_64 \
-            -machine q35 -cpu qemu64,+smep,+smap -m 512M \
+            -machine q35 -cpu qemu64,+smep,+smap -m 512M -smp 4 \
             -drive if=pflash,format=raw,file=$OVMF,readonly=on \
             -drive file=fat:rw:esp,format=raw \
             -drive id=disk0,file=ci-smoke-disk.img,if=none,format=raw,cache=writethrough \

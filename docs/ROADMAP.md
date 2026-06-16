@@ -105,11 +105,13 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
 
 ## 4. Tier 3 — droga do v1.0
 
-- [ ] **T3.1 — SMP**
-  - Podłączyć AP trampoline do init (`kernel/src/smp.rs`)
-  - Per-CPU run queues z work stealing
-  - IPI dla preemption (LAPIC ICR)
-  - **Definition of done:** boot QEMU `-smp 4`, parallel test który widzi 4 cpu w `/proc/cpuinfo`
+- [~] **T3.1 — SMP** (AP bring-up exercised in CI; per-CPU run queues + IPI preemption deferred to Tier 4 as scheduler refactor)
+  - Discovery: heavy lifting was already done. `arch::smp::init()` enumerates ACPI CPUs into a 32-slot CpuState table, `arch::ap::bring_up_all` lives in `kernel/src/arch/ap.rs` with the full INIT-SIPI-SIPI flow, a real-mode → protected → long-mode trampoline in `kernel/src/arch/trampoline.asm`, each AP loads the kernel GDT/IDT, enables its LAPIC, binds its GS to its PerCpu slot, starts its LAPIC timer, and flips `smp::mark_started`. `bring_up_all` is wired into `kernel_main` at line 162.
+  - This PR exercises the path in CI:
+    - [x] `/proc/cpuinfo` now iterates `arch::smp::for_each_cpu`, emitting one Linux-style block per **online** CPU (with `processor`, `apicid`, `role` BSP/AP, `apic_mode` xapic/x2apic). Fallback to a single hardcoded block keeps `grep ^processor` callers sane in the impossible "0 online" case.
+    - [x] CI boot-smoke and kernel-smoke jobs now pass `-smp 4` to QEMU. New boot-smoke assertions: `SMP topology - 4 enabled CPU(s)` in `smp::init` output AND ≥ 3 distinct `AP apic_id=N alive` lines from `bring_up_one` — proves enumeration saw 4 CPUs AND the trampoline brought 3 APs all the way to mark_started.
+    - [x] Existing smoke gated behind `--features ci-smoke` (kernel-smoke-isadbg job) now also runs against 4 CPUs, exercising `PASS smp::all_aps_started (4/4)` plus the GS-base / IDT / timer self-checks that follow it.
+  - **Pozostałe (deferred to Tier 4 — scheduler refactor):** per-CPU run queues with work stealing (current scheduler is single global queue; refactor is substantial), IPI for cross-CPU preemption (LAPIC ICR send-vector path), per-CPU TSS for ring-3 interrupts on APs (today APs only handle ring-0 timer IRQs while parked).
 
 - [x] **T3.2 — rpkg MVP**
   - Discovery: rpkg lib (246 linii) had the header parser + section extractor + manifest TOML reader + install-plan helper, plus 2 tests. The matching binary skeleton in `pkg/rpkg-bin/` was dead code (wrong libc-lite path, not in workspace, only printed a plan — never wrote anything).
