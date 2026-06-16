@@ -771,17 +771,33 @@ fn test_id_prints_creds() {
     }
 }
 
-/// Smoke for /bin/sort (v0.2 §2.1 easy-win). Pipes three lines in reverse
-/// order through sort, asserts the output is alphabetically sorted.
+/// Smoke for /bin/sort (v0.2 §2.1 easy-win). Writes three unsorted lines
+/// directly to a tmpfs file via libc-lite (no `printf` exists yet, and
+/// racsh's echo doesn't support -e escapes), then runs `/bin/sort` on
+/// that file and asserts the output joined with case-glob is `a*b*c`.
 fn test_sort_orders_lines() {
     println("\n[test] /bin/sort orders lines");
 
-    // Forward sort: c/b/a → a/b/c. case-match the joined output.
+    // Write reverse-ordered lines to a tmpfs file.
+    let path = b"/tmp/sortin\0";
+    let fd = match open(path, O_RDWR | O_CREAT | O_TRUNC, 0o644) {
+        Ok(fd) => fd,
+        Err(_) => {
+            println("  [FAIL] open /tmp/sortin");
+            unsafe {
+                FAIL += 1;
+            }
+            return;
+        }
+    };
+    let _ = write(fd, b"c\nb\na\n");
+    let _ = close(fd);
+
     let s = shell_run(
-        b"result=$(printf 'c\\nb\\na\\n' | /bin/sort); \
+        b"result=$(/bin/sort /tmp/sortin); \
           case $result in a*b*c) exit 0;; *) exit 1;; esac\0",
     );
-    check!("sort produces a b c", s == Some(0));
+    check!("sort orders lines a < b < c", s == Some(0));
     if s == Some(0) {
         println("T20-SORT-OK");
     }
