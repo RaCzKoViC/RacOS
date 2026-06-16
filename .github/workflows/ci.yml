@@ -167,16 +167,20 @@ jobs:
           echo "Using OVMF=$OVMF"
           qemu-system-x86_64 --version | head -n 1
 
-          # Empty 16 MiB SATA disk for AHCI persistence. q35 has the ich9-ahci
-          # controller built in; if=ide attaches the drive there as the first
-          # SATA device, so the kernel sees it as sda. The file persists
-          # between the two QEMU invocations below — that's the whole point.
+          # Empty 16 MiB SATA disk for AHCI persistence. The first attempt
+          # used `-drive if=ide` and on QEMU 8.2 q35 the controller didn't
+          # show up in PCI scan ("AHCI init skipped: NoController" in the
+          # boot log). Explicit form: add an ich9-ahci controller, attach
+          # the drive to its first SATA port. Now the kernel sees a
+          # class-0x01.06.01 device, AHCI driver binds, sda registers.
           truncate -s 16M disk.img
 
           QEMU_ARGS=(-machine q35 -cpu qemu64,+smep,+smap -m 512M
             -drive if=pflash,format=raw,file=$OVMF,readonly=on
             -drive file=fat:rw:esp,format=raw
-            -drive file=disk.img,if=ide,format=raw
+            -device ich9-ahci,id=ahci0
+            -drive id=disk0,file=disk.img,if=none,format=raw
+            -device ide-hd,bus=ahci0.0,drive=disk0
             -serial stdio -display none -no-reboot)
 
           # Boot 1 — first time the disk is touched. racfs::open_or_format
