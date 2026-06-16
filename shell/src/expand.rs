@@ -491,6 +491,26 @@ fn expand_command_sub(cmd: &str, env: &Env, out: &mut String) {
     }
 }
 
+/// True when the entire word is a single unquoted expansion subject to
+/// POSIX field splitting (i.e. `$VAR`, `${VAR}`, or `$(cmd)`). Mixed words
+/// like `prefix$VAR` are intentionally NOT detected here — proper partial
+/// splitting is post-MVP; this covers the common `for x in $LIST` case
+/// that otherwise iterates once with x set to the whole string.
+fn is_pure_unquoted_expansion(word: &Word) -> bool {
+    word.parts.len() == 1
+        && matches!(
+            word.parts[0],
+            WordPart::Variable(_) | WordPart::BraceExpansion(_) | WordPart::CommandSub(_)
+        )
+}
+
+/// Split a string on IFS (default: space, tab, newline). Empty fragments
+/// are dropped — POSIX says runs of IFS whitespace collapse and leading/
+/// trailing IFS whitespace are stripped, which matches `split_whitespace`.
+fn ifs_split(value: &str) -> Vec<String> {
+    value.split_whitespace().map(String::from).collect()
+}
+
 /// Expand a word, handling glob patterns by matching against filesystem.
 /// Returns a `Vec<String>` with all matching files (or single expanded word if no globs).
 pub fn expand_word_list(word: &Word, env: &Env) -> Vec<String> {
@@ -532,10 +552,13 @@ pub fn expand_word_list(word: &Word, env: &Env) -> Vec<String> {
     let has_glob = word.parts.iter().any(|p| matches!(p, WordPart::Glob(_)));
 
     if !has_glob {
-        // No glob patterns — expand normally and return single result
-        let mut result = Vec::new();
-        result.push(expand_word(word, env));
-        return result;
+        let expanded = expand_word(word, env);
+        // POSIX word splitting: unquoted expansions split on IFS so that
+        // `for x in $LIST` with LIST="a b c" iterates three times.
+        if is_pure_unquoted_expansion(word) {
+            return ifs_split(&expanded);
+        }
+        return alloc::vec![expanded];
     }
 
     // Word contains glob patterns — reconstruct pattern string from parts
@@ -544,11 +567,7 @@ pub fn expand_word_list(word: &Word, env: &Env) -> Vec<String> {
     // Perform glob expansion
     match glob_expand(&pattern, env) {
         Some(matches) if !matches.is_empty() => matches,
-        _ => {
-            let mut result = Vec::new();
-            result.push(pattern);
-            result
-        }
+        _ => alloc::vec![pattern],
     }
 }
 
