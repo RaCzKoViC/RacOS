@@ -167,6 +167,7 @@ pub unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 // ─────────────────────────────────────────────────
 
 pub fn pthread_create(routine: u64, arg: u64) -> i64 {
+    // SAFETY: syscall ABI; scalar args only.
     unsafe { syscall2(SYS_PTHREAD_CREATE, routine, arg) }
 }
 
@@ -230,6 +231,7 @@ pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6:
 
 /// Zakończ proces z kodem wyjścia.
 pub fn exit(status: i32) -> ! {
+    // SAFETY: syscall ABI; scalar arg only. SYS_EXIT does not return.
     unsafe {
         syscall1(SYS_EXIT, status as u64);
     }
@@ -238,6 +240,8 @@ pub fn exit(status: i32) -> ! {
 
 /// Odczytaj z deskryptora pliku.
 pub fn read(fd: i32, buf: &mut [u8]) -> Result<usize, i64> {
+    // SAFETY: syscall ABI; buf pointer + length come from a &mut [u8],
+    // kernel validate_user_ptr re-checks.
     let ret = unsafe {
         syscall3(
             SYS_READ,
@@ -255,6 +259,7 @@ pub fn read(fd: i32, buf: &mut [u8]) -> Result<usize, i64> {
 
 /// Zapisz do deskryptora pliku.
 pub fn write(fd: i32, buf: &[u8]) -> Result<usize, i64> {
+    // SAFETY: syscall ABI; buf pointer + length come from a &[u8].
     let ret = unsafe { syscall3(SYS_WRITE, fd as u64, buf.as_ptr() as u64, buf.len() as u64) };
     if ret < 0 {
         Err(ret)
@@ -265,6 +270,8 @@ pub fn write(fd: i32, buf: &[u8]) -> Result<usize, i64> {
 
 /// Otwórz plik.
 pub fn open(path: &[u8], flags: u32, mode: u32) -> Result<i32, i64> {
+    // SAFETY: syscall ABI; path pointer comes from a &[u8] (caller must
+    // pass a NUL-terminated slice), kernel re-validates.
     let ret = unsafe { syscall3(SYS_OPEN, path.as_ptr() as u64, flags as u64, mode as u64) };
     if ret < 0 {
         Err(ret)
@@ -275,6 +282,7 @@ pub fn open(path: &[u8], flags: u32, mode: u32) -> Result<i32, i64> {
 
 /// Zamknij deskryptor pliku.
 pub fn close(fd: i32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; scalar arg only.
     let ret = unsafe { syscall1(SYS_CLOSE, fd as u64) };
     if ret < 0 {
         Err(ret)
@@ -285,6 +293,8 @@ pub fn close(fd: i32) -> Result<(), i64> {
 
 /// Pobierz informacje o pliku.
 pub fn stat(path: &[u8], buf: &mut [u8; 80]) -> Result<(), i64> {
+    // SAFETY: syscall ABI; pointers come from &[u8]/&mut [u8; 80],
+    // kernel re-validates.
     let ret = unsafe { syscall2(SYS_STAT, path.as_ptr() as u64, buf.as_mut_ptr() as u64) };
     if ret < 0 {
         Err(ret)
@@ -295,6 +305,7 @@ pub fn stat(path: &[u8], buf: &mut [u8; 80]) -> Result<(), i64> {
 
 /// Utwórz anonimowy pipe.
 pub fn pipe(fds: &mut [i32; 2]) -> Result<(), i64> {
+    // SAFETY: syscall ABI; fds pointer comes from a &mut [i32; 2].
     let ret = unsafe { syscall1(SYS_PIPE, fds.as_mut_ptr() as u64) };
     if ret < 0 {
         Err(ret)
@@ -305,6 +316,7 @@ pub fn pipe(fds: &mut [i32; 2]) -> Result<(), i64> {
 
 /// Zduplikuj deskryptor pliku.
 pub fn dup(oldfd: i32) -> Result<i32, i64> {
+    // SAFETY: syscall ABI; scalar arg only.
     let ret = unsafe { syscall1(SYS_DUP, oldfd as u64) };
     if ret < 0 {
         Err(ret)
@@ -315,6 +327,7 @@ pub fn dup(oldfd: i32) -> Result<i32, i64> {
 
 /// Zduplikuj deskryptor na konkretny numer.
 pub fn dup2(oldfd: i32, newfd: i32) -> Result<i32, i64> {
+    // SAFETY: syscall ABI; scalar args only.
     let ret = unsafe { syscall2(SYS_DUP2, oldfd as u64, newfd as u64) };
     if ret < 0 {
         Err(ret)
@@ -325,6 +338,7 @@ pub fn dup2(oldfd: i32, newfd: i32) -> Result<i32, i64> {
 
 /// Uruchom nowy program w bieżącym procesie (zastępuje obraz).
 pub fn exec(path: &[u8]) -> Result<(), i64> {
+    // SAFETY: syscall ABI; path pointer comes from a &[u8].
     let ret = unsafe { syscall3(SYS_EXEC, path.as_ptr() as u64, 0, 0) };
     if ret < 0 {
         Err(ret)
@@ -335,6 +349,7 @@ pub fn exec(path: &[u8]) -> Result<(), i64> {
 
 /// Utwórz nowy proces potomny z ELF.
 pub fn spawn(path: &[u8]) -> Result<i32, i64> {
+    // SAFETY: syscall ABI; path pointer comes from a &[u8].
     let ret = unsafe { syscall3(SYS_SPAWN, path.as_ptr() as u64, 0, 0) };
     if ret < 0 {
         Err(ret)
@@ -346,6 +361,8 @@ pub fn spawn(path: &[u8]) -> Result<i32, i64> {
 /// Utwórz nowy proces potomny z ELF, przekazując argumenty.
 /// `argv` to tablica wskaźników do null-terminated stringów, zakończona NULL.
 pub fn spawn_args(path: &[u8], argv: &[*const u8]) -> Result<i32, i64> {
+    // SAFETY: syscall ABI; pointers come from &[u8] / &[*const u8]
+    // (caller's responsibility to NUL-terminate argv).
     let ret = unsafe { syscall3(SYS_SPAWN, path.as_ptr() as u64, argv.as_ptr() as u64, 0) };
     if ret < 0 {
         Err(ret)
@@ -360,6 +377,8 @@ pub fn spawn_args(path: &[u8], argv: &[*const u8]) -> Result<i32, i64> {
 /// process's stack after argv, where libc-lite's `_start` reads it back
 /// into [`environ`].
 pub fn spawn_args_envp(path: &[u8], argv: &[*const u8], envp: &[*const u8]) -> Result<i32, i64> {
+    // SAFETY: syscall ABI; pointers come from caller's slices (must be
+    // NUL-terminated).
     let ret = unsafe {
         syscall3(
             SYS_SPAWN,
@@ -378,6 +397,7 @@ pub fn spawn_args_envp(path: &[u8], argv: &[*const u8], envp: &[*const u8]) -> R
 /// Czekaj na zakończenie procesu potomnego.
 /// Zwraca (pid, exit_status).
 pub fn wait(status: &mut i32) -> Result<i32, i64> {
+    // SAFETY: syscall ABI; status pointer comes from a &mut i32.
     let ret = unsafe { syscall3(SYS_WAIT, -1i32 as u64, status as *mut i32 as u64, 0) };
     if ret < 0 {
         Err(ret)
@@ -388,11 +408,13 @@ pub fn wait(status: &mut i32) -> Result<i32, i64> {
 
 /// Pobierz PID bieżącego procesu.
 pub fn getpid() -> i32 {
+    // SAFETY: syscall ABI; no args.
     unsafe { syscall0(SYS_GETPID) as i32 }
 }
 
 /// Wyślij sygnał do procesu.
 pub fn kill(pid: i32, sig: i32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; scalar args only.
     let ret = unsafe { syscall2(SYS_KILL, pid as u64, sig as u64) };
     if ret < 0 {
         Err(ret)
@@ -403,6 +425,7 @@ pub fn kill(pid: i32, sig: i32) -> Result<(), i64> {
 
 /// Zmień bieżący katalog roboczy.
 pub fn chdir(path: &[u8]) -> Result<(), i64> {
+    // SAFETY: syscall ABI; path pointer comes from a &[u8].
     let ret = unsafe { syscall1(SYS_CHDIR, path.as_ptr() as u64) };
     if ret < 0 {
         Err(ret)
@@ -413,6 +436,7 @@ pub fn chdir(path: &[u8]) -> Result<(), i64> {
 
 /// Pobierz bieżący katalog roboczy.
 pub fn getcwd(buf: &mut [u8]) -> Result<usize, i64> {
+    // SAFETY: syscall ABI; buf pointer + length come from a &mut [u8].
     let ret = unsafe { syscall2(SYS_GETCWD, buf.as_mut_ptr() as u64, buf.len() as u64) };
     if ret < 0 {
         Err(ret)
@@ -423,6 +447,7 @@ pub fn getcwd(buf: &mut [u8]) -> Result<usize, i64> {
 
 /// Ustaw grupę procesów.
 pub fn setpgid(pid: u32, pgid: u32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; scalar args only.
     let ret = unsafe { syscall2(SYS_SETPGID, pid as u64, pgid as u64) };
     if ret < 0 {
         Err(ret)
@@ -433,6 +458,7 @@ pub fn setpgid(pid: u32, pgid: u32) -> Result<(), i64> {
 
 /// Pobierz grupę procesów.
 pub fn getpgid(pid: u32) -> Result<u32, i64> {
+    // SAFETY: syscall ABI; scalar arg only.
     let ret = unsafe { syscall1(SYS_GETPGID, pid as u64) };
     if ret < 0 {
         Err(ret)
@@ -443,6 +469,7 @@ pub fn getpgid(pid: u32) -> Result<u32, i64> {
 
 /// Utwórz nową sesję.
 pub fn setsid() -> Result<u32, i64> {
+    // SAFETY: syscall ABI; no args.
     let ret = unsafe { syscall0(SYS_SETSID) };
     if ret < 0 {
         Err(ret)
@@ -453,6 +480,8 @@ pub fn setsid() -> Result<u32, i64> {
 
 /// Kontrola urządzenia I/O.
 pub fn ioctl(fd: i32, request: u32, arg: u64) -> Result<i64, i64> {
+    // SAFETY: syscall ABI; ioctl `arg` is opaque (request-specific layout
+    // is the caller's contract with the kernel handler).
     let ret = unsafe { syscall3(SYS_IOCTL, fd as u64, request as u64, arg) };
     if ret < 0 {
         Err(ret)
@@ -473,6 +502,7 @@ pub const CLOCK_MONOTONIC: u32 = 1;
 
 /// Pobierz aktualny czas z zegara `clock_id`.
 pub fn clock_gettime(clock_id: u32, tp: &mut Timespec) -> Result<(), i64> {
+    // SAFETY: syscall ABI; tp pointer comes from a &mut Timespec.
     let ret = unsafe {
         syscall2(
             SYS_CLOCK_GETTIME,
@@ -498,6 +528,7 @@ pub struct DirEntry {
 /// Odczytaj wpisy katalogowe z otwartego fd katalogu.
 /// Zwraca liczbę bajtów (0 = koniec).
 pub fn getdents(fd: i32, buf: &mut [u8]) -> Result<usize, i64> {
+    // SAFETY: syscall ABI; buf pointer + length come from a &mut [u8].
     let ret = unsafe {
         syscall3(
             SYS_GETDENTS,
@@ -515,6 +546,7 @@ pub fn getdents(fd: i32, buf: &mut [u8]) -> Result<usize, i64> {
 
 /// Utwórz katalog.
 pub fn mkdir(path: &[u8], mode: u32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; path pointer comes from a &[u8].
     let ret = unsafe { syscall2(SYS_MKDIR, path.as_ptr() as u64, mode as u64) };
     if ret < 0 {
         Err(ret)
@@ -525,6 +557,7 @@ pub fn mkdir(path: &[u8], mode: u32) -> Result<(), i64> {
 
 /// Usuń plik lub pusty katalog.
 pub fn unlink(path: &[u8]) -> Result<(), i64> {
+    // SAFETY: syscall ABI; path pointer comes from a &[u8].
     let ret = unsafe { syscall1(SYS_UNLINK, path.as_ptr() as u64) };
     if ret < 0 {
         Err(ret)
@@ -535,6 +568,7 @@ pub fn unlink(path: &[u8]) -> Result<(), i64> {
 
 /// Fork the current process. Returns 0 in child, child PID in parent.
 pub fn fork() -> Result<i32, i64> {
+    // SAFETY: syscall ABI; no args.
     let ret = unsafe { syscall0(SYS_FORK) };
     if ret < 0 {
         Err(ret)
@@ -550,6 +584,8 @@ pub const CLONE_THREAD: u32 = 0x00010000;
 /// Clone the current process/thread.
 /// For threads: clone(CLONE_VM | CLONE_THREAD, stack, 0, 0, 0)
 pub fn clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8) -> Result<i32, i64> {
+    // SAFETY: syscall ABI; pointer args are the caller's contract — the
+    // kernel re-validates via validate_user_ptr.
     let ret = unsafe {
         syscall5(
             SYS_CLONE,
