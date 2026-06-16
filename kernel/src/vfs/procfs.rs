@@ -209,9 +209,37 @@ impl ProcFileInode {
                 format!("RacOS version 0.1.0 (racore) #1\n")
             }
             INO_CPUINFO => {
-                format!(
-                    "processor\t: 0\nvendor_id\t: RacOS\nmodel name\t: x86_64 Virtual CPU\ncpu MHz\t\t: 1000.000\ncache size\t: 0 KB\nflags\t\t: fpu sse sse2 syscall nx\n"
-                )
+                // Iterate the SMP topology so /proc/cpuinfo reflects every
+                // online CPU (BSP + brought-up APs), not a hardcoded single
+                // "processor 0". Matches the Linux format closely enough that
+                // off-the-shelf parsers (e.g. counting `^processor` lines)
+                // work.
+                let mut out = String::new();
+                let mut idx: u32 = 0;
+                crate::arch::smp::for_each_cpu::<(), _>(|cpu| {
+                    if !cpu.started.load(core::sync::atomic::Ordering::SeqCst) {
+                        return None;
+                    }
+                    let role = if cpu.is_bsp { "BSP" } else { "AP" };
+                    let apic_kind = if cpu.is_x2apic { "x2apic" } else { "xapic" };
+                    let block = format!(
+                        "processor\t: {}\nvendor_id\t: RacOS\nmodel name\t: x86_64 Virtual CPU\napicid\t\t: {}\nrole\t\t: {}\napic_mode\t: {}\ncpu MHz\t\t: 1000.000\ncache size\t: 0 KB\nflags\t\t: fpu sse sse2 syscall nx\n\n",
+                        idx, cpu.apic_id, role, apic_kind,
+                    );
+                    out.push_str(&block);
+                    idx += 1;
+                    None
+                });
+                // Fall back to a single "processor 0" block on the
+                // (impossible-in-practice) case where SMP enumeration
+                // produced zero online entries — keeps callers that just
+                // grep for "processor" sane.
+                if out.is_empty() {
+                    out.push_str(
+                        "processor\t: 0\nvendor_id\t: RacOS\nmodel name\t: x86_64 Virtual CPU\ncpu MHz\t\t: 1000.000\ncache size\t: 0 KB\nflags\t\t: fpu sse sse2 syscall nx\n",
+                    );
+                }
+                out
             }
             INO_STAT => {
                 let ms = crate::interrupts::pit::uptime_ms();
