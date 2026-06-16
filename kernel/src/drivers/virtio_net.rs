@@ -116,28 +116,34 @@ impl VirtioNet {
 
     fn bring_up(io_base: u16) -> Result<Self, VirtioNetError> {
         // 1. Reset.
+        // SAFETY: io_base belongs to this device's PCI BAR0 (I/O space).
         unsafe {
             outb(io_base + REG_DEVICE_STATUS, 0);
         }
 
         // 2/3. ACKNOWLEDGE | DRIVER.
         let mut status = STATUS_ACKNOWLEDGE;
+        // SAFETY: virtio device-status write, same PCI BAR.
         unsafe {
             outb(io_base + REG_DEVICE_STATUS, status);
         }
         status |= STATUS_DRIVER;
+        // SAFETY: virtio device-status write, same PCI BAR.
         unsafe {
             outb(io_base + REG_DEVICE_STATUS, status);
         }
 
         // 4. Feature negotiation — we only ask for VIRTIO_NET_F_MAC.
+        // SAFETY: device-features register read.
         let device_features = unsafe { inl(io_base + REG_DEVICE_FEATURES) };
         if device_features & VIRTIO_NET_F_MAC == 0 {
+            // SAFETY: device-status write to flag FAILED before bailing.
             unsafe {
                 outb(io_base + REG_DEVICE_STATUS, status | STATUS_FAILED);
             }
             return Err(VirtioNetError::FeatureNegotiation);
         }
+        // SAFETY: guest-features write completes the negotiation.
         unsafe {
             outl(io_base + REG_GUEST_FEATURES, VIRTIO_NET_F_MAC);
         }
@@ -145,6 +151,7 @@ impl VirtioNet {
         // 5. Read MAC from device-specific config.
         let mut mac = [0u8; 6];
         for i in 0..6 {
+            // SAFETY: device-config byte read, i < 6.
             unsafe {
                 mac[i] = inb(io_base + REG_DEVICE_CONFIG + i as u16);
             }
@@ -180,6 +187,7 @@ impl VirtioNet {
         dev.post_initial_rx()?;
 
         // 10. DRIVER_OK.
+        // SAFETY: final device-status write to flip DRIVER_OK.
         unsafe {
             outb(io_base + REG_DEVICE_STATUS, status | STATUS_DRIVER_OK);
         }
@@ -188,11 +196,13 @@ impl VirtioNet {
 
     fn setup_queue(io_base: u16, idx: u16) -> Result<Virtqueue, VirtioNetError> {
         // Select queue.
+        // SAFETY: queue-select write to virtio BAR.
         unsafe {
             outw(io_base + REG_QUEUE_SELECT, idx);
         }
         // Legacy I/O queue size is device-dictated and read-only. Our virtqueue
         // layout MUST match exactly or the device reads/writes outside it.
+        // SAFETY: queue-size register read.
         let dev_size = unsafe { inw(io_base + REG_QUEUE_SIZE) };
         crate::serial::serial_println!(
             "[ VIRTIO ] queue {} device-reported size={}",
@@ -210,6 +220,7 @@ impl VirtioNet {
         }
         let vq = Virtqueue::new().map_err(|_| VirtioNetError::QueueAlloc)?;
         // Tell device where the queue lives. Legacy I/O uses PFN.
+        // SAFETY: queue-address write tells the device our virtqueue PFN.
         unsafe {
             outl(io_base + REG_QUEUE_ADDRESS, vq.pfn());
         }
@@ -309,6 +320,7 @@ impl VirtioNet {
 
     /// Acknowledge the ISR (clear pending bit). Read is destructive.
     pub fn ack_isr(&self) -> u8 {
+        // SAFETY: ISR-status register read clears pending bit by side effect.
         unsafe { inb(self.io_base + REG_ISR_STATUS) }
     }
 }

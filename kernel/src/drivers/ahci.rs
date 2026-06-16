@@ -173,12 +173,14 @@ pub fn init(pci_devices: &[PciDevice]) -> Result<(), AhciError> {
     );
 
     // Bring HBA into AHCI mode.
+    // SAFETY: abar is the HBA's PCI BAR5, identity-mapped MMIO.
     unsafe {
         let ghc = mmio_r32(abar, HBA_GHC);
         mmio_w32(abar, HBA_GHC, ghc | GHC_AE);
     }
 
     // Pick the first implemented + present port.
+    // SAFETY: HBA MMIO read.
     let pi = unsafe { mmio_r32(abar, HBA_PI) };
     let mut chosen: Option<usize> = None;
     for i in 0..32 {
@@ -186,10 +188,12 @@ pub fn init(pci_devices: &[PciDevice]) -> Result<(), AhciError> {
             continue;
         }
         let port = port_regs(abar, i);
+        // SAFETY: port MMIO derived from abar + HBA_PORT_BASE + i*stride.
         let ssts = unsafe { mmio_r32(port, P_SSTS) };
         let det = ssts & 0x0F;
         let ipm = (ssts >> 8) & 0x0F;
         if det == 3 && ipm == 1 {
+            // SAFETY: same port MMIO.
             let sig = unsafe { mmio_r32(port, P_SIG) };
             if sig == SIG_ATA {
                 chosen = Some(i);
@@ -220,6 +224,7 @@ pub fn init(pci_devices: &[PciDevice]) -> Result<(), AhciError> {
 
 #[inline]
 fn port_regs(abar: *mut u8, idx: usize) -> *mut u8 {
+    // SAFETY: idx < 32 (validated by PI scan); offset stays within HBA MMIO.
     unsafe { abar.add(HBA_PORT_BASE + idx * HBA_PORT_STRIDE) }
 }
 
@@ -227,6 +232,7 @@ fn init_port(abar: *mut u8, idx: usize) -> Result<Port, AhciError> {
     let regs = port_regs(abar, idx);
 
     // Stop the port (CMD.ST=0, then wait CR=0; CMD.FRE=0, then wait FR=0).
+    // SAFETY: regs is this port's identity-mapped MMIO region.
     unsafe {
         let cmd = mmio_r32(regs, P_CMD);
         mmio_w32(regs, P_CMD, cmd & !PORT_CMD_ST);
@@ -251,6 +257,7 @@ fn init_port(abar: *mut u8, idx: usize) -> Result<Port, AhciError> {
     }
 
     // Link slot 0's command header to the command table.
+    // SAFETY: cmd_list_phys is a freshly-allocated identity-mapped frame.
     unsafe {
         let header = cmd_list_phys as *mut CmdHeader;
         write_volatile(&mut (*header).ctba, cmd_table_phys as u32);
@@ -258,6 +265,8 @@ fn init_port(abar: *mut u8, idx: usize) -> Result<Port, AhciError> {
     }
 
     // Program port base addresses and re-enable.
+    // SAFETY: regs is this port's MMIO; the frame phys addresses were just
+    // allocated and zeroed above.
     unsafe {
         mmio_w32(regs, P_CLB, cmd_list_phys as u32);
         mmio_w32(regs, P_CLBU, (cmd_list_phys >> 32) as u32);
@@ -272,6 +281,7 @@ fn init_port(abar: *mut u8, idx: usize) -> Result<Port, AhciError> {
 
     // Run IDENTIFY DEVICE to obtain sector count.
     let identify_phys = phys::alloc_frame().map_err(|_| AhciError::Io)?.addr();
+    // SAFETY: freshly-allocated identity-mapped frame, exclusively owned.
     unsafe {
         core::ptr::write_bytes(identify_phys as *mut u8, 0, 512);
     }
@@ -308,6 +318,8 @@ fn init_port(abar: *mut u8, idx: usize) -> Result<Port, AhciError> {
 
 fn read_identify_lba(buf_phys: u64) -> u64 {
     // ATA IDENTIFY: words 100..103 hold 48-bit LBA count (if word 83 bit 10 is set).
+    // SAFETY: buf_phys is the IDENTIFY landing frame (512 B). All offsets
+    // (60, 61, 83, 100..103) are within bounds.
     unsafe {
         let p = buf_phys as *const u16;
         let w83 = read_volatile(p.add(83));
@@ -381,6 +393,7 @@ fn submit_command(
     wait_ready(regs, 1_000_000)?;
 
     // Clear interrupt status, then issue slot 0.
+    // SAFETY: regs is this port's identity-mapped MMIO.
     unsafe {
         mmio_w32(regs, P_IS, 0xFFFF_FFFF);
         mmio_w32(regs, P_CI, 1);
@@ -388,20 +401,24 @@ fn submit_command(
 
     // Poll CI until cleared (= command complete) or TFD error.
     for _ in 0..50_000_000u64 {
+        // SAFETY: port MMIO read.
         let ci = unsafe { mmio_r32(regs, P_CI) };
         if ci & 1 == 0 {
             break;
         }
+        // SAFETY: port MMIO read.
         let tfd = unsafe { mmio_r32(regs, P_TFD) };
         if tfd & TFD_ERR != 0 {
             return Err(AhciError::Io);
         }
         core::hint::spin_loop();
     }
+    // SAFETY: port MMIO read.
     let ci = unsafe { mmio_r32(regs, P_CI) };
     if ci & 1 != 0 {
         return Err(AhciError::Io);
     }
+    // SAFETY: port MMIO read.
     let tfd = unsafe { mmio_r32(regs, P_TFD) };
     if tfd & TFD_ERR != 0 {
         return Err(AhciError::Io);
@@ -411,6 +428,7 @@ fn submit_command(
 
 fn wait_clear(regs: *mut u8, off: usize, mask: u32, spins: u64) -> Result<(), AhciError> {
     for _ in 0..spins {
+        // SAFETY: port MMIO read at a caller-supplied offset.
         let v = unsafe { mmio_r32(regs, off) };
         if v & mask == 0 {
             return Ok(());
@@ -422,6 +440,7 @@ fn wait_clear(regs: *mut u8, off: usize, mask: u32, spins: u64) -> Result<(), Ah
 
 fn wait_ready(regs: *mut u8, spins: u64) -> Result<(), AhciError> {
     for _ in 0..spins {
+        // SAFETY: port MMIO read.
         let tfd = unsafe { mmio_r32(regs, P_TFD) };
         if tfd & (TFD_BSY | TFD_DRQ) == 0 {
             return Ok(());
@@ -500,6 +519,8 @@ fn do_io(lba: u64, buf: &[u8], write: bool) -> BlockResult<()> {
             write,
         );
         if !write && res.is_ok() {
+            // SAFETY: scratch is owned + SECTOR_SIZE bytes; buf is the
+            // caller's sector-sized slice.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     scratch as *const u8,
