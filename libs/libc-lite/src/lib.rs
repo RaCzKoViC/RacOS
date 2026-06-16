@@ -624,6 +624,7 @@ pub fn sigaction(
 ) -> Result<(), i64> {
     let act_ptr = act.map(|a| a as *const SigAction as u64).unwrap_or(0);
     let oldact_ptr = oldact.map(|a| a as *mut SigAction as u64).unwrap_or(0);
+    // SAFETY: syscall ABI; pointers come from Option<&SigAction>.
     let ret = unsafe { syscall3(SYS_SIGACTION, sig as u64, act_ptr, oldact_ptr) };
     if ret < 0 {
         Err(ret)
@@ -694,7 +695,10 @@ unsafe extern "C" fn __signal_dispatch_rust(signum: i32) {
     if raw == 0 {
         return;
     }
+    // SAFETY: u64 → fn pointer transmute — caller of signal() registered a
+    // valid SigHandler; raw was loaded from USER_HANDLERS just above.
     let handler: SigHandler = unsafe { core::mem::transmute(raw) };
+    // SAFETY: calling the registered user signal handler.
     unsafe { handler(signum) };
 }
 
@@ -708,6 +712,8 @@ pub fn signal(sig: i32, handler: SigHandler) -> Result<(), i64> {
     if sig <= 0 || (sig as usize) >= MAX_SIGNAL {
         return Err(-22); // EINVAL
     }
+    // SAFETY: see the note on USER_HANDLERS above (single-process, signals
+    // serial within process).
     unsafe {
         USER_HANDLERS[sig as usize] = handler as *const () as u64;
     }
@@ -735,6 +741,7 @@ pub const POLLNVAL: i16 = 0x0020;
 
 /// Poll file descriptors.
 pub fn poll(fds: &mut [PollFd], timeout_ms: i32) -> Result<i32, i64> {
+    // SAFETY: syscall ABI; fds pointer + length come from a &mut [PollFd].
     let ret = unsafe {
         syscall3(
             SYS_POLL,
@@ -752,21 +759,25 @@ pub fn poll(fds: &mut [PollFd], timeout_ms: i32) -> Result<i32, i64> {
 
 /// Get parent PID.
 pub fn getppid() -> i32 {
+    // SAFETY: syscall ABI; no args.
     unsafe { syscall0(SYS_GETPPID) as i32 }
 }
 
 /// Get real UID.
 pub fn getuid() -> u32 {
+    // SAFETY: syscall ABI; no args.
     unsafe { syscall0(SYS_GETUID) as u32 }
 }
 
 /// Get real GID.
 pub fn getgid() -> u32 {
+    // SAFETY: syscall ABI; no args.
     unsafe { syscall0(SYS_GETGID) as u32 }
 }
 
 /// Set UID.
 pub fn setuid(uid: u32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; scalar arg only.
     let ret = unsafe { syscall1(SYS_SETUID, uid as u64) };
     if ret < 0 {
         Err(ret)
@@ -777,6 +788,7 @@ pub fn setuid(uid: u32) -> Result<(), i64> {
 
 /// Set GID.
 pub fn setgid(gid: u32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; scalar arg only.
     let ret = unsafe { syscall1(SYS_SETGID, gid as u64) };
     if ret < 0 {
         Err(ret)
@@ -787,11 +799,13 @@ pub fn setgid(gid: u32) -> Result<(), i64> {
 
 /// Get effective UID.
 pub fn geteuid() -> u32 {
+    // SAFETY: syscall ABI; no args.
     unsafe { syscall0(SYS_GETEUID) as u32 }
 }
 
 /// Get effective GID.
 pub fn getegid() -> u32 {
+    // SAFETY: syscall ABI; no args.
     unsafe { syscall0(SYS_GETEGID) as u32 }
 }
 
@@ -801,6 +815,7 @@ pub fn nanosleep(sec: u64, nsec: u64) -> Result<(), i64> {
         tv_sec: sec,
         tv_nsec: nsec,
     };
+    // SAFETY: syscall ABI; ts pointer comes from a stack &Timespec.
     let ret = unsafe { syscall2(SYS_NANOSLEEP, &ts as *const Timespec as u64, 0) };
     if ret < 0 {
         Err(ret)
@@ -816,6 +831,7 @@ pub fn sleep_ms(ms: u64) -> Result<(), i64> {
 
 /// Stat a file by fd.
 pub fn fstat(fd: i32, buf: &mut [u8; 80]) -> Result<(), i64> {
+    // SAFETY: syscall ABI; buf pointer comes from a &mut [u8; 80].
     let ret = unsafe { syscall2(SYS_FSTAT, fd as u64, buf.as_mut_ptr() as u64) };
     if ret < 0 {
         Err(ret)
@@ -826,6 +842,7 @@ pub fn fstat(fd: i32, buf: &mut [u8; 80]) -> Result<(), i64> {
 
 /// Seek within a file.
 pub fn lseek(fd: i32, offset: i64, whence: i32) -> Result<i64, i64> {
+    // SAFETY: syscall ABI; scalar args only.
     let ret = unsafe { syscall3(SYS_LSEEK, fd as u64, offset as u64, whence as u64) };
     if ret < 0 {
         Err(ret)
@@ -839,6 +856,7 @@ pub const SEEK_END: i32 = 2;
 
 /// Check file accessibility.
 pub fn access(path: &[u8], mode: u32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; path pointer comes from a &[u8].
     let ret = unsafe { syscall2(SYS_ACCESS, path.as_ptr() as u64, mode as u64) };
     if ret < 0 {
         Err(ret)
@@ -853,6 +871,7 @@ pub const X_OK: u32 = 1;
 
 /// Change file permissions.
 pub fn chmod(path: &[u8], mode: u32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; path pointer comes from a &[u8].
     let ret = unsafe { syscall2(SYS_CHMOD, path.as_ptr() as u64, mode as u64) };
     if ret < 0 {
         Err(ret)
@@ -863,6 +882,7 @@ pub fn chmod(path: &[u8], mode: u32) -> Result<(), i64> {
 
 /// Change file ownership.
 pub fn chown(path: &[u8], uid: u32, gid: u32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; path pointer comes from a &[u8].
     let ret = unsafe { syscall3(SYS_CHOWN, path.as_ptr() as u64, uid as u64, gid as u64) };
     if ret < 0 {
         Err(ret)
@@ -873,11 +893,13 @@ pub fn chown(path: &[u8], uid: u32, gid: u32) -> Result<(), i64> {
 
 /// Set file creation mask.
 pub fn umask(mask: u32) -> u32 {
+    // SAFETY: syscall ABI; scalar arg only.
     unsafe { syscall1(SYS_UMASK, mask as u64) as u32 }
 }
 
 /// Rename a file.
 pub fn rename(old: &[u8], new: &[u8]) -> Result<(), i64> {
+    // SAFETY: syscall ABI; pointers come from &[u8].
     let ret = unsafe { syscall2(SYS_RENAME, old.as_ptr() as u64, new.as_ptr() as u64) };
     if ret < 0 {
         Err(ret)
@@ -888,6 +910,7 @@ pub fn rename(old: &[u8], new: &[u8]) -> Result<(), i64> {
 
 /// File control.
 pub fn fcntl(fd: i32, cmd: i32, arg: u64) -> Result<i64, i64> {
+    // SAFETY: syscall ABI; arg is opaque (cmd-specific contract with kernel).
     let ret = unsafe { syscall3(SYS_FCNTL, fd as u64, cmd as u64, arg) };
     if ret < 0 {
         Err(ret)
@@ -898,6 +921,7 @@ pub fn fcntl(fd: i32, cmd: i32, arg: u64) -> Result<i64, i64> {
 
 /// Check if fd is a terminal.
 pub fn isatty(fd: i32) -> bool {
+    // SAFETY: syscall ABI; scalar arg only.
     unsafe { syscall1(SYS_ISATTY, fd as u64) > 0 }
 }
 
@@ -938,6 +962,7 @@ pub fn arg(argv: *const *const u8, index: usize) -> Option<&'static [u8]> {
 
 /// Wait for specific PID.
 pub fn waitpid(pid: i32, status: &mut i32, options: u32) -> Result<i32, i64> {
+    // SAFETY: syscall ABI; status pointer comes from a &mut i32.
     let ret = unsafe {
         syscall3(
             SYS_WAITPID,
@@ -978,6 +1003,7 @@ impl UtsName {
 
 /// Get system name information.
 pub fn uname(buf: &mut UtsName) -> Result<(), i64> {
+    // SAFETY: syscall ABI; buf pointer comes from a &mut UtsName.
     let ret = unsafe { syscall1(SYS_UNAME, buf as *mut UtsName as u64) };
     if ret < 0 {
         Err(ret)
@@ -988,6 +1014,7 @@ pub fn uname(buf: &mut UtsName) -> Result<(), i64> {
 
 /// Send fsync to ensure data is written.
 pub fn fsync(fd: i32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; scalar arg only.
     let ret = unsafe { syscall1(SYS_FSYNC, fd as u64) };
     if ret < 0 {
         Err(ret)
@@ -998,6 +1025,7 @@ pub fn fsync(fd: i32) -> Result<(), i64> {
 
 /// Yield the CPU.
 pub fn sched_yield() -> Result<(), i64> {
+    // SAFETY: syscall ABI; no args.
     let ret = unsafe { syscall0(SYS_SCHED_YIELD) };
     if ret < 0 {
         Err(ret)
@@ -1008,6 +1036,7 @@ pub fn sched_yield() -> Result<(), i64> {
 
 /// Reboot the system.
 pub fn reboot(cmd: u32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; scalar arg only.
     let ret = unsafe { syscall1(SYS_REBOOT, cmd as u64) };
     if ret < 0 {
         Err(ret)
@@ -1020,6 +1049,7 @@ pub const REBOOT_RESTART: u32 = 0x1234;
 
 /// Get or set hostname.
 pub fn hostname_get(buf: &mut [u8]) -> Result<usize, i64> {
+    // SAFETY: syscall ABI; buf pointer + length come from a &mut [u8].
     let ret = unsafe { syscall3(SYS_HOSTNAME, buf.as_mut_ptr() as u64, buf.len() as u64, 0) };
     if ret < 0 {
         Err(ret)
@@ -1029,6 +1059,7 @@ pub fn hostname_get(buf: &mut [u8]) -> Result<usize, i64> {
 }
 
 pub fn hostname_set(name: &[u8]) -> Result<(), i64> {
+    // SAFETY: syscall ABI; name pointer comes from a &[u8].
     let ret = unsafe { syscall3(SYS_HOSTNAME, name.as_ptr() as u64, name.len() as u64, 1) };
     if ret < 0 {
         Err(ret)
@@ -1039,6 +1070,7 @@ pub fn hostname_set(name: &[u8]) -> Result<(), i64> {
 
 /// Get random bytes.
 pub fn getrandom(buf: &mut [u8]) -> Result<usize, i64> {
+    // SAFETY: syscall ABI; buf pointer + length come from a &mut [u8].
     let ret = unsafe { syscall3(SYS_GETRANDOM, buf.as_mut_ptr() as u64, buf.len() as u64, 0) };
     if ret < 0 {
         Err(ret)
@@ -1049,6 +1081,7 @@ pub fn getrandom(buf: &mut [u8]) -> Result<usize, i64> {
 
 /// Memory-protect a region.
 pub fn mprotect(addr: u64, len: usize, prot: u32) -> Result<(), i64> {
+    // SAFETY: syscall ABI; addr/len are caller's contract — kernel validates.
     let ret = unsafe { syscall3(SYS_MPROTECT, addr, len as u64, prot as u64) };
     if ret < 0 {
         Err(ret)
