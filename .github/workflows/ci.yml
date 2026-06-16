@@ -177,11 +177,17 @@ jobs:
 
           QEMU_ARGS=(-machine q35 -cpu qemu64,+smep,+smap -m 512M
             -drive if=pflash,format=raw,file=$OVMF,readonly=on
-            -drive file=fat:rw:esp,format=raw
+            -drive file=fat:ro:esp,format=raw
             -device ich9-ahci,id=ahci0
             -drive id=disk0,file=disk.img,if=none,format=raw
             -device ide-hd,bus=ahci0.0,drive=disk0
             -serial stdio -display none -no-reboot)
+          # ESP is `fat:ro:esp` (readonly auto-FAT). With `rw`, QEMU's
+          # in-memory FAT writeback on boot 1 occasionally left the
+          # synthesised volume in a state OVMF refused on boot 2 ("Load
+          # Error" loading Boot0002), even though boot 1's RacOS never
+          # wrote to it. The kernel does its own writes via the AHCI
+          # disk on /mnt; the ESP only needs to be read at boot.
 
           # Boot 1 — first time the disk is touched. racfs::open_or_format
           # formats it; persistence_test creates boot-counter=1.
