@@ -362,23 +362,24 @@ jobs:
 
       - name: Assert shell responded
         run: |
-          grep -q "racsh\\$" shell.log \
+          tr -d '\r' < shell.log > shell.normalized.log
+          grep -q "racsh\\$" shell.normalized.log \
             || (echo "FAIL: racsh prompt not seen" && exit 1)
-          grep -q "^/\s*$" shell.log \
+          grep -q "^/$" shell.normalized.log \
             || (echo "FAIL: pwd did not return /" && exit 1)
-          grep -q "ci-smoke-ok" shell.log \
+          grep -q "ci-smoke-ok" shell.normalized.log \
             || (echo "FAIL: echo did not roundtrip" && exit 1)
-          grep -q "RacOS version" shell.log \
+          grep -q "RacOS version" shell.normalized.log \
             || (echo "FAIL: cat /proc/version did not return content" && exit 1)
-          grep -q "PHASE21-SIGNAL-TERM-OK" shell.log \
+          grep -q "PHASE21-SIGNAL-TERM-OK" shell.normalized.log \
             || (echo "FAIL: Phase 2.1 signal default-action test did not pass" && exit 1)
-          grep -q "PHASE21-SIGCHLD-WAIT-OK" shell.log \
+          grep -q "PHASE21-SIGCHLD-WAIT-OK" shell.normalized.log \
             || (echo "FAIL: Phase 2.1 SIGCHLD wait test did not pass" && exit 1)
-          grep -q "PHASE21-EXEC-LOOP-OK" shell.log \
+          grep -q "PHASE21-EXEC-LOOP-OK" shell.normalized.log \
             || (echo "FAIL: Phase 2.1 exec-loop cleanup test did not pass" && exit 1)
-          grep -q "POLL-TIMEOUT-OK" shell.log \
+          grep -q "POLL-TIMEOUT-OK" shell.normalized.log \
             || (echo "FAIL: poll timeout test did not pass" && exit 1)
-          grep -q "TTY-IOCTL-OK" shell.log \
+          grep -q "TTY-IOCTL-OK" shell.normalized.log \
             || (echo "FAIL: TTY ioctl state test did not pass" && exit 1)
           echo "Interactive shell PASSED"
 
