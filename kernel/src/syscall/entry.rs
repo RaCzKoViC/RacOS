@@ -108,6 +108,17 @@ unsafe extern "C" fn syscall_entry() {
         //   R9  = arg5 (currently in R8)
         //   [stack] = arg6 (currently in R9)
         "push r9",                          // arg6 on stack
+
+        // Stash &user_rip into PER_CPU.syscall_frame_ptr so signal delivery
+        // (deliver_pending_signals) can patch the saved user RIP/RFLAGS/RSP
+        // before SYSRETQ. The slot order pushed earlier is rcx (RIP), r11
+        // (RFLAGS), gs:[0x08] (RSP), with RIP lowest. After the 10 pushes
+        // above (user_rsp/r11/rcx/rbp/rbx/r12-r15/r9), &user_rip = rsp+56.
+        // RCX is free to clobber here: it was saved by `push rcx` above and
+        // will be reloaded with arg3 by the next mov.
+        "lea rcx, [rsp + 56]",
+        "mov gs:[0x10], rcx",
+
         "mov r9, r8",                       // arg5
         "mov r8, r10",                      // arg4
         "mov rcx, rdx",                     // arg3
@@ -170,16 +181,24 @@ unsafe extern "C" fn syscall_entry() {
 }
 
 /// Per-CPU data structure (minimal, UP only for MVP).
-/// At GS:0x00 = kernel RSP, GS:0x08 = user RSP (scratch).
+/// At GS:0x00 = kernel RSP, GS:0x08 = user RSP scratch,
+/// GS:0x10 = pointer to the saved user RIP slot on the kernel stack
+/// (used by signal delivery to patch the SYSRET return target).
+///
+/// The layout is read directly by the syscall entry asm via fixed offsets,
+/// so this struct MUST stay #[repr(C)] and these three fields MUST keep
+/// their order. Adding more fields after `syscall_frame_ptr` is fine.
 #[repr(C, align(16))]
 pub(crate) struct PerCpuData {
     kernel_rsp: u64,
     user_rsp: u64,
+    syscall_frame_ptr: u64,
 }
 
 pub(crate) static mut PER_CPU: PerCpuData = PerCpuData {
     kernel_rsp: 0,
     user_rsp: 0,
+    syscall_frame_ptr: 0,
 };
 
 /// MSR for kernel GS base (used by SWAPGS).

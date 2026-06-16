@@ -395,12 +395,122 @@ fn collect_user_argv(
 }
 
 // ─────────────────────────────────────────────────
+// Signal delivery — kernel ↔ user-handler bridge
+// ─────────────────────────────────────────────────
+//
+// Mechanics:
+//  * syscall_entry pushes (user RSP, RFLAGS, RIP) onto the kernel stack and
+//    stashes &user_rip into PER_CPU.syscall_frame_ptr (gs:[0x10]). That slot
+//    triple is the [`SyscallFrame`] view used here.
+//  * On delivery, we write a [`UserSignalFrame`] just below the System V red
+//    zone on the user stack, then patch the on-kernel-stack SyscallFrame so
+//    SYSRETQ resumes user mode at the handler with RSP = &UserSignalFrame.
+//  * The userland-side dispatcher (libc-lite `__signal_dispatcher`) reads
+//    `signum` from [RSP+0], invokes the user handler, then issues
+//    `sys_sigreturn`. The kernel restores the saved RIP/RFLAGS/RSP triple
+//    and returns `orig_rax` so the interrupted syscall's caller sees its
+//    pre-signal return value.
+
+/// View over the saved user RIP/RFLAGS/RSP triple on the kernel stack.
+/// Field order MUST match the push sequence in `syscall_entry` (RIP at the
+/// lowest address, then RFLAGS, then user RSP).
+#[repr(C)]
+struct SyscallFrame {
+    user_rip: u64,
+    user_rflags: u64,
+    user_rsp: u64,
+}
+
+/// On-user-stack frame written by the kernel on signal delivery and consumed
+/// by `sys_sigreturn`. Stable ABI shared with libc-lite.
+#[repr(C)]
+struct UserSignalFrame {
+    signum: u64,       // [rsp+0]  read by __signal_dispatcher to dispatch
+    orig_rip: u64,     // [rsp+8]
+    orig_rflags: u64,  // [rsp+16]
+    orig_rsp: u64,     // [rsp+24]
+    orig_rax: u64,     // [rsp+32] pre-signal syscall return value
+    orig_sigmask: u64, // [rsp+40] reserved; always 0 in v0
+    magic: u64,        // [rsp+48] SIG_FRAME_MAGIC; sigreturn rejects others
+    _pad: u64,         // [rsp+56] keeps size at 64 (16-byte aligned)
+}
+
+const SIG_FRAME_MAGIC: u64 = 0x5247_4E49_5F53_4F52; // "ROS_SIGR" little-endian
+const RED_ZONE: u64 = 128;
+
+#[inline]
+unsafe fn read_syscall_frame_ptr() -> u64 {
+    let p: u64;
+    core::arch::asm!(
+        "mov {0}, gs:[0x10]",
+        out(reg) p,
+        options(readonly, nostack, preserves_flags),
+    );
+    p
+}
+
+fn try_deliver_user_handler(
+    sig: crate::task::signal::Signal,
+    handler_addr: u64,
+    raw_result: i64,
+) -> bool {
+    let frame_ptr = unsafe { read_syscall_frame_ptr() };
+    if frame_ptr == 0 {
+        return false;
+    }
+    let frame = unsafe { &mut *(frame_ptr as *mut SyscallFrame) };
+
+    let user_rsp = frame.user_rsp;
+    let frame_size = core::mem::size_of::<UserSignalFrame>() as u64;
+
+    // Skip the red zone, carve frame_size, align down to 16 bytes so the
+    // user-mode dispatcher hits the C ABI's pre-call alignment.
+    let after_red_zone = match user_rsp.checked_sub(RED_ZONE) {
+        Some(v) => v,
+        None => return false,
+    };
+    let frame_addr = match after_red_zone.checked_sub(frame_size) {
+        Some(v) => v & !0xFu64,
+        None => return false,
+    };
+    if frame_addr == 0 {
+        return false;
+    }
+    if validate_user_ptr(frame_addr, frame_size as usize).is_err() {
+        return false;
+    }
+
+    let usf = UserSignalFrame {
+        signum: sig as u64,
+        orig_rip: frame.user_rip,
+        orig_rflags: frame.user_rflags,
+        orig_rsp: frame.user_rsp,
+        orig_rax: raw_result as u64,
+        orig_sigmask: 0,
+        magic: SIG_FRAME_MAGIC,
+        _pad: 0,
+    };
+
+    // SAFETY: syscall_entry already issued STAC, so SMAP allows this write.
+    // The destination range has been bounds-checked by validate_user_ptr.
+    unsafe {
+        core::ptr::write(frame_addr as *mut UserSignalFrame, usf);
+    }
+
+    frame.user_rip = handler_addr;
+    frame.user_rsp = frame_addr;
+    true
+}
+
+// ─────────────────────────────────────────────────
 // Syscall 0: sys_exit
 // ─────────────────────────────────────────────────
 /// Deliver any pending signals for the current task.
 /// Called at the end of every syscall before returning to user space.
-pub fn deliver_pending_signals() {
-    use crate::task::signal::SignalAction;
+/// Threads `raw_result` through so a user-handler delivery can preserve
+/// the interrupted syscall's RAX (restored by sys_sigreturn).
+pub fn deliver_pending_signals(raw_result: i64) -> i64 {
+    use crate::task::signal::{SignalAction, SignalState, SIG_DFL, SIG_IGN};
     loop {
         // SAFETY: disabling interrupts while accessing the scheduler.
         let sig = unsafe {
@@ -410,20 +520,46 @@ pub fn deliver_pending_signals() {
             s
         };
         let sig = match sig {
-            None => break,
+            None => return raw_result,
             Some(s) => s,
         };
-        match crate::task::signal::SignalState::default_action(sig) {
-            SignalAction::Terminate => {
-                sys_exit(-1);
-            }
-            SignalAction::Ignore => {}
-            SignalAction::Stop => unsafe {
-                core::arch::asm!("cli", options(nomem, nostack));
-                crate::task::scheduler::block_and_reschedule();
+
+        let handler = unsafe {
+            crate::task::scheduler::with_current_task(|t| t.signals.get_handler(sig as u8))
+                .unwrap_or(SIG_DFL)
+        };
+
+        match handler {
+            SIG_IGN => continue,
+            SIG_DFL => match SignalState::default_action(sig) {
+                SignalAction::Terminate => {
+                    sys_exit(-1);
+                }
+                SignalAction::Ignore => continue,
+                SignalAction::Stop => unsafe {
+                    core::arch::asm!("cli", options(nomem, nostack));
+                    crate::task::scheduler::block_and_reschedule();
+                },
+                SignalAction::Continue => continue,
             },
-            SignalAction::Continue => {
-                // Task is already running; nothing to do.
+            user_handler => {
+                if try_deliver_user_handler(sig, user_handler, raw_result) {
+                    // One user-handler delivery per syscall return; any
+                    // remaining pending signals wait for the next return
+                    // path. Return value is moot — the dispatcher will
+                    // clobber RAX before user code sees it.
+                    return raw_result;
+                }
+                // Delivery failed (e.g. user stack unmapped). Fall back to
+                // the signal's default action.
+                match SignalState::default_action(sig) {
+                    SignalAction::Terminate => sys_exit(-1),
+                    SignalAction::Stop => unsafe {
+                        core::arch::asm!("cli", options(nomem, nostack));
+                        crate::task::scheduler::block_and_reschedule();
+                    },
+                    SignalAction::Ignore | SignalAction::Continue => continue,
+                }
             }
         }
     }
@@ -2003,10 +2139,35 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SyscallRes
 // Syscall 28: sys_sigreturn
 // ─────────────────────────────────────────────────
 
-/// Return from a signal handler (restores pre-signal context).
-/// For now, this is a stub — signal delivery is default-action only.
+/// Return from a signal handler. The userland dispatcher invokes this with
+/// RSP still pointing at the `UserSignalFrame` the kernel wrote on delivery.
+/// We validate the magic, restore the saved RIP/RFLAGS/RSP into the
+/// SyscallFrame so SYSRETQ resumes the pre-signal user context, and return
+/// `orig_rax` so the interrupted syscall's caller sees the value it would
+/// have observed had no signal been pending.
 pub fn sys_sigreturn() -> SyscallResult {
-    Err(SyscallError::ENOSYS)
+    let frame_ptr = unsafe { read_syscall_frame_ptr() };
+    if frame_ptr == 0 {
+        return Err(SyscallError::EFAULT);
+    }
+    let frame = unsafe { &mut *(frame_ptr as *mut SyscallFrame) };
+
+    let usf_addr = frame.user_rsp;
+    let usf_size = core::mem::size_of::<UserSignalFrame>();
+    validate_user_ptr(usf_addr, usf_size)?;
+
+    // SAFETY: address+size are bounds-checked above, STAC is active.
+    let usf: UserSignalFrame = unsafe { core::ptr::read(usf_addr as *const UserSignalFrame) };
+
+    if usf.magic != SIG_FRAME_MAGIC {
+        return Err(SyscallError::EFAULT);
+    }
+
+    frame.user_rip = usf.orig_rip;
+    frame.user_rflags = usf.orig_rflags;
+    frame.user_rsp = usf.orig_rsp;
+
+    Ok(usf.orig_rax as i64)
 }
 
 // ─────────────────────────────────────────────────
