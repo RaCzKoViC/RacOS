@@ -268,6 +268,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-ps"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-rm"
 version = "0.1.0"
 dependencies = [
