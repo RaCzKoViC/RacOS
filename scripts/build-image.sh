@@ -75,8 +75,8 @@ COREUTILS=(
     racos-rm racos-sleep racos-head racos-tail racos-env racos-basename
     racos-dirname racos-grep racos-cp racos-mv racos-cut racos-uniq
     racos-find racos-od racos-ps racos-sed racos-awk racos-id racos-sort
-    racos-top racos-touch racos-chmod racos-chown racos-tee racos-hexdump
-    racterm rpkg-bin
+    racos-top racos-touch racos-chmod racos-chown racos-kill racos-whoami
+    racos-uname racos-tee racos-hexdump racterm rpkg-bin
 )
 for pkg in "${COREUTILS[@]}"; do
     # racterm gates its [[bin]] behind a required-feature so
@@ -110,7 +110,7 @@ mkdir -p "$INITRAMFS_ROOT/etc"
 BIN_LIST=(
     hello echo cat true false sh racterm racos-test ls wc uptime mkdir
     rm sleep head tail env basename dirname grep cp mv cut uniq find od ps
-    sed awk id sort top touch chmod chown tee hexdump rpkg
+    sed awk id sort top touch chmod chown kill whoami uname tee hexdump rpkg
 )
 SBIN_LIST=(init)
 
