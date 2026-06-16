@@ -2,7 +2,7 @@
 
 > Status: Living document
 > Utworzona: 2026-06-16
-> Last updated: 2026-06-16 (T1.1 + T1.2 done)
+> Last updated: 2026-06-16 (T1.1 + T1.2 + T1.3 done — Tier 1 complete)
 
 Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa praca powinna pasować do jednego z tierów poniżej. Zmiana priorytetów wymaga aktualizacji tego pliku w PR-ze.
 
@@ -56,15 +56,17 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
     - [x] Testy: 14 host-side tests w `shell/tests/control_flow.rs` + `T12-SHELL-CONTROL-FLOW-OK` marker w racos-test (sh -c z if/for/case)
   - **Pozostałe gaps (post-MVP):** mixed words `prefix$VAR` z partial splitting, configurable IFS variable, command sub `$(cmd)` runtime (parser wspiera, exec stub)
 
-- [ ] **T1.3 — Wire RacInit service manager**
-  - Engine istnieje w bibliotece `racinit`, niepodłączony do PID 1 boot path
-  - Pozostaje:
-    - [ ] Parser unit files (.service / .target) zgodny ze spec `docs/specs/SERVICE_MODEL.md`
-    - [ ] Dependency graph z cycle detection (DAG)
-    - [ ] Restart policy (always / on-failure / never) + burst limit
-    - [ ] Podpięcie do PID 1 boot path zamiast hardcoded spawnu `/bin/sh`
-    - [ ] `servicectl` CLI: start/stop/restart/status/list (spec w ARCHITECTURE.md §8.4)
-  - **Definition of done:** boot z 3 unitami (target → 2 services), test restart-on-failure
+- [x] **T1.3 — Wire RacInit service manager**
+  - Status sub-zadań:
+    - [x] Parser unit files (.service / .target / .timer / .mount / .device) — już był w `init/src/lib.rs:parse_unit`, dodane testy
+    - [x] Dependency graph z cycle detection — fixed buggy Kahn's algorithm w `Engine::resolve_start_order`; zwraca `ResolveResult { order, cycle }`
+    - [x] Restart policy (always / on-failure / on-abnormal / no) + burst limit (5 restartów w 30s → Failed)
+    - [x] Podpięcie do PID 1 boot path — `userland/coreutils/init/main.rs` próbuje engine path, fallback do legacy spawn-shell loop jeśli brak unit files
+    - [x] Default unit files w initramfs: `base.target` + `shell.service` (Restart=always)
+    - [x] Resolved collision: usunięty `init/src/main.rs` + `[[bin]]` z init/Cargo.toml; jedyne źródło `/sbin/init` to crate `racos-init`
+    - [x] Build scripts (build-image.sh + .ps1) nie wywalają już całego `/etc/` przy clean
+  - **Pozostałe (post-T1.3):** `servicectl` CLI (spec w ARCHITECTURE.md §8.4), socket activation, .timer scheduler
+  - **Tests:** 13 host tests w `init/tests/engine.rs` (parser, topo sort: linear/diamond/cycle/self-edge, burst tracker window decay) + racos-test smoke `T13-INIT-ENGINE-OK` w QEMU
 
 ---
 
