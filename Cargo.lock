@@ -311,6 +311,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-sort"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-sync"
 version = "0.1.0"
 dependencies = [
@@ -333,6 +340,13 @@ dependencies = [
 
 [[package]]
 name = "racos-test"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-top"
 version = "0.1.0"
 dependencies = [
  "libc-lite",

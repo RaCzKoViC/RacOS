@@ -113,6 +113,9 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_rpkg_install_list_remove();
     test_sed_substitute();
     test_awk_basic();
+    test_id_prints_creds();
+    test_sort_orders_lines();
+    test_top_prints_snapshot();
     test_env_inherits_shell_vars();
     test_exec_loop_memory_cleanup();
     test_tty_ioctl_state();
@@ -748,6 +751,55 @@ fn test_awk_basic() {
 
     if a1 == Some(0) && a2 == Some(0) && a3 == Some(0) && a4 == Some(0) {
         println("T33-AWK-OK");
+    }
+}
+
+/// Smoke for /bin/id (v0.2 §2.1 easy-win). id prints uid/gid/euid/egid in
+/// the format `uid=N gid=N euid=N egid=N`. The test crate runs as root
+/// (PID 1's child) so every value is 0. We assert exit 0 + the output
+/// contains the `uid=` prefix.
+fn test_id_prints_creds() {
+    println("\n[test] /bin/id prints creds");
+
+    let s = shell_run(
+        b"result=$(/bin/id); \
+          case $result in uid=*) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("id output starts with uid=", s == Some(0));
+    if s == Some(0) {
+        println("T20-ID-OK");
+    }
+}
+
+/// Smoke for /bin/sort (v0.2 §2.1 easy-win). Pipes three lines in reverse
+/// order through sort, asserts the output is alphabetically sorted.
+fn test_sort_orders_lines() {
+    println("\n[test] /bin/sort orders lines");
+
+    // Forward sort: c/b/a → a/b/c. case-match the joined output.
+    let s = shell_run(
+        b"result=$(printf 'c\\nb\\na\\n' | /bin/sort); \
+          case $result in a*b*c) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("sort produces a b c", s == Some(0));
+    if s == Some(0) {
+        println("T20-SORT-OK");
+    }
+}
+
+/// Smoke for /bin/top (v0.2 §2.1 easy-win). Batch mode: prints the
+/// `top - RacOS` header and a process table, then exits. We assert
+/// exit 0 + the header is in the output.
+fn test_top_prints_snapshot() {
+    println("\n[test] /bin/top prints batch snapshot");
+
+    let s = shell_run(
+        b"result=$(/bin/top); \
+          case $result in *top\\ -\\ RacOS*) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("top output contains the header line", s == Some(0));
+    if s == Some(0) {
+        println("T20-TOP-OK");
     }
 }
 

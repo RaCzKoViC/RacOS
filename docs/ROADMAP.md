@@ -61,9 +61,14 @@ BIN_LIST, write smoke):
 
 | Tool | Status | Smoke marker |
 |---|---|---|
-| `id` | crate has `src/`, not shipping | `T20-ID-OK` |
-| `sort` | crate has `src/`, not shipping | `T20-SORT-OK` |
-| `top` | crate skeleton only (no src) | `T20-TOP-OK` after MVP rewrite |
+| `id` | ✅ shipped (v0.2 §2.1) | `T20-ID-OK` |
+| `sort` | ✅ shipped (v0.2 §2.1) | `T20-SORT-OK` |
+| `top` | ✅ shipped (v0.2 §2.1, batch mode) | `T20-TOP-OK` |
+
+Interactive `top` (live refresh, signal-driven redraw, alternate screen
+buffer) is post-MVP — today the binary is the moral equivalent of `top
+-b -n 1` on Linux: prints uptime + the same per-PID table `ps` emits,
+then exits. The CI smoke is much simpler that way.
 
 **Net-new**:
 
