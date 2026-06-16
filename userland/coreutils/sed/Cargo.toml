@@ -8,4 +8,4 @@ name = "sed"
 path = "src/main.rs"
 
 [dependencies]
-libc-lite = { path = "../../../../libs/libc-lite" }
+libc-lite = { path = "../../../libs/libc-lite", features = ["alloc"] }
