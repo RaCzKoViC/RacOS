@@ -181,8 +181,10 @@ jobs:
           # the second QEMU run unable to load Boot0002 ("Load Error"
           # → falls through to PXE). `fat:ro:esp` is rejected by QEMU
           # 8.2 ("Block node is read-only"). A pre-baked image gives us
-          # stable, deterministic content across both boots.
-          truncate -s 64M esp.img
+          # stable, deterministic content across both boots. Size sweet
+          # spot: 256 MiB is enough for kernel + ~100 MiB initramfs +
+          # FAT overhead, and FAT32 needs a sane volume size anyway.
+          truncate -s 256M esp.img
           mkfs.vfat -F 32 -n RACOS-ESP esp.img > /dev/null
           mmd -i esp.img ::/EFI
           mmd -i esp.img ::/EFI/BOOT
