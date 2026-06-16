@@ -26,10 +26,13 @@ RacOS is an original operating system with a layered architecture inspired by Ub
 
 | Layer | Language | Rationale |
 |-------|----------|-----------|
-| Kernel core | Rust | Memory safety, zero-cost abstractions |
-| Arch stubs, boot, context switch | x86_64 assembly | Hardware interface requirements |
-| Userland (phase 1) | C17 | Lightweight, libc-lite compatible |
-| Userland (phase 2) | Rust (optional) | After ABI stabilization |
+| Kernel core | Rust `#![no_std]` | Memory safety, zero-cost abstractions |
+| Arch stubs, boot, context switch, AP trampoline, naked entry stubs | x86_64 assembly | Hardware interface requirements |
+| Bootloader | Rust (`x86_64-unknown-uefi`) | UEFI firmware contract via the `uefi` crate |
+| Userland (init, shell, terminal, coreutils, rpkg) | Rust `#![no_std]` on libc-lite | Skipped the originally-planned C17 phase outright — see ADR-003 |
+| libc-lite | Rust crate of inline-asm `syscall` wrappers | Exposes a C ABI surface so future C code can link against it, but the wrappers themselves are Rust |
+
+ADR-003 originally treated C17 as the userland-phase-1 language and Rust as a phase-2 follow-up. In practice phase 1 was skipped — every shipped binary in `/bin/` and `/sbin/` is Rust `#![no_std]` calling libc-lite directly. The C ABI surface is preserved on libc-lite so a future C port has a target, but nothing in tree uses C yet.
 
 ## 2. Layered Architecture
 

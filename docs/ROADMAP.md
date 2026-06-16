@@ -145,10 +145,14 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
   - Każdy `unsafe { ... }` musi mieć WHY / INVARIANT / FAILURE / TESTED BY
   - Wymaga grep `unsafe` + uzupełnień + ewentualnie clippy lint custom
 
-- [ ] **T4.3 — Synchronizacja ADR/spec z kodem**
-  - `ARCHITECTURE.md` §1.3 (Rust vs C17) — aktualizacja
-  - ADR-006 (process/thread model), ADR-007 (scheduler), ADR-014 (TTY/PTTY) — audyt po Tier 1
-  - CHANGELOG.md → wprowadzić, prowadzić od następnej minor
+- [x] **T4.3 — Synchronizacja ADR/spec z kodem** (first pass)
+  - `ARCHITECTURE.md` §1.3 — language-stack table rewritten in place. C17 userland phase 1 was skipped outright; every shipped binary is Rust `#![no_std]` on libc-lite. New table separately calls out the bootloader (Rust UEFI), the asm extents (boot stub, syscall entry, AP trampoline, naked sigreturn helpers), and libc-lite as the Rust crate that *also* exposes a C ABI surface.
+  - **ADR-003 (language stack)** — added "Implementation status (2026-06-16)" section noting userland phase 1 was skipped, `clang/lld` aren't used, and CI runs a single Cargo toolchain.
+  - **ADR-006 (process/thread model)** — added implementation status: `sys_fork` (#26), `sys_clone` (#77), `sys_exec` (#11), `sys_wait`/`sys_waitpid` (#13/#63) are all wired. Orphan reparenting + SIGCHLD-on-exit shipped in PRs #5/#6. The "POSIX patterns won't work initially" caveat is outdated.
+  - **ADR-007 (scheduler MVP)** — added implementation status: PR #14 shipped AP bring-up, per-CPU GS + LAPIC timers, `/proc/cpuinfo` enumeration, CI `-smp 4`. Per-CPU run queues + IPI preemption still on the scheduler-refactor TODO.
+  - **ADR-008 (memory model)** — added note: huge pages stay kernel-internal (identity map only), CoW is still TODO so every `sys_fork` pays a full page-table-copy cost.
+  - Lighter check on ADRs 001/002/004/005/009-013/015-020 didn't surface blatant drift.
+  - **Pozostałe (deferred):** sample ADRs 009/011/013/018/019 deeper once the relevant subsystems get follow-up work. `CHANGELOG.md` introduction still pending.
 
 ---
 

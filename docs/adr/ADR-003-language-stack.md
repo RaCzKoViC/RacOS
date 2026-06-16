@@ -39,3 +39,15 @@ The OS requires languages suitable for kernel development (hardware access, zero
 ## Rollback
 
 Language choice is deeply embedded. Changing kernel language would be a rewrite. Changing userland language is lower cost due to ABI boundary.
+
+## Implementation status (2026-06-16)
+
+The original decision treated C17 as the userland-phase-1 language. In practice, RacOS skipped that phase entirely — every userland binary shipped (`/bin/sh`, `/bin/ls`, ..., `/bin/ps`, `/bin/sed`, `/bin/rpkg`, `/sbin/init`, `/bin/racterm`, `/bin/racos-test`) is Rust `#![no_std] #![no_main]` calling `libc-lite` (a Rust crate of inline-asm syscall wrappers, not a C library).
+
+Concrete drift from the §Decision section:
+* **Userland phase 1**: Rust no_std, not C17. C was never bootstrapped.
+* **Build tools**: Cargo + nasm only. `clang/lld` aren't used anywhere in the workspace — Rust links via `rust-lld`.
+* **CI toolchains**: one (Cargo). No C build job.
+* **Cross-language FFI**: the kernel/user boundary is still the syscall ABI, but both sides are Rust. The only intra-language non-Rust code is x86_64 asm (boot stub, syscall entry, AP trampoline, naked dispatcher/sigreturn helpers).
+
+The original "Userland phase 2: Optionally Rust" milestone is therefore already satisfied. C as an alternative remains available via `libc-lite` exposing a stable C ABI (see ARCHITECTURE.md §1.3), but nothing in tree uses it yet.

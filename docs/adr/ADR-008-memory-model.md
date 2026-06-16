@@ -50,3 +50,9 @@ Memory management is foundational. The physical allocator, virtual memory manage
 ## Rollback
 
 Allocator upgrade (bitmap → buddy) is internal; no ABI or API change.
+
+## Implementation status (2026-06-16)
+
+* **Frame size**: still 4 KiB only for user mappings. The kernel identity map uses 2 MiB / 1 GiB pages and `kernel/src/mm/virt.rs` can split them down to 4 KiB on demand, but huge pages are not exposed to user-space mmap yet.
+* **Copy-on-write**: still TODO. `sys_fork` (ADR-006) ships with a full per-process page-table copy — every fork pays the up-front cost. CoW is the obvious next optimisation once fork shows up in profiles.
+* **OOM handling**: physical allocator returns `Err` and the syscall path translates it; no overcommit / OOM killer.
