@@ -2,7 +2,7 @@
 
 > Status: Living document
 > Utworzona: 2026-06-16
-> Last updated: 2026-06-16
+> Last updated: 2026-06-16 (T1.1 + T1.2 done)
 
 Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa praca powinna pasować do jednego z tierów poniżej. Zmiana priorytetów wymaga aktualizacji tego pliku w PR-ze.
 
@@ -37,25 +37,24 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
 
 > 1–2 cykle pracy. Te trzy są ze sobą sprzężone: sygnały odblokowują job control w shellu, scripting odblokowuje sensowne unit files, service manager odblokowuje wieloprocesową przestrzeń użytkownika. Po nich RacOS przestaje być "boot demo" a staje się rozwijalnym systemem.
 
-- [ ] **T1.1 — Dokończyć Phase 2 (signals + cleanup)**
-  - Częściowo zrobione w PR #5 (close fds on exit, SIGCHLD do parenta, ioctl routing)
-  - Pozostaje:
-    - [ ] VDSO sigreturn trampoline (jednostronicowa mapa w userspace)
-    - [ ] Push `SignalFrame` na user stack przy delivery
-    - [ ] Redirect RIP do user handlera w `deliver_pending_signals` (`kernel/src/syscall/handlers.rs` ok. linii 390)
-    - [ ] `sys_sigreturn` restoring context (`kernel/src/syscall/handlers.rs:1896`)
-    - [ ] `sigaction` w `libs/libc-lite`
-  - **Definition of done:** integration test odpalający user handler dla SIGINT przez sleep+kill, drugi test wracający z handlera przez sigreturn
+- [x] **T1.1 — Dokończyć Phase 2 (signals + cleanup)** — zmergowane w PR #6
+  - PR #5 dał: close fds on exit, SIGCHLD do parenta, ioctl routing
+  - PR #6 dodał:
+    - [x] User-handler delivery via `PER_CPU.syscall_frame_ptr` (gs:[0x10]) + on-stack `UserSignalFrame`
+    - [x] `sys_sigreturn` przywraca orig_rip/rflags/rsp/rax z `UserSignalFrame`
+    - [x] libc-lite `signal()` + `__signal_dispatcher` (naked) — bridge kernel→user handler bez modyfikacji SYSRET path
+    - [x] 2 integration testy w racos-test: `PHASE21-USER-HANDLER-OK` + `PHASE21-USER-HANDLER-REENTRANT-OK`
 
-- [ ] **T1.2 — Shell scripting w racsh**
-  - Parser już ma AST, brakuje runtime + parameter expansion
-  - Pozostaje:
-    - [ ] Runtime dla `if/then/elif/else/fi`, `while/do/done`, `for ... in ... do ... done`, `case/esac`
-    - [ ] Parameter expansion: `$?`, `$0..$9`, `$#`, `$@`, `$*`, `${VAR}`, `${VAR:-default}`
-    - [ ] `source` (alias `.`) — ładowanie skryptu w bieżącym shellu
-    - [ ] Invokacja `sh script.sh` z pliku (pełen lifecycle: open, read, parse, exec)
-    - [ ] Field splitting (word splitting) po expansion
-  - **Definition of done:** golden test suite skryptów (smoke `hello.sh`, control flow, expansion edge cases)
+- [x] **T1.2 — Shell scripting w racsh**
+  - Parser już miał AST, exec runtime też (if/while/for/case/function); dodano brakujące kawałki + testy
+  - Status sub-zadań:
+    - [x] Runtime dla `if/then/elif/else/fi`, `while/do/done`, `for ... in ... do ... done`, `case/esac` (już było w `shell/src/exec.rs`)
+    - [x] Parameter expansion: `$?`, `$0..$9`, `$#`, `$@`, `$*`, `${VAR}`, `${VAR:-default}`, `${VAR:+w}`, `${VAR:?e}`, `${#VAR}` (już było w `shell/src/expand.rs`)
+    - [x] `source` (alias `.`) — ładowanie skryptu w bieżącym shellu (`shell/src/builtin.rs:builtin_source`, `run_source_in_env`)
+    - [x] Invokacja `sh script.sh` z pliku — już była w `userland/coreutils/sh/src/main.rs`
+    - [x] Field splitting — unquoted `$VAR` / `${VAR}` / `$(cmd)` split na IFS w `expand_word_list`; kwotowane `"$VAR"` nie split
+    - [x] Testy: 14 host-side tests w `shell/tests/control_flow.rs` + `T12-SHELL-CONTROL-FLOW-OK` marker w racos-test (sh -c z if/for/case)
+  - **Pozostałe gaps (post-MVP):** mixed words `prefix$VAR` z partial splitting, configurable IFS variable, command sub `$(cmd)` runtime (parser wspiera, exec stub)
 
 - [ ] **T1.3 — Wire RacInit service manager**
   - Engine istnieje w bibliotece `racinit`, niepodłączony do PID 1 boot path
