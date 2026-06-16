@@ -100,7 +100,7 @@ default-members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "Proprietary"
+license = "Apache-2.0"
 repository = ""
 
 # Workspace-wide lint policy. Packages opt in via `[lints] workspace = true`

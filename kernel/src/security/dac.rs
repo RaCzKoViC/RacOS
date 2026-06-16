@@ -13,6 +13,11 @@ pub enum Access {
 #[inline]
 pub fn can_access(creds: &Credentials, meta: &InodeMetadata, access: Access) -> bool {
     if crate::security::capability::has_cap(creds, crate::security::capability::CAP_DAC_OVERRIDE) {
+        if matches!(access, Access::Execute)
+            && meta.file_type == crate::vfs::inode::FileType::Regular
+        {
+            return (meta.mode.0 & 0o111) != 0;
+        }
         return true;
     }
 

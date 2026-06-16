@@ -21,6 +21,8 @@ const TIOCGPGRP: u32 = 0x540F;
 const TIOCSPGRP: u32 = 0x5410;
 const EXEC_LOOP_ITERS: u32 = 50;
 const MEMFREE_LEAK_TOLERANCE_KB: u32 = 256;
+const POLL_TIMEOUT_MS: i32 = 25;
+const POLL_TIMEOUT_MIN_MS: u64 = 15;
 
 #[repr(C)]
 struct StatBuf {
@@ -97,6 +99,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_open_nonexistent();
     test_pipe();
     test_dup();
+    test_poll_timeout();
     test_spawn_wait();
     test_signal_default_terminate();
     test_sigchld_waitpid();
@@ -231,6 +234,38 @@ fn test_dup() {
     }
 }
 
+fn test_poll_timeout() {
+    println("\n[test] poll timeout");
+
+    let before = monotonic_ms();
+    check!("clock_gettime before poll", before.is_some());
+    let before = match before {
+        Some(value) => value,
+        None => return,
+    };
+
+    let mut fds: [PollFd; 0] = [];
+    let ret = poll(&mut fds, POLL_TIMEOUT_MS);
+    check!("poll([]) returns Ok", ret.is_ok());
+    check!("poll([]) returns timeout", ret.unwrap_or(-1) == 0);
+
+    let after = monotonic_ms();
+    check!("clock_gettime after poll", after.is_some());
+    if let Some(after) = after {
+        let elapsed = after.saturating_sub(before);
+        print("  poll elapsed=");
+        print_u32(elapsed as u32);
+        println(" ms");
+        check!(
+            "poll([]) waits at least minimum timeout",
+            elapsed >= POLL_TIMEOUT_MIN_MS
+        );
+        if ret.unwrap_or(-1) == 0 && elapsed >= POLL_TIMEOUT_MIN_MS {
+            println("POLL-TIMEOUT-OK");
+        }
+    }
+}
+
 fn test_spawn_wait() {
     println("\n[test] spawn/wait");
     let pid = spawn(b"/bin/true\0");
@@ -240,6 +275,21 @@ fn test_spawn_wait() {
         let ret = wait(&mut status);
         check!("wait returns child pid", ret.is_ok());
         check!("child exit status is 0", status == 0);
+    }
+}
+
+fn monotonic_ms() -> Option<u64> {
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    match clock_gettime(CLOCK_MONOTONIC, &mut ts) {
+        Ok(()) => Some(
+            ts.tv_sec
+                .saturating_mul(1000)
+                .saturating_add(ts.tv_nsec / 1_000_000),
+        ),
+        Err(_) => None,
     }
 }
 

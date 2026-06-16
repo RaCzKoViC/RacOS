@@ -2039,7 +2039,33 @@ pub fn sys_poll(fds_ptr: *mut u8, nfds: u32, timeout_ms: i32) -> SyscallResult {
         validate_user_ptr(fds_ptr as u64, size)?;
     }
 
-    // Simple implementation: check all fds once, mark readable/writable.
+    let ready = poll_once(fds_ptr, nfds);
+    if ready != 0 || timeout_ms == 0 {
+        return Ok(ready);
+    }
+
+    if timeout_ms < 0 {
+        loop {
+            crate::task::scheduler::yield_now();
+            let ready = poll_once(fds_ptr, nfds);
+            if ready != 0 {
+                return Ok(ready);
+            }
+        }
+    }
+
+    let deadline = crate::interrupts::pit::uptime_ms().saturating_add(timeout_ms as u64);
+    while crate::interrupts::pit::uptime_ms() < deadline {
+        crate::task::scheduler::yield_now();
+        let ready = poll_once(fds_ptr, nfds);
+        if ready != 0 {
+            return Ok(ready);
+        }
+    }
+    Ok(0)
+}
+
+fn poll_once(fds_ptr: *mut u8, nfds: u32) -> i64 {
     let mut ready = 0i64;
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
@@ -2074,9 +2100,7 @@ pub fn sys_poll(fds_ptr: *mut u8, nfds: u32, timeout_ms: i32) -> SyscallResult {
         }
         core::arch::asm!("sti", options(nomem, nostack));
     }
-
-    let _ = timeout_ms; // TODO: blocking poll with timeout
-    Ok(ready)
+    ready
 }
 
 // ─────────────────────────────────────────────────

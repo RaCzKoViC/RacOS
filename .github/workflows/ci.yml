@@ -376,6 +376,8 @@ jobs:
             || (echo "FAIL: Phase 2.1 SIGCHLD wait test did not pass" && exit 1)
           grep -q "PHASE21-EXEC-LOOP-OK" shell.log \
             || (echo "FAIL: Phase 2.1 exec-loop cleanup test did not pass" && exit 1)
+          grep -q "POLL-TIMEOUT-OK" shell.log \
+            || (echo "FAIL: poll timeout test did not pass" && exit 1)
           grep -q "TTY-IOCTL-OK" shell.log \
             || (echo "FAIL: TTY ioctl state test did not pass" && exit 1)
           echo "Interactive shell PASSED"
