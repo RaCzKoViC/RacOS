@@ -3,9 +3,19 @@ name = "racterm"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+# Build the racterm PTY-session binary. Off by default so `cargo test
+# -p racterm` on the host doesn't drag in libc-lite's _start /
+# panic_handler (which need a bare-metal target). Build scripts
+# (build-image.sh / .ps1) enable this for the x86_64-unknown-none
+# userland build.
+bin-target = []
+
 [[bin]]
 name = "racterm"
 path = "src/main.rs"
+required-features = ["bin-target"]
 
 [dependencies]
 libc-lite = { path = "../libs/libc-lite", features = ["alloc"] }
