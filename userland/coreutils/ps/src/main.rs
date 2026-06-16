@@ -27,39 +27,41 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
     let _ = libc_lite::write(1, b"  PID   PPID  STATE     NAME\n");
 
+    // sys_getdents in the current kernel emits ALL entries on a single
+    // call (no cursor / position state — see
+    // kernel/src/syscall/handlers.rs:sys_getdents). Looping over getdents
+    // would re-emit the same entries forever and hang the process. Match
+    // ls's pattern: one call, parse the whole buffer, done.
     let mut buf = [0u8; 4096];
-    loop {
-        let n = match libc_lite::getdents(fd, &mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(_) => {
-                let _ = libc_lite::write(2, b"ps: getdents failed\n");
-                let _ = libc_lite::close(fd);
-                return 1;
-            }
-        };
-
-        // Kernel dirent layout (kernel/src/syscall/handlers.rs:sys_getdents):
-        //   [0..8)   ino: u64 LE
-        //   [8]      file_type: u8  (currently always 0 — kernel-side bug
-        //                            where FileType::Directory = 0o040000
-        //                            gets truncated to u8 = 0; rely on the
-        //                            name being numeric instead)
-        //   [9]      name_len: u8
-        //   [10..]   name bytes (name_len of them)
-        let mut off = 0usize;
-        while off + 10 <= n {
-            let name_len = buf[off + 9] as usize;
-            let entry_size = 10 + name_len;
-            if off + entry_size > n {
-                break;
-            }
-            let name = &buf[off + 10..off + 10 + name_len];
-            if let Some(pid) = parse_pid(name) {
-                print_process_info(pid);
-            }
-            off += entry_size;
+    let n = match libc_lite::getdents(fd, &mut buf) {
+        Ok(n) => n,
+        Err(_) => {
+            let _ = libc_lite::write(2, b"ps: getdents failed\n");
+            let _ = libc_lite::close(fd);
+            return 1;
         }
+    };
+
+    // Kernel dirent layout:
+    //   [0..8)   ino: u64 LE
+    //   [8]      file_type: u8  (currently always 0 — kernel-side bug
+    //                            where FileType::Directory = 0o040000
+    //                            gets truncated to u8 = 0; rely on the
+    //                            name being numeric instead)
+    //   [9]      name_len: u8
+    //   [10..]   name bytes (name_len of them)
+    let mut off = 0usize;
+    while off + 10 <= n {
+        let name_len = buf[off + 9] as usize;
+        let entry_size = 10 + name_len;
+        if off + entry_size > n {
+            break;
+        }
+        let name = &buf[off + 10..off + 10 + name_len];
+        if let Some(pid) = parse_pid(name) {
+            print_process_info(pid);
+        }
+        off += entry_size;
     }
 
     let _ = libc_lite::close(fd);
