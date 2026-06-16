@@ -15,6 +15,10 @@ const O_RDWR: u32 = 0x0002;
 const O_CREAT: u32 = 0x0040;
 const O_TRUNC: u32 = 0x0200;
 const SIGTERM: i32 = 15;
+const TIOCGWINSZ: u32 = 0x5413;
+const TIOCSWINSZ: u32 = 0x5414;
+const TIOCGPGRP: u32 = 0x540F;
+const TIOCSPGRP: u32 = 0x5410;
 const EXEC_LOOP_ITERS: u32 = 50;
 const MEMFREE_LEAK_TOLERANCE_KB: u32 = 256;
 
@@ -97,6 +101,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_signal_default_terminate();
     test_sigchld_waitpid();
     test_exec_loop_memory_cleanup();
+    test_tty_ioctl_state();
     test_chdir_getcwd();
     test_security_syscalls();
 
@@ -396,6 +401,59 @@ fn parse_memfree_kb(buf: &[u8]) -> Option<u32> {
         i += 1;
     }
     None
+}
+
+fn test_tty_ioctl_state() {
+    println("\n[test] TTY ioctl state");
+
+    let master_fd = open(b"/dev/ptmx\0", O_RDWR, 0);
+    check!("open /dev/ptmx", master_fd.is_ok());
+    let slave_fd = open(b"/dev/pts0\0", O_RDWR, 0);
+    check!("open /dev/pts0", slave_fd.is_ok());
+
+    let (master_fd, slave_fd) = match (master_fd, slave_fd) {
+        (Ok(master_fd), Ok(slave_fd)) => (master_fd, slave_fd),
+        (Ok(master_fd), Err(_)) => {
+            let _ = close(master_fd);
+            return;
+        }
+        (Err(_), Ok(slave_fd)) => {
+            let _ = close(slave_fd);
+            return;
+        }
+        (Err(_), Err(_)) => return,
+    };
+
+    let bad_ws = [0u16, 80u16];
+    let bad_resize = ioctl(master_fd, TIOCSWINSZ, bad_ws.as_ptr() as u64);
+    check!("TIOCSWINSZ rejects zero rows", bad_resize.is_err());
+
+    let new_ws = [40u16, 100u16];
+    let resize = ioctl(master_fd, TIOCSWINSZ, new_ws.as_ptr() as u64);
+    check!("TIOCSWINSZ on /dev/ptmx", resize.is_ok());
+
+    let mut got_ws = [0u16; 2];
+    let get_ws = ioctl(slave_fd, TIOCGWINSZ, got_ws.as_mut_ptr() as u64);
+    check!("TIOCGWINSZ on /dev/pts0", get_ws.is_ok());
+    check!("winsize round-trip rows", got_ws[0] == new_ws[0]);
+    check!("winsize round-trip cols", got_ws[1] == new_ws[1]);
+
+    let pgid = getpgid(0).unwrap_or(0);
+    check!("getpgid(0) for TIOCSPGRP", pgid > 0);
+    let set_fg = ioctl(slave_fd, TIOCSPGRP, &pgid as *const u32 as u64);
+    check!("TIOCSPGRP on /dev/pts0", set_fg.is_ok());
+
+    let mut got_pgid = 0u32;
+    let get_fg = ioctl(master_fd, TIOCGPGRP, &mut got_pgid as *mut u32 as u64);
+    check!("TIOCGPGRP on /dev/ptmx", get_fg.is_ok());
+    check!("foreground pgid round-trip", got_pgid == pgid);
+
+    let _ = close(slave_fd);
+    let _ = close(master_fd);
+
+    if resize.is_ok() && get_ws.is_ok() && got_ws == new_ws && set_fg.is_ok() && got_pgid == pgid {
+        println("TTY-IOCTL-OK");
+    }
 }
 
 fn test_chdir_getcwd() {
