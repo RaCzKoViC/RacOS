@@ -112,6 +112,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_ps_lists_running_processes();
     test_rpkg_install_list_remove();
     test_sed_substitute();
+    test_awk_basic();
     test_env_inherits_shell_vars();
     test_exec_loop_memory_cleanup();
     test_tty_ioctl_state();
@@ -694,6 +695,56 @@ fn test_sed_substitute() {
 
     if s1 == Some(0) && s2 == Some(0) && s3 == Some(0) && s4 == Some(0) && s5 == Some(0) {
         println("T33-SED-OK");
+    }
+}
+
+/// Smoke for /bin/awk: MVP supports BEGIN/END blocks, $0..$N fields, print
+/// with literal-string and field items, and `-F` single-byte separator.
+/// Each case pipes a single line of input through awk and checks the
+/// stdout via shell command substitution + case match.
+fn test_awk_basic() {
+    println("\n[test] /bin/awk BEGIN/END + $N + -F");
+
+    // BEGIN runs once before input even if stdin is empty.
+    let a1 = shell_run(
+        b"result=$(echo '' | /bin/awk 'BEGIN { print \"hi\" }'); \
+          case $result in hi) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("awk BEGIN prints once", a1 == Some(0));
+
+    // print $0 in the main block echoes the whole line.
+    let a2 = shell_run(
+        b"result=$(echo hello | /bin/awk '{ print $0 }'); \
+          case $result in hello) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("awk { print $0 } echoes the whole line", a2 == Some(0));
+
+    // print $2 picks the second whitespace-separated field.
+    let a3 = shell_run(
+        b"result=$(echo a b c | /bin/awk '{ print $2 }'); \
+          case $result in b) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("awk { print $2 } picks field 2", a3 == Some(0));
+
+    // -F separator: ':' splits "a:b:c" → fields ["a","b","c"].
+    let a4 = shell_run(
+        b"result=$(echo a:b:c | /bin/awk -F : '{ print $3 }'); \
+          case $result in c) exit 0;; *) exit 1;; esac\0",
+    );
+    check!(
+        "awk -F : { print $3 } picks 3rd colon-separated field",
+        a4 == Some(0)
+    );
+
+    // END runs once after the input is exhausted.
+    let a5 = shell_run(
+        b"result=$(echo line | /bin/awk 'END { print \"done\" }'); \
+          case $result in done) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("awk END runs after input", a5 == Some(0));
+
+    if a1 == Some(0) && a2 == Some(0) && a3 == Some(0) && a4 == Some(0) && a5 == Some(0) {
+        println("T33-AWK-OK");
     }
 }
 

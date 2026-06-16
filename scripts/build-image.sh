@@ -74,7 +74,7 @@ COREUTILS=(
     racos-init racos-test racos-ls racos-wc racos-uptime racos-mkdir
     racos-rm racos-sleep racos-head racos-tail racos-env racos-basename
     racos-dirname racos-grep racos-cp racos-mv racos-cut racos-uniq
-    racos-find racos-od racos-ps racos-sed racos-tee racos-hexdump racterm rpkg-bin
+    racos-find racos-od racos-ps racos-sed racos-awk racos-tee racos-hexdump racterm rpkg-bin
 )
 for pkg in "${COREUTILS[@]}"; do
     # racterm gates its [[bin]] behind a required-feature so
