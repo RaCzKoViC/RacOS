@@ -84,6 +84,13 @@ name = "racore"
 version = "0.1.0"
 
 [[package]]
+name = "racos-awk"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-basename"
 version = "0.1.0"
 dependencies = [

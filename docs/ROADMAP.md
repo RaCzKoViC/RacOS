@@ -122,7 +122,7 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
     - [x] `racos-test::test_rpkg_install_list_remove` builds a minimal .rpk in memory, writes it to `/tmp/demo.rpk`, then spawns `/bin/rpkg install /tmp/demo.rpk`, `/bin/rpkg list`, `/bin/rpkg remove demo-rpkg` — asserting exit 0 for each and emitting `T32-RPKG-OK`.
   - **Pozostałe (deferred):** signature verification (no crypto yet), dependency resolution (rapt territory), repository protocol, multi-file packages (DATA is single-payload in MVP — multi-file would need a real archive format), `/bin/` deployment after T4.x makes initramfs writable or rootfs is on persistent disk.
 
-- [~] **T3.3 — Userland: dokończyć stuby** (ps + sed + env shipped; awk pending)
+- [x] **T3.3 — Userland: dokończyć stuby** (ps + sed + env + awk shipped)
   - [x] **`ps`** — real procfs reader. Walks `/proc` via getdents, reads `/proc/<pid>/status` for each numeric pid dir, prints `PID PPID STATE NAME` columns.
     - Fixed the dead-code state it was in: wrong libc-lite dep path (`../../../../` → `../../../`), missing `alloc` feature, missing from workspace `members`/`default-members`, missing from BIN_LIST in both build scripts (so the binary was never staged into initramfs). Procfs already serves `/proc/<pid>/status` in key:value form so no kernel changes were needed.
     - `racos-test::test_ps_lists_running_processes` smoke spawns `/bin/ps` and asserts exit 0; emits `T33-PS-OK` marker.
@@ -136,7 +136,12 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
     - Same dead-code wiring fixes as the ps PR: bad libc-lite path, no `alloc` feature, not in workspace, not in BIN_LIST.
     - Supported commands: `s/X/Y/[g]` (substitute first/global), `d` (delete = skip default print), `p` (explicit print). The `-n` flag suppresses the default per-line print so `p` is the only path that emits output.
     - `racos-test::test_sed_substitute` exercises all five paths (s, s/g, s/no-g, -n p, d) via shell command substitution + case-match assertions, emits `T33-SED-OK`.
-  - [ ] `awk` — minimal: pola `$1..$N`, `BEGIN/END`, basic actions (not present)
+  - [x] **`awk`** — MVP pattern-action language. Same dead-code wiring fixes as the ps/sed PRs (wrong libc-lite path, missing `alloc` feature, not in workspace, not in BIN_LIST) plus an end-to-end rewrite from the 90-line `{print}` stub.
+    - Supported program structure: `BEGIN { ... }`, main `{ ... }`, `END { ... }` blocks in any subset.
+    - Supported actions: `print` (no args ⇒ `print $0`), `print $N` (1-indexed; `$0` = whole line), `print "literal"`, comma-separated mixed items printed with `OFS=" "`. Multiple statements per block separated by `;`.
+    - Flag: `-F sep` — single-byte field separator. Default splits on runs of whitespace (` `, `\t`), trimming leading/trailing; with `-F:` an empty field between adjacent separators is preserved.
+    - Out of scope (post-MVP): regex patterns like `/foo/ { ... }`, variable assignment, arithmetic/string expressions, `NR`/`NF` as user-readable names, `getline`, multi-byte `-F`, escape sequences inside string literals.
+    - `racos-test::test_awk_basic` exercises all five paths: `BEGIN` runs without input, `{print $0}` echoes the line, `{print $2}` picks field 2, `-F :` colon-splitting, `END` runs after input. Emits `T33-AWK-OK`.
 
 ---
 
