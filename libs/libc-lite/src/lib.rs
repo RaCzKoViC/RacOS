@@ -354,6 +354,27 @@ pub fn spawn_args(path: &[u8], argv: &[*const u8]) -> Result<i32, i64> {
     }
 }
 
+/// Like [`spawn_args`] but also passes an `envp` array. Each entry is a
+/// pointer to a NUL-terminated `KEY=VALUE` C-string; the array itself is
+/// terminated by a NULL pointer. The kernel writes envp onto the new
+/// process's stack after argv, where libc-lite's `_start` reads it back
+/// into [`environ`].
+pub fn spawn_args_envp(path: &[u8], argv: &[*const u8], envp: &[*const u8]) -> Result<i32, i64> {
+    let ret = unsafe {
+        syscall3(
+            SYS_SPAWN,
+            path.as_ptr() as u64,
+            argv.as_ptr() as u64,
+            envp.as_ptr() as u64,
+        )
+    };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as i32)
+    }
+}
+
 /// Czekaj na zakończenie procesu potomnego.
 /// Zwraca (pid, exit_status).
 pub fn wait(status: &mut i32) -> Result<i32, i64> {
@@ -1312,9 +1333,19 @@ pub fn eprintln(s: &str) {
 #[unsafe(naked)]
 pub unsafe extern "C" fn _start() {
     core::arch::naked_asm!(
-        // argc → RDI (1st arg per SysV), argv → RSI (2nd arg).
-        "mov rdi, [rsp]",
-        "lea rsi, [rsp + 8]",
+        // System V AMD64 entry layout on the stack:
+        //   [rsp+0]                = argc
+        //   [rsp+8 .. +8N]         = argv[0..N-1]
+        //   [rsp+8(N+1)]           = NULL (argv terminator)
+        //   [rsp+8(N+2) ..]        = envp[0..M-1]
+        //   [rsp+8(N+2+M)]         = NULL (envp terminator)
+        //
+        // argc → RDI, argv → RSI, envp → RDX. The trampoline stashes envp
+        // into a static so `environ()` and `getenv()` can find it later.
+        "mov rdi, [rsp]",            // argc
+        "lea rsi, [rsp + 8]",        // argv
+        // envp = argv + (argc + 1) * 8 — skip argv pointers AND its NULL.
+        "lea rdx, [rsi + rdi*8 + 8]",
         // Align stack to 16 bytes before call (SysV ABI: RSP must be 16-byte
         // aligned at the call site, i.e. 8 mod 16 after the implicit push of
         // the return address). The kernel hands us a 16-aligned RSP so we
@@ -1334,17 +1365,67 @@ pub unsafe extern "C" fn _start() {
     );
 }
 
+/// Saved pointer to the envp array set up by `_start`. Read via
+/// [`environ`] / [`getenv`]. None until the trampoline records it; in
+/// host-test builds it stays None forever.
+static mut ENVP_BLOCK: *const *const u8 = core::ptr::null();
+
 /// Indirection so the naked `_start` can `call {main}` without needing
 /// `main` to be declared via `extern "C"` in libc-lite. The downstream
 /// crate's `main` resolves to a regular C-ABI function thanks to
 /// `#[no_mangle] pub extern "C" fn main(...)`.
 #[cfg(not(any(test, feature = "host-test")))]
 #[unsafe(no_mangle)]
-unsafe extern "C" fn _libc_lite_main_trampoline(argc: i32, argv: *const *const u8) -> i32 {
+unsafe extern "C" fn _libc_lite_main_trampoline(
+    argc: i32,
+    argv: *const *const u8,
+    envp: *const *const u8,
+) -> i32 {
     extern "C" {
         fn main(argc: i32, argv: *const *const u8) -> i32;
     }
+    // SAFETY: single-threaded — only _start ever writes ENVP_BLOCK, and
+    // does so once before main runs. After this point environ()/getenv()
+    // can safely read it.
+    unsafe {
+        ENVP_BLOCK = envp;
+    }
     main(argc, argv)
+}
+
+/// Pointer to the (null-terminated) array of `KEY=VALUE` C-strings the
+/// kernel handed to this process. Returns null in host-test builds and
+/// before the entry trampoline records the kernel-supplied pointer.
+pub fn environ() -> *const *const u8 {
+    // SAFETY: see ENVP_BLOCK note.
+    unsafe { ENVP_BLOCK }
+}
+
+/// Look up the first `KEY=VALUE` entry whose key matches `name` and
+/// return the value byte slice (without the trailing NUL). Linear walk
+/// over the environment block.
+pub fn getenv(name: &[u8]) -> Option<&'static [u8]> {
+    let mut p = environ();
+    if p.is_null() {
+        return None;
+    }
+    loop {
+        let entry = unsafe { *p };
+        if entry.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while unsafe { *entry.add(len) } != 0 {
+            len += 1;
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(entry, len) };
+        if let Some(eq) = bytes.iter().position(|&b| b == b'=') {
+            if &bytes[..eq] == name {
+                return Some(&bytes[eq + 1..]);
+            }
+        }
+        p = unsafe { p.add(1) };
+    }
 }
 
 // ─────────────────────────────────────────────────
