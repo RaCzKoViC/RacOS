@@ -498,10 +498,40 @@ fn test_tty_ioctl_state() {
     check!("TIOCGPGRP on /dev/ptmx", get_fg.is_ok());
     check!("foreground pgid round-trip", got_pgid == pgid);
 
+    let null_fd = open(b"/dev/null\0", O_RDWR, 0);
+    check!(
+        "open /dev/null for TTY ioctl negative checks",
+        null_fd.is_ok()
+    );
+    let mut non_tty_ws = [0u16; 2];
+    let mut non_tty_pgid = pgid;
+    let mut non_tty_rejected = false;
+    if let Ok(null_fd) = null_fd {
+        let get_ws_non_tty = ioctl(null_fd, TIOCGWINSZ, non_tty_ws.as_mut_ptr() as u64);
+        let set_ws_non_tty = ioctl(null_fd, TIOCSWINSZ, new_ws.as_ptr() as u64);
+        let get_fg_non_tty = ioctl(null_fd, TIOCGPGRP, &mut non_tty_pgid as *mut u32 as u64);
+        let set_fg_non_tty = ioctl(null_fd, TIOCSPGRP, &pgid as *const u32 as u64);
+        check!("TIOCGWINSZ rejects /dev/null", get_ws_non_tty.is_err());
+        check!("TIOCSWINSZ rejects /dev/null", set_ws_non_tty.is_err());
+        check!("TIOCGPGRP rejects /dev/null", get_fg_non_tty.is_err());
+        check!("TIOCSPGRP rejects /dev/null", set_fg_non_tty.is_err());
+        non_tty_rejected = get_ws_non_tty.is_err()
+            && set_ws_non_tty.is_err()
+            && get_fg_non_tty.is_err()
+            && set_fg_non_tty.is_err();
+        let _ = close(null_fd);
+    }
+
     let _ = close(slave_fd);
     let _ = close(master_fd);
 
-    if resize.is_ok() && get_ws.is_ok() && got_ws == new_ws && set_fg.is_ok() && got_pgid == pgid {
+    if resize.is_ok()
+        && get_ws.is_ok()
+        && got_ws == new_ws
+        && set_fg.is_ok()
+        && got_pgid == pgid
+        && non_tty_rejected
+    {
         println("TTY-IOCTL-OK");
     }
 }

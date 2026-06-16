@@ -347,6 +347,8 @@ jobs:
           # leave the channel open ~5s so trailing kernel log + prompt make
           # it back into shell.log. timeout caps the whole exchange.
           (
+            sleep 2; printf '\n'
+            sleep 2; printf 'pwd\n'
             sleep 2; printf 'pwd\n'
             sleep 2; printf 'echo ci-smoke-ok\n'
             sleep 2; printf 'cat /proc/version\n'
