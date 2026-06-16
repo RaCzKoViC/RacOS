@@ -150,7 +150,7 @@ jobs:
           ls -la /usr/share/OVMF/ || true
           qemu-system-x86_64 --version | head -n 1
 
-      - name: Boot in QEMU (15s budget)
+      - name: Boot in QEMU twice (persistence smoke, 15s each)
         run: |
           # Ubuntu 24.04 renamed the OVMF code blob to OVMF_CODE_4M.fd and
           # dropped the symlink; older releases still ship OVMF_CODE.fd. Pick
@@ -166,37 +166,72 @@ jobs:
           fi
           echo "Using OVMF=$OVMF"
           qemu-system-x86_64 --version | head -n 1
-          timeout 15 qemu-system-x86_64 \
-            -machine q35 -cpu qemu64,+smep,+smap -m 512M \
-            -drive if=pflash,format=raw,file=$OVMF,readonly=on \
-            -drive file=fat:rw:esp,format=raw \
-            -serial stdio -display none -no-reboot \
-            > boot.log 2>&1 || true
-          echo "--- boot.log tail ---"
-          tail -n 80 boot.log
 
-      - name: Assert kernel reached idle loop + racsh prompt
+          # Empty 16 MiB SATA disk for AHCI persistence. q35 has the ich9-ahci
+          # controller built in; if=ide attaches the drive there as the first
+          # SATA device, so the kernel sees it as sda. The file persists
+          # between the two QEMU invocations below — that's the whole point.
+          truncate -s 16M disk.img
+
+          QEMU_ARGS=(-machine q35 -cpu qemu64,+smep,+smap -m 512M
+            -drive if=pflash,format=raw,file=$OVMF,readonly=on
+            -drive file=fat:rw:esp,format=raw
+            -drive file=disk.img,if=ide,format=raw
+            -serial stdio -display none -no-reboot)
+
+          # Boot 1 — first time the disk is touched. racfs::open_or_format
+          # formats it; persistence_test creates boot-counter=1.
+          timeout 15 qemu-system-x86_64 "${QEMU_ARGS[@]}" > boot1.log 2>&1 || true
+          echo "--- boot1.log tail ---"
+          tail -n 30 boot1.log
+
+          # Boot 2 — disk image unchanged on disk. racfs::open_or_format
+          # finds existing FS; persistence_test reads boot-counter, bumps to 2,
+          # logs "file survived reboot".
+          timeout 15 qemu-system-x86_64 "${QEMU_ARGS[@]}" > boot2.log 2>&1 || true
+          echo "--- boot2.log tail ---"
+          tail -n 30 boot2.log
+
+          # Keep boot.log as a compat alias for the existing artifact upload.
+          cp boot2.log boot.log
+
+      - name: Assert kernel boot chain + on-disk persistence survives reboot
         run: |
-          grep -q "RACORE: RacOS kernel starting" boot.log \
-            || (echo "FAIL: kernel did not start" && exit 1)
-          grep -q "RACORE: Entering idle loop" boot.log \
-            || (echo "FAIL: kernel did not reach idle loop" && exit 1)
-          # Stronger assertion: PID 1 (init) ran AND spawned racsh AND racsh
-          # printed its banner. Catches regressions in spawn/wait/sysret path.
-          grep -q "\[init\] RacInit starting" boot.log \
-            || (echo "FAIL: /sbin/init did not start" && exit 1)
-          grep -q "\[init\] spawned /bin/sh" boot.log \
-            || (echo "FAIL: init did not spawn racsh" && exit 1)
-          grep -q "racsh 0.1.0" boot.log \
-            || (echo "FAIL: racsh did not print banner" && exit 1)
-          echo "Boot smoke PASSED — kernel + init + racsh all alive"
+          # Boot 2 must reach the same chain Boot 1 did — proves no regression
+          # was introduced by the disk being present.
+          grep -q "RACORE: RacOS kernel starting" boot2.log \
+            || (echo "FAIL: kernel did not start on boot 2" && exit 1)
+          grep -q "RACORE: Entering idle loop" boot2.log \
+            || (echo "FAIL: kernel did not reach idle loop on boot 2" && exit 1)
+          grep -q "\[init\] RacInit starting" boot2.log \
+            || (echo "FAIL: /sbin/init did not start on boot 2" && exit 1)
+          grep -q "\[init\] spawned /bin/sh" boot2.log \
+            || (echo "FAIL: init did not spawn racsh on boot 2" && exit 1)
+          grep -q "racsh 0.1.0" boot2.log \
+            || (echo "FAIL: racsh did not print banner on boot 2" && exit 1)
 
-      - name: Upload boot log
+          # Boot 1 created the boot-counter (first-boot path of
+          # racfs::persistence_test). If this assertion fails, AHCI didn't
+          # attach or racfs::open_or_format silently fell back to RAM.
+          grep -q "created boot-counter = 1 (first boot)" boot1.log \
+            || (echo "FAIL: boot 1 did not create the persistence marker — sda missing or racfs format failed" && exit 1)
+
+          # Boot 2 read it back — proves the bytes written by boot 1 hit the
+          # SATA image file, survived QEMU shutdown, and were parsed back by
+          # racfs on boot 2. This is the actual persistence guarantee.
+          grep -q "boot-counter = 2 (was 1, file survived reboot)" boot2.log \
+            || (echo "FAIL: persistence broken — boot 2 did not see boot 1's file" && exit 1)
+          echo "Boot smoke PASSED — kernel + init + racsh alive AND racfs persisted across reboot"
+
+      - name: Upload boot logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: boot-log
-          path: boot.log
+          path: |
+            boot.log
+            boot1.log
+            boot2.log
 
   kernel-smoke-isadbg:
     name: Kernel smoke (isa-debug-exit assertions)
