@@ -1,0 +1,11 @@
+[package]
+name = "racos-whoami"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "whoami"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

@@ -77,9 +77,9 @@ then exits. The CI smoke is much simpler that way.
 | `touch` | ✅ shipped (v0.2 §2.1) | `T20-TOUCH-OK`. MVP: O_CREAT a missing path; existing path is a no-op exit 0. `utime`/`utimensat` syscall is post-MVP, so `-a`/`-m`/`-t` flags are intentionally absent for now. |
 | `chmod` | ✅ shipped (v0.2 §2.1) | `T20-CHMOD-OK`. Octal mode only (`644`, `0644`, `0o644`). Symbolic `u+x`/`g-w`/`a=rwx` is post-MVP. |
 | `chown` | ✅ shipped (v0.2 §2.1) | `T20-CHOWN-OK`. Numeric `uid` / `uid:gid` / `:gid` only. Symbolic usernames need `/etc/passwd` + `/etc/group` lookup (post-MVP). |
-| `kill` | ⏳ | `kill -SIG pid`, default TERM; `sys_kill` exists |
-| `whoami` | ⏳ | print euid → username (needs `/etc/passwd` lookup) |
-| `uname` | ⏳ | `-a` / `-r` / `-m` / `-s`; `sys_uname` exists |
+| `kill` | ✅ shipped (v0.2 §2.1) | `T20-KILL-OK`. Default SIGTERM; accepts `-N`/`-NAME`/`-SIGNAME` (HUP, INT, QUIT, KILL, USR1, SEGV, PIPE, ALRM, TERM, CHLD, CONT, STOP, WINCH) plus the POSIX `-s NAME` form. |
+| `whoami` | ✅ shipped (v0.2 §2.1) | `T20-WHOAMI-OK`. MVP: `0 → root`, anything else prints the numeric uid. Real `/etc/passwd` lookup is post-MVP (no passwd file in initramfs yet). |
+| `uname` | ✅ shipped (v0.2 §2.1) | `T20-UNAME-OK`. Flags: `-s` (default) / `-n` / `-r` / `-v` / `-m` / `-a`. Combinable (`-srm`). Reads via `sys_uname`. |
 | `free` | ⏳ | parse a new `/proc/meminfo` (procfs entry to add) |
 | `ln` | ⏳ | hard links via `sys_link`; symlinks deferred until `sys_symlink` |
 | `rmdir` | ⏳ | explicit standalone (not just `rm -d`) |

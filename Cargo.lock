@@ -233,6 +233,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-kill"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-ls"
 version = "0.1.0"
 dependencies = [
@@ -388,6 +395,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-uname"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-uniq"
 version = "0.1.0"
 dependencies = [
@@ -410,6 +424,13 @@ dependencies = [
 
 [[package]]
 name = "racos-wget"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-whoami"
 version = "0.1.0"
 dependencies = [
  "libc-lite",
