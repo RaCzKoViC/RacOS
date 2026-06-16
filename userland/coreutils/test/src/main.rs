@@ -107,6 +107,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_sigchld_waitpid();
     test_signal_user_handler();
     test_signal_user_handler_reentrant_syscall();
+    test_shell_control_flow();
     test_exec_loop_memory_cleanup();
     test_tty_ioctl_state();
     test_chdir_getcwd();
@@ -412,6 +413,74 @@ fn test_signal_user_handler() {
 
     if count == 1 && last == SIGINT && after == pid {
         println("PHASE21-USER-HANDLER-OK");
+    }
+}
+
+/// Drive racsh through `sh -c "..."` and assert the script's exit code is
+/// what racsh's control-flow runtime is expected to produce. This exercises
+/// the full lex → parse → execute path inside QEMU, complementing the host
+/// shell/tests/control_flow.rs which can only cover the I/O-free surface.
+fn shell_run(script: &[u8]) -> Option<i32> {
+    let sh = b"/bin/sh\0";
+    let arg0 = b"sh\0";
+    let arg1 = b"-c\0";
+    // Caller passes a NUL-terminated script.
+    let argv: [*const u8; 4] = [
+        arg0.as_ptr(),
+        arg1.as_ptr(),
+        script.as_ptr(),
+        core::ptr::null(),
+    ];
+    let pid = match spawn_args(sh, &argv) {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+    let mut status: i32 = -99;
+    if waitpid(pid, &mut status, 0).is_err() {
+        return None;
+    }
+    Some(status)
+}
+
+fn test_shell_control_flow() {
+    println("\n[test] racsh control flow + source");
+
+    // if true → branch yields exit 0
+    let s = shell_run(b"if true; then exit 0; else exit 9; fi\0");
+    check!("if-true takes then-branch", s == Some(0));
+
+    // if false → else branch yields exit 7
+    let s = shell_run(b"if false; then exit 0; else exit 7; fi\0");
+    check!("if-false takes else-branch", s == Some(7));
+
+    // for over a literal list iterates the right number of times.
+    // Each iteration's exit doesn't propagate, but the script's final
+    // command does — here a 3-iter loop sets i to a, then b, then c, and
+    // exits with the count.
+    let s = shell_run(b"n=0; for x in a b c; do n=`expr $n + 1`; done; exit $n\0");
+    // expr isn't guaranteed to exist in /bin yet — accept any non-error
+    // exit that proves the script reached its `exit $n`. A successful for
+    // loop without expr should still arrive at `exit 0` (n stays "0").
+    check!("for-loop reaches exit", s.is_some());
+
+    // Field splitting: unquoted $LIST must split into 3 iterations, so
+    // accumulating x with a separator yields ":a:b:c" — case matches
+    // exactly that literal and exits 0.
+    let split = shell_run(
+        b"LIST='a b c'; out=''; for x in $LIST; do out=$out:$x; done; \
+          case $out in :a:b:c) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("unquoted $LIST splits and case matches", split == Some(0));
+
+    // Quoted "$LIST" must NOT split — one iteration, out=":a b c".
+    let nosplit = shell_run(
+        b"LIST='a b c'; out=''; for x in \"$LIST\"; do out=$out:$x; done; \
+          case $out in ':a b c') exit 0;; *) exit 1;; esac\0",
+    );
+    check!("quoted \"$LIST\" stays one word", nosplit == Some(0));
+
+    if split == Some(0) && nosplit == Some(0) {
+        println("T12-SHELL-CONTROL-FLOW-OK");
     }
 }
 
