@@ -1,207 +1,365 @@
-# RacOS — Roadmapa rozwoju
+# RacOS — Development Roadmap
 
 > Status: Living document
-> Utworzona: 2026-06-16
-> Last updated: 2026-06-16 (Tier 1 complete + Tier 2 complete)
+> Created: 2026-06-16
+> Last updated: 2026-06-16 (post-v0.1.0, milestone framing adopted)
 
-Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa praca powinna pasować do jednego z tierów poniżej. Zmiana priorytetów wymaga aktualizacji tego pliku w PR-ze.
+This is the source of truth for project direction. Every PR with a meaningful
+scope change should also touch this file.
 
----
+The plan is organised around **release milestones** that ship user-visible
+value: **v0.2** (usable shell), **v0.3** (persistent storage), **v0.4**
+(graphics base). Once those land, several long-running tracks run in
+parallel (networking hardening, SMP scheduler refactor, packaging maturity,
+TLS crypto).
 
-## 1. Stan obecny (snapshot 2026-06-16)
-
-### Działa solidnie
-- **Bootloader UEFI** — production-ready (ELF64 loader, GOP, mmap, ACPI, ExitBootServices)
-- **Kernel core** — MM (phys/virt allocator, page tables), task model, 15+ syscalli, VFS z 5 zamontowanymi FS (initramfs/devfs/tmpfs/procfs + racfs + FAT32 writable), round-robin scheduler
-- **Stack sieciowy end-to-end** — ARP → IPv4 → UDP → DNS → TCP → HTTP/1.0 bez third-party crate'ów
-- **Userland** — ~36 binarek w `/bin`, większość pełnych implementacji POSIX; `libc-lite` z ~80 syscall wrapperami inline-asm
-- **Shell racsh** — 4362 linii, AST-based parser, lexer/parser/AST/expand/exec/builtin/readline jako osobne moduły
-- **CI** — zielona macierz na ubuntu/macOS/windows + smoke testy UEFI/QEMU/interactive shell
-
-### Krytyczne luki blokujące real use
-1. **Init nie ma service managera w boot path** — RacInit jako PID 1 tylko spawnuje shell i reapuje zombies. Model unit files / dependency graph / restart policy jest spec-only (engine.rs istnieje, niepodłączony). RacOS nie potrafi uruchomić więcej niż jednego programu userspace.
-2. **Shell scripting nie istnieje** — racsh jest interactive-only. Brak `if/while/for`, `$?`, `$0..$9`, brak ładowania skryptów z pliku, brak `source`. Bez tego żaden service unit nie ma sensu.
-3. **Brak persistence na realnym dysku** — racfs żyje na ramdisku. Brak sterownika VirtIO-block → nic nie przeżywa reboota.
-4. **RacTerm to stub** — wrapper PTY + przekazywanie bajtów. Brak parsera ANSI/VT, brak scrollback, brak dirty rendering. Wszystkie 7 wymagań z ARCHITECTURE.md §10 nie spełnione.
-5. **Sygnały user-space nie deliver'ują się do handlerów** — `deliver_pending_signals` nie pushuje SignalFrame ani nie przekierowuje RIP do handlera; `sys_sigreturn` jest stubem. Bez tego nie ma poprawnego Ctrl+C, job control, ani restart policy w init.
-6. **rpkg/rapt to skeletony** — brak parsera formatu `.rpk`, brak resolvera, brak repo. Nie da się dystrybuować ani aktualizować.
-7. **Single-core** — `smp.rs` + AP trampoline istnieją ale nie są podłączone do init.
-
-### Niespójności dokumentacji
-- `ARCHITECTURE.md` §1.3 mówi "Userland phase 1: C17" — kod jest w Rust no_std. Dokument zdezaktualizowany.
-- ADR-006 / ADR-007 / ADR-014 vs faktyczna implementacja — warto audyt zgodności po Phase 2/3.
+The bootstrap-phase tiered plan (Tier 1-4) closed with **v0.1.0**. Detailed
+historical context lives in [`CHANGELOG.md`](../CHANGELOG.md) and in the
+ADR implementation-status sections under [`docs/adr/`](adr/).
 
 ---
 
-## 2. Tier 1 — chokepointy, bez których nic się nie ruszy
+## 1. v0.1.0 — Completed cycle (2026-06-16)
 
-> 1–2 cykle pracy. Te trzy są ze sobą sprzężone: sygnały odblokowują job control w shellu, scripting odblokowuje sensowne unit files, service manager odblokowuje wieloprocesową przestrzeń użytkownika. Po nich RacOS przestaje być "boot demo" a staje się rozwijalnym systemem.
+The bootstrap phase closed all four tiers from the original tiered plan:
 
-- [x] **T1.1 — Dokończyć Phase 2 (signals + cleanup)** — zmergowane w PR #6
-  - PR #5 dał: close fds on exit, SIGCHLD do parenta, ioctl routing
-  - PR #6 dodał:
-    - [x] User-handler delivery via `PER_CPU.syscall_frame_ptr` (gs:[0x10]) + on-stack `UserSignalFrame`
-    - [x] `sys_sigreturn` przywraca orig_rip/rflags/rsp/rax z `UserSignalFrame`
-    - [x] libc-lite `signal()` + `__signal_dispatcher` (naked) — bridge kernel→user handler bez modyfikacji SYSRET path
-    - [x] 2 integration testy w racos-test: `PHASE21-USER-HANDLER-OK` + `PHASE21-USER-HANDLER-REENTRANT-OK`
+- **Tier 1** (chokepoints) — user-mode signals (T1.1), racsh scripting (T1.2),
+  RacInit engine wired to PID 1 (T1.3).
+- **Tier 2** (demo → developable) — persistence in CI with two-boot AHCI smoke
+  (T2.1), RacTerm ANSI emulator + 31 host tests (T2.2), cross-platform build
+  smoke (T2.3).
+- **Tier 3** (toward v1.0) — SMP AP bring-up + LAPIC timers (T3.1 partial),
+  rpkg install/list/remove (T3.2), userland stubs filled (ps + sed + env +
+  awk for T3.3).
+- **Tier 4** (strategic) — unsafe-block audit backlog cleared 350 → 0 with
+  `--strict` lint as a required CI gate (T4.2), ADR/spec resynced (T4.3).
+  T4.1 TLS deferred to the post-v0.4 parallel track.
 
-- [x] **T1.2 — Shell scripting w racsh**
-  - Parser już miał AST, exec runtime też (if/while/for/case/function); dodano brakujące kawałki + testy
-  - Status sub-zadań:
-    - [x] Runtime dla `if/then/elif/else/fi`, `while/do/done`, `for ... in ... do ... done`, `case/esac` (już było w `shell/src/exec.rs`)
-    - [x] Parameter expansion: `$?`, `$0..$9`, `$#`, `$@`, `$*`, `${VAR}`, `${VAR:-default}`, `${VAR:+w}`, `${VAR:?e}`, `${#VAR}` (już było w `shell/src/expand.rs`)
-    - [x] `source` (alias `.`) — ładowanie skryptu w bieżącym shellu (`shell/src/builtin.rs:builtin_source`, `run_source_in_env`)
-    - [x] Invokacja `sh script.sh` z pliku — już była w `userland/coreutils/sh/src/main.rs`
-    - [x] Field splitting — unquoted `$VAR` / `${VAR}` / `$(cmd)` split na IFS w `expand_word_list`; kwotowane `"$VAR"` nie split
-    - [x] Testy: 14 host-side tests w `shell/tests/control_flow.rs` + `T12-SHELL-CONTROL-FLOW-OK` marker w racos-test (sh -c z if/for/case)
-  - **Pozostałe gaps (post-MVP):** mixed words `prefix$VAR` z partial splitting, configurable IFS variable, command sub `$(cmd)` runtime (parser wspiera, exec stub)
+Plus the post-v0.1.0 quality sprint: `SECURITY.md`, `docs/DEPENDENCIES.md`
+(zero kernel deps, 2 bootloader deps), advisory CI for coverage +
+cargo-audit, stale-PR cleanup.
 
-- [x] **T1.3 — Wire RacInit service manager**
-  - Status sub-zadań:
-    - [x] Parser unit files (.service / .target / .timer / .mount / .device) — już był w `init/src/lib.rs:parse_unit`, dodane testy
-    - [x] Dependency graph z cycle detection — fixed buggy Kahn's algorithm w `Engine::resolve_start_order`; zwraca `ResolveResult { order, cycle }`
-    - [x] Restart policy (always / on-failure / on-abnormal / no) + burst limit (5 restartów w 30s → Failed)
-    - [x] Podpięcie do PID 1 boot path — `userland/coreutils/init/main.rs` próbuje engine path, fallback do legacy spawn-shell loop jeśli brak unit files
-    - [x] Default unit files w initramfs: `base.target` + `shell.service` (Restart=always)
-    - [x] Resolved collision: usunięty `init/src/main.rs` + `[[bin]]` z init/Cargo.toml; jedyne źródło `/sbin/init` to crate `racos-init`
-    - [x] Build scripts (build-image.sh + .ps1) nie wywalają już całego `/etc/` przy clean
-  - **Pozostałe (post-T1.3):** `servicectl` CLI (spec w ARCHITECTURE.md §8.4), socket activation, .timer scheduler
-  - **Tests:** 13 host tests w `init/tests/engine.rs` (parser, topo sort: linear/diamond/cycle/self-edge, burst tracker window decay) + racos-test smoke `T13-INIT-ENGINE-OK` w QEMU
+For per-subsystem status see the ADR `Implementation status (2026-06-16)`
+sections and the `[0.1.0]` entry in [`CHANGELOG.md`](../CHANGELOG.md).
 
 ---
 
-## 3. Tier 2 — przejście z demo do developable OS
+## 2. v0.2 — Usable shell (next milestone)
 
-> Kolejne 1–2 cykle po Tier 1.
+> **Goal**: RacOS becomes pleasant to drive from a terminal. Boot the guest,
+> log in, write a small script, install something, see it work, log out.
+> Today you *can* do most of this but the UX rough edges turn casual
+> exploration into a chore.
 
-- [x] **T2.1 — Persistence wired in CI**
-  - Discovery showed the heavy lifting was already done: `BlockDevice` trait, AHCI driver (`kernel/src/drivers/ahci.rs`, 522 lines), racfs on `sda` mounted at `/mnt` (`kernel/src/main.rs:322`), and `vfs::racfs::persistence_test` writing a `boot-counter` file that grows by 1 each boot. The actual gap was that CI never attached a disk, so the persistence path was dead code in CI.
-  - This PR fills the gap:
-    - [x] Boot-smoke now creates an empty 16 MiB `disk.img` and attaches it via `-drive file=disk.img,if=ide,format=raw` (q35's built-in ich9-ahci controller → kernel sees `sda`)
-    - [x] CI runs QEMU **twice** with the same image — boot 1 formats + writes counter=1, boot 2 reads it back and bumps to 2
-    - [x] New grep assertions: `created boot-counter = 1 (first boot)` on boot 1, `boot-counter = 2 (was 1, file survived reboot)` on boot 2 — failure mode is explicit ("sda missing or racfs format failed" vs "persistence broken")
-    - [x] All existing kernel/init/racsh banner assertions re-applied to boot 2 (catches regressions caused by disk being present)
-    - [x] Both boot1.log + boot2.log uploaded as artifacts
-  - **Pozostałe (deferred):** VirtIO-block driver as alternative to AHCI (cleaner QEMU integration, mostly cosmetic); userland file-level persistence test via racos-test (kernel-level is sufficient for v0); making `/etc`, `/var`, `/home` persistent (currently initramfs/ram-based; needs init-side migration).
+### 2.1 Coreutils gap-filling
 
-- [x] **T2.2 — RacTerm: ANSI emulator tested + response drain fixed**
-  - Discovery: the emulator (1616 lines: buffer/cursor/escape/terminal) was already implemented and feature-complete for all DoD items — full CSI handler (CUU/CUD/CUF/CUB/CUP, ED/EL, IL/DL, SU/SD, ICH/DCH/ECH, SCP/RCP, DECSTBM, DSR, DA), SGR (16+256+truecolor + bold/italic/underline), DEC private (cursor show/hide, alternate buffer 1049), OSC 0 title, ESC (RIS/DECSC/DECRC/IND/NEL/RI), scrollback ring 10k, partial-sequence buffering. What was missing was test coverage + a bug in the PTY relay.
-  - This PR fills the gap:
-    - [x] Fixed: `terminal::Terminal::drain_response()` was never called in racterm's main PTY loop, so DSR (`\e[6n` cursor position query) and DA (`\e[c`) responses queued in the emulator never reached the shell. ncurses-style apps waiting for the reply would hang. main.rs now drains the response buffer back to ptmx_fd after each `term.feed(...)` cycle.
-    - [x] 31 host tests in `terminal/tests/ansi.rs`: parser (Print/Execute/partial-CSI/private-CSI), cursor movement (CUP absolute, CUU/CUD/CUF/CUB relative, clamp at edges), erase (ED 0/2, EL 0/2), SGR (basic + bright + 256 + truecolor + attrs + reset), alternate buffer (1049h/l with cursor save/restore), DECTCEM cursor visibility, DECSTBM scroll region, DSR (CPR + status), DA primary, scrollback retention, OSC 0 title, CR/LF semantics.
-    - [x] racterm's `[[bin]]` now gated behind `required-features = ["bin-target"]` so `cargo test -p racterm` on host doesn't pull libc-lite's `_start` / `panic_handler` (which need a bare-metal target). build-image.sh / build-image.ps1 / justfile / CI workflow updated to pass `--features racterm/bin-target` to the workspace build.
-    - [x] CI host test command now includes `racterm` and `init` alongside racsh/rpkg/rapt — 75 host tests run on every push.
-  - **Pozostałe (deferred):** real renderer that reads from `Terminal::buffer` and updates a framebuffer (currently the host terminal does rendering via PTY byte forwarding — sufficient for v0 since RacOS runs over serial); UTF-8 multibyte handling in the print path; mouse-tracking modes (1000/1006).
+Many of the conventional Unix tools are missing, three more exist as crates
+but never made it into `BIN_LIST` / initramfs.
 
-- [x] **T2.3 — Phase 1 cross-platform build**
-  - Discovery: the bulk was already in place. `justfile` already has `[unix]`/`[windows]` attributes routing every build/run/image/iso recipe to the right shell. Bash counterparts existed for the heavy lifters (`build-image.sh`, `make-image.sh`, `make-iso.sh`, `boot-test.sh`); `pack-initramfs.py` covers the initramfs packing cross-platform. CI has been building from `build-image.sh` for months. `DEVELOPMENT_LINUX.md` existed too. Real gap: the local "did I just break CI?" loop (`run-ci-smoke.ps1`) was Windows-only.
-  - This PR fills the gap:
-    - [x] `scripts/run-ci-smoke.sh` — bash port of the PS smoke runner. Rebuilds the kernel with `--features ci-smoke` and the static-relocation RUSTFLAGS the bootloader needs, stages it into `esp/`, launches QEMU with `isa-debug-exit`, and asserts exit code 33 (PASS) / 35 (FAIL) / 124 (timeout). Supports `--disk` to attach the AHCI image that the boot-smoke two-boot test uses.
-    - [x] `justfile` gets `smoke` and `smoke-disk` recipes routed to the bash/PS script via `[unix]`/`[windows]` attributes — `just smoke` works on Ubuntu.
-    - [x] `DEVELOPMENT_LINUX.md` documents `just smoke` / `just smoke-disk` and the exit-code contract.
-  - **Pozostałe (deferred):** CI parity check that runs `bash scripts/run-ci-smoke.sh` alongside the inline kernel-smoke job (would catch script rot but is a doubling of an already-covered code path; skipped for v0). PowerShell-only local helpers (`launch-interactive.ps1`, `runtime-validation-*.ps1`, `validate-*.ps1`) — not needed for the contributor-on-Ubuntu DoD path.
+**Easy wins** (crate exists, just plumb into workspace + build-image
+BIN_LIST, write smoke):
 
----
+| Tool | Status | Smoke marker |
+|---|---|---|
+| `id` | crate has `src/`, not shipping | `T20-ID-OK` |
+| `sort` | crate has `src/`, not shipping | `T20-SORT-OK` |
+| `top` | crate skeleton only (no src) | `T20-TOP-OK` after MVP rewrite |
 
-## 4. Tier 3 — droga do v1.0
+**Net-new**:
 
-- [~] **T3.1 — SMP** (AP bring-up exercised in CI; per-CPU run queues + IPI preemption deferred to Tier 4 as scheduler refactor)
-  - Discovery: heavy lifting was already done. `arch::smp::init()` enumerates ACPI CPUs into a 32-slot CpuState table, `arch::ap::bring_up_all` lives in `kernel/src/arch/ap.rs` with the full INIT-SIPI-SIPI flow, a real-mode → protected → long-mode trampoline in `kernel/src/arch/trampoline.asm`, each AP loads the kernel GDT/IDT, enables its LAPIC, binds its GS to its PerCpu slot, starts its LAPIC timer, and flips `smp::mark_started`. `bring_up_all` is wired into `kernel_main` at line 162.
-  - This PR exercises the path in CI:
-    - [x] `/proc/cpuinfo` now iterates `arch::smp::for_each_cpu`, emitting one Linux-style block per **online** CPU (with `processor`, `apicid`, `role` BSP/AP, `apic_mode` xapic/x2apic). Fallback to a single hardcoded block keeps `grep ^processor` callers sane in the impossible "0 online" case.
-    - [x] CI boot-smoke and kernel-smoke jobs now pass `-smp 4` to QEMU. New boot-smoke assertions: `SMP topology - 4 enabled CPU(s)` in `smp::init` output AND ≥ 3 distinct `AP apic_id=N alive` lines from `bring_up_one` — proves enumeration saw 4 CPUs AND the trampoline brought 3 APs all the way to mark_started.
-    - [x] Existing smoke gated behind `--features ci-smoke` (kernel-smoke-isadbg job) now also runs against 4 CPUs, exercising `PASS smp::all_aps_started (4/4)` plus the GS-base / IDT / timer self-checks that follow it.
-  - **Pozostałe (deferred to Tier 4 — scheduler refactor):** per-CPU run queues with work stealing (current scheduler is single global queue; refactor is substantial), IPI for cross-CPU preemption (LAPIC ICR send-vector path), per-CPU TSS for ring-3 interrupts on APs (today APs only handle ring-0 timer IRQs while parked).
+| Tool | DoD |
+|---|---|
+| `touch` | create empty file or update mtime |
+| `chmod` | accept `0644`-style octal + symbolic `u+x`; `sys_chmod` exists |
+| `chown` | `chown user:group path`; `sys_chown` exists |
+| `kill` | `kill -SIG pid`, default TERM; `sys_kill` exists |
+| `whoami` | print euid → username (needs `/etc/passwd` lookup) |
+| `uname` | `-a` / `-r` / `-m` / `-s`; `sys_uname` exists |
+| `free` | parse a new `/proc/meminfo` (procfs entry to add) |
+| `ln` | hard links via `sys_link`; symlinks deferred until `sys_symlink` |
+| `rmdir` | explicit standalone (not just `rm -d`) |
+| `du` | recursive walk + size aggregation |
 
-- [x] **T3.2 — rpkg MVP**
-  - Discovery: rpkg lib (246 linii) had the header parser + section extractor + manifest TOML reader + install-plan helper, plus 2 tests. The matching binary skeleton in `pkg/rpkg-bin/` was dead code (wrong libc-lite path, not in workspace, only printed a plan — never wrote anything).
-  - This PR closes the gap:
-    - [x] Extended rpkg lib with `serialize_files_list`/`parse_files_list` (host-testable) + 4 new tests. 6 rpkg tests now run in CI.
-    - [x] Rewrote `pkg/rpkg-bin` end-to-end: install/list/remove subcommands. Install parses the .rpk, writes `manifest.toml` + `files` index + `data` payload into `/var/lib/rpkg/info/<name>/`. List does getdents on the info root. Remove reads the files index, unlinks each path, then drops the info dir.
-    - [x] rpkg-bin wired into workspace, build-image.sh + .ps1 BIN_LIST and Coreutils list (cargo-bin name `rpkg-bin`, installed as `/bin/rpkg`).
-    - [x] `racos-test::test_rpkg_install_list_remove` builds a minimal .rpk in memory, writes it to `/tmp/demo.rpk`, then spawns `/bin/rpkg install /tmp/demo.rpk`, `/bin/rpkg list`, `/bin/rpkg remove demo-rpkg` — asserting exit 0 for each and emitting `T32-RPKG-OK`.
-  - **Pozostałe (deferred):** signature verification (no crypto yet), dependency resolution (rapt territory), repository protocol, multi-file packages (DATA is single-payload in MVP — multi-file would need a real archive format), `/bin/` deployment after T4.x makes initramfs writable or rootfs is on persistent disk.
+`pwd` and `cd` are already racsh builtins; standalone `/bin/pwd` is
+conventional but not required for v0.2.
 
-- [x] **T3.3 — Userland: dokończyć stuby** (ps + sed + env + awk shipped)
-  - [x] **`ps`** — real procfs reader. Walks `/proc` via getdents, reads `/proc/<pid>/status` for each numeric pid dir, prints `PID PPID STATE NAME` columns.
-    - Fixed the dead-code state it was in: wrong libc-lite dep path (`../../../../` → `../../../`), missing `alloc` feature, missing from workspace `members`/`default-members`, missing from BIN_LIST in both build scripts (so the binary was never staged into initramfs). Procfs already serves `/proc/<pid>/status` in key:value form so no kernel changes were needed.
-    - `racos-test::test_ps_lists_running_processes` smoke spawns `/bin/ps` and asserts exit 0; emits `T33-PS-OK` marker.
-  - [x] **`env`** — real environ reader. End-to-end envp inheritance through sys_spawn:
-    - Kernel: new `collect_user_envp` mirrors `collect_user_argv`. `UserProcess::from_elf` extended with an envp slice and writes argv + argv-NULL + envp + envp-NULL on the user stack (per SysV AMD64 entry layout, kept 16-byte aligned). `sys_spawn` and `sys_exec` actually consume their previously-`_envp`-prefixed parameter slots.
-    - libc-lite: `_start` reads envp off the stack (RDX = `argv + (argc+1)*8`), stashes it in a static `ENVP_BLOCK`, exposes `environ()` and `getenv(name)` accessors. New `spawn_args_envp` wrapper hits the third syscall arg.
-    - shell: every external-command spawn (single, background, pipeline) now builds an envp from `env.vars()` and uses `spawn_args_envp`. MVP sends every set variable through; POSIX export-only is a follow-up.
-    - env binary: rewritten from the 22-line PWD/PATH stub to a real walk over `environ()` printing one `KEY=VALUE` per line.
-    - `racos-test::test_env_inherits_shell_vars` asserts (1) inherited PATH and (2) a freshly-set custom variable are both visible via `/bin/env`. Emits `T33-ENV-OK`.
-  - [x] **`sed`** — MVP stream editor. Single-command scripts on byte-level input (no regex, no addresses, no multi-command `;`/`-e`).
-    - Same dead-code wiring fixes as the ps PR: bad libc-lite path, no `alloc` feature, not in workspace, not in BIN_LIST.
-    - Supported commands: `s/X/Y/[g]` (substitute first/global), `d` (delete = skip default print), `p` (explicit print). The `-n` flag suppresses the default per-line print so `p` is the only path that emits output.
-    - `racos-test::test_sed_substitute` exercises all five paths (s, s/g, s/no-g, -n p, d) via shell command substitution + case-match assertions, emits `T33-SED-OK`.
-  - [x] **`awk`** — MVP pattern-action language. Same dead-code wiring fixes as the ps/sed PRs (wrong libc-lite path, missing `alloc` feature, not in workspace, not in BIN_LIST) plus an end-to-end rewrite from the 90-line `{print}` stub.
-    - Supported program structure: `BEGIN { ... }`, main `{ ... }`, `END { ... }` blocks in any subset.
-    - Supported actions: `print` (no args ⇒ `print $0`), `print $N` (1-indexed; `$0` = whole line), `print "literal"`, comma-separated mixed items printed with `OFS=" "`. Multiple statements per block separated by `;`.
-    - Flag: `-F sep` — single-byte field separator. Default splits on runs of whitespace (` `, `\t`), trimming leading/trailing; with `-F:` an empty field between adjacent separators is preserved.
-    - Out of scope (post-MVP): regex patterns like `/foo/ { ... }`, variable assignment, arithmetic/string expressions, `NR`/`NF` as user-readable names, `getline`, multi-byte `-F`, escape sequences inside string literals.
-    - `racos-test::test_awk_basic` exercises all five paths: `BEGIN` runs without input, `{print $0}` echoes the line, `{print $2}` picks field 2, `-F :` colon-splitting, `END` runs after input. Emits `T33-AWK-OK`.
+### 2.2 racsh UX
 
----
+- **Persistent history** — `~/.racsh_history`, read at startup, append on
+  each line, cap at ~1000 entries.
+- **Tab completion** — minimum scope: command names from `$PATH`,
+  file paths from the current directory. Matches the existing
+  character-mode line editor in `shell/src/readline.rs` (no readline
+  dependency).
+- **Aliases** — `alias ll='ls -la'`. Expansion happens at parse time;
+  stored in `Env::aliases`.
+- **Prompt expansions** — `${PS1}` already parses but `\u`, `\h`, `\w`
+  substitutions don't happen. Add the basic set.
+- **`$(...)` command-substitution edge case** — the one found during the
+  awk T3.3 smoke (`'END { ... }'` inside `$(...)` fails with `sh: cannot
+  open script:` status 127, even though the kernel-side argc=3 is
+  correct). Fix the racsh parser and re-enable the dropped awk END smoke.
 
-## 5. Tier 4 — strategiczne
+### 2.3 Network tools
 
-- [ ] **T4.1 — TLS/HTTPS w stacku sieciowym**
-  - Crypto (ed25519 dla podpisów, ChaCha20-Poly1305 dla TLS) — duża praca
-  - Odkładać do momentu gdy będzie repo paczek (T3.2 done)
+| Tool | DoD |
+|---|---|
+| `ping` | ICMP echo; either a raw socket or a new `sys_icmp` |
+| `nc` | TCP/UDP listen + connect (uses existing `sys_socket`) |
+| `curl`-like | wget exists; need GET/POST/headers/redirect against the existing HTTP/1.0 client |
+| `ss` / `netstat` | reads `/proc/net/{tcp,udp}` (procfs entries to add) |
 
-- [x] **T4.2 — Audyt `unsafe` pod policy z ARCHITECTURE.md §3.3** (BACKLOG COMPLETE)
-  - Discovery: kernel + libs/libc-lite had **457 `unsafe {` blocks** (plus 137 `unsafe fn`). Pre-PR-#18, 67 had a `// SAFETY:` comment in the preceding window — 14% coverage.
-  - Chipped through the backlog over 11 sweep PRs (#18-#29). Final state: **456 / 456 covered, 0 missing.** (The `--` block count dropped from 457 to 456 in PR #26 when the crate-level discipline comment in `kernel/src/main.rs` was rephrased to stop matching the literal-text-grep false positive.)
-  - `bash scripts/check-unsafe-safety.sh --strict` now passes clean and is wired into CI as the `Unsafe-safety annotation lint` job. It runs advisory for one cycle (continue-on-error: true) and then flips to required.
-  - **Per-file completion table** (counts pre-T4.2 → 0):
+### 2.4 Acceptance criteria (DoD for v0.2)
 
-    | File | Pre-T4.2 missing | PR # |
-    |---|---|---|
-    | `kernel/src/syscall/handlers.rs` | 128 / 136 | #18, #20, #21, #23 |
-    | `libs/libc-lite/src/lib.rs` | 78 / 83 | #22, #24, #25 |
-    | `kernel/src/main.rs` | 36 / 41 | #26 |
-    | `kernel/src/drivers/ahci.rs` | 17 / 22 | #27 |
-    | `kernel/src/task/scheduler.rs` | 13 / 17 | #27 |
-    | `kernel/src/drivers/virtio_net.rs` | 12 / 15 | #27 |
-    | `kernel/src/elf.rs` | 8 / 10 | #28 |
-    | `kernel/src/vfs/fat32.rs` | 7 / 7 | #28 |
-    | `kernel/src/tty/vt.rs` | 7 / 7 | #28 |
-    | `kernel/src/arch/idt.rs` | 7 / 8 | #28 |
-    | All remaining files (process, procfs, fb_console, mm/*, vfs/*, arch/*, drivers/*, etc.) | 75 / 75 | #29 |
-
-  - **Patterns documented** (recurring rationales now codified in code): kernel-singleton accessors (SCHEDULER, FRAME_ALLOCATOR, LAPIC_BASE, ACPI_INFO, MODULE_MANAGER, NET_STATE, FB_CONSOLE, mount_table, racfs::instance, tmpfs::instance); cli/sti scheduler windows; MMIO/PIO at architectural ports (PCI CF8/CFC, PIC, PIT, LAPIC, AHCI, virtio); freshly-allocated-frame writes (exclusively-owned identity-mapped pages); cpuid/cr4/cr2/rdtsc/hlt/lgdt/ltr inline asm; SpinLockGuard exclusive ownership of UnsafeCell; Drop-time pipe close stores; exception/IRQ handler entries; user-pointer reads/writes bounded by validate_user_ptr / validate_user_string.
-  - **Pozostałe (deferred):** flip the new CI job from `continue-on-error: true` to required after one clean green run — single-line change. `unsafe fn` audit is a separate effort (137 functions) and not gated by the §3.3 block policy.
-
-- [x] **T4.3 — Synchronizacja ADR/spec z kodem** (first pass)
-  - `ARCHITECTURE.md` §1.3 — language-stack table rewritten in place. C17 userland phase 1 was skipped outright; every shipped binary is Rust `#![no_std]` on libc-lite. New table separately calls out the bootloader (Rust UEFI), the asm extents (boot stub, syscall entry, AP trampoline, naked sigreturn helpers), and libc-lite as the Rust crate that *also* exposes a C ABI surface.
-  - **ADR-003 (language stack)** — added "Implementation status (2026-06-16)" section noting userland phase 1 was skipped, `clang/lld` aren't used, and CI runs a single Cargo toolchain.
-  - **ADR-006 (process/thread model)** — added implementation status: `sys_fork` (#26), `sys_clone` (#77), `sys_exec` (#11), `sys_wait`/`sys_waitpid` (#13/#63) are all wired. Orphan reparenting + SIGCHLD-on-exit shipped in PRs #5/#6. The "POSIX patterns won't work initially" caveat is outdated.
-  - **ADR-007 (scheduler MVP)** — added implementation status: PR #14 shipped AP bring-up, per-CPU GS + LAPIC timers, `/proc/cpuinfo` enumeration, CI `-smp 4`. Per-CPU run queues + IPI preemption still on the scheduler-refactor TODO.
-  - **ADR-008 (memory model)** — added note: huge pages stay kernel-internal (identity map only), CoW is still TODO so every `sys_fork` pays a full page-table-copy cost.
-  - Lighter check on ADRs 001/002/004/005/009-013/015-020 didn't surface blatant drift.
-  - **Second pass:** Implementation-status sections added to ADR-009 (VFS — 6 filesystems mounted, racsysfs collapsed into procfs, no separate dentry cache), ADR-011 (RacInit engine shipped at PID 1; servicectl/.timer/socket activation deferred), ADR-013 (boot-time serial logging shipped, journal/log-levels deferred), ADR-018 (rpkg format shipped; Ed25519 signing gated on T4.1 crypto), ADR-019 (DAC + caps + SMEP/SMAP + NX + validate_user_ptr shipped; ASLR/seccomp/secure-boot deferred).
-  - **CHANGELOG.md** introduced at repo root in Keep-a-Changelog format with the v0.1.0 milestone seeded from the merged PR history (Tier 1-4 entries, Added/Changed/Fixed/Security categories).
-  - **Pozostałe (deferred):** ADR-009 racsysfs decision (drop or add as an ADR amendment), ADR-013 once a real journal exists, ADR-018 once T4.1 crypto lands.
+- All §2.1 binaries ship at `/bin/<tool>` and have a `T02-<TOOL>-OK`
+  racos-test marker.
+- `racsh` boots into a session where tab-completion, history, and at
+  least one user-set alias survive a `clear`, `exit`, new session.
+- `ping 8.8.8.8` and `nc -l 8080 &` + `nc 127.0.0.1 8080 < hi.txt` both
+  produce expected output in the QEMU interactive-smoke job.
+- New CI marker `MILESTONE-V0.2-OK` printed when all of the above pass
+  in a single boot.
 
 ---
 
-## 6. Co dalej (post v1.0)
+## 3. v0.3 — Persistent storage
 
-Eksplicytnie wykluczone z v1.0 wg `ARCHITECTURE.md` §13 (zostawione jako placeholder):
+> **Goal**: nothing important lives only on a RAM-disk. `/home`, `/etc`,
+> `/var/log`, `/var/lib/rpkg` all survive a reboot. Packages, scripts,
+> user preferences carry across sessions.
+
+### 3.1 Block driver
+
+- **VirtIO-block** as a second block-device driver alongside AHCI. AHCI
+  works for QEMU's emulated SATA; VirtIO-block is the cleaner
+  paravirtualised path. Plumb into `drivers/block.rs` so `find("vda")`
+  works the same way `find("sda")` does.
+
+### 3.2 racfs maturity
+
+- **Journaling** — log-mode write-then-commit for metadata operations
+  (create / unlink / rename / set_metadata). Avoids torn superblock
+  states on crash.
+- **Allocator** — switch from linear scan to bitmap-based + free-block
+  hint to make large-file growth cheaper.
+- **fsck-like consistency check** at mount — confirm every allocated
+  block is reachable from a live inode.
+
+### 3.3 Mount layout
+
+- `/home` on persistent racfs (currently mountpoint doesn't exist).
+- `/etc` config moves out of initramfs into persistent storage with
+  fallback-to-defaults if the partition is empty.
+- `/var/log` and `/var/lib/rpkg` move to persistent storage.
+
+### 3.4 Boot from real media
+
+- USB-stick boot path documented + smoke-tested (currently only ESP via
+  `fat:rw:esp` / pre-baked `esp.img` in CI).
+
+### 3.5 Acceptance criteria (DoD for v0.3)
+
+- Two-boot CI smoke extended: first boot installs an rpkg + writes to
+  `/home/test/.racsh_history`; second boot reads both back and prints
+  `MILESTONE-V0.3-OK`.
+- `bash scripts/check-unsafe-safety.sh --strict` still clean.
+
+---
+
+## 4. v0.4 — Graphics base
+
+> **Goal**: framebuffer console becomes a proper graphical terminal.
+> RacOS gets its first "wow" screenshot.
+
+### 4.1 GOP framebuffer plumbing
+
+BootInfo already carries `framebuffer.address` / `pitch` / `height`;
+`fb_console.rs` writes pixels directly. Confirm and document the format
+invariant (UEFI spec → BGRA 32bpp on QEMU OVMF; physical hardware can
+present RGBA). Handle both.
+
+### 4.2 Graphical RacTerm
+
+- Render directly from `Terminal::buffer` to the framebuffer (no PTY
+  byte-forwarding). Today the buffer is updated but the actual pixels
+  come from `fb_console::put_char` ANSI-naive output.
+- Bitmap font rendering — extend the existing 8x16 font or add a 16x16
+  option.
+- **UTF-8 multibyte** in the print path.
+- **Mouse-tracking modes** (1000 / 1006).
+
+### 4.3 Optional: VirtIO-GPU
+
+For 2D acceleration and resolution probing. Stretch goal; baseline is
+the GOP framebuffer.
+
+### 4.4 Acceptance criteria (DoD for v0.4)
+
+- New CI job `Graphics smoke` boots QEMU with `-vga std`, asserts a
+  24-bit BGRA framebuffer was claimed + RacTerm wrote ≥ 1000 distinct
+  non-zero pixel values to it.
+- New marker `MILESTONE-V0.4-OK`.
+
+---
+
+## 5. Parallel tracks (after v0.4)
+
+These don't gate any single milestone; pick whichever has the most
+leverage at the moment.
+
+### 5.1 Networking hardening
+
+- **TCP retransmissions** — currently a transient packet loss kills the
+  connection. Per-segment retransmit timer + exponential backoff.
+- **Congestion control** — Reno or simpler Tahoe.
+- **Bigger receive window** — current MSS-1 send window pins throughput.
+- **HTTP server** in userland — static files + a simple CGI-like hook.
+- **More tools** — traceroute stub, `ip` / `route`-style display.
+- **IPv6 partial** — addresses, neighbour discovery, RA. Real routing
+  is a separate effort.
+
+### 5.2 SMP scheduler refactor
+
+- **Per-CPU run queues** — replace the single global queue.
+- **IPI-based preemption** — LAPIC ICR send-vector for cross-CPU yield.
+- **Per-CPU TSS** so APs can handle ring-3 IRQs (today APs only run
+  the parked timer-tick loop).
+- **Work stealing** between queues.
+
+### 5.3 Packaging maturity (rapt layer)
+
+The next "system becomes a platform" milestone:
+
+- **HTTP-only repository protocol** — `rapt update` fetches an
+  `index.toml` from a configured mirror, computes the dep graph,
+  downloads `.rpk` blobs. Works today without crypto.
+- **Local mirror script** — `scripts/rapt-mirror.sh` serves
+  `target/packages/` over a tiny HTTP listener for the smoke tests.
+- **`/etc/rapt/sources.toml`** — on-disk repo list with priority + channel.
+- **Channel selection** — stable / testing / dev.
+- **Once T4.1 crypto lands**: Ed25519 signed packages + signed
+  repository index. Mandatory by default once shipped (per ADR-019).
+
+### 5.4 T4.1 — TLS / HTTPS (crypto from scratch)
+
+- ChaCha20-Poly1305 (AEAD)
+- X25519 (ECDH)
+- Ed25519 (signatures — also unblocks ADR-018 signing)
+- SHA-256 / SHA-384
+- HKDF
+- TLS 1.3 handshake (1.2 is a separate KDF + cipher zoo, skipped)
+- `libs/tls/` crate wired into `racnet` as a `Stream::Tls(...)` variant
+- Pinned-cert MVP (`/etc/ssl/racos-roots/<x>.der`); full X.509 chain
+  validation is a follow-up
+
+### 5.5 Memory model improvements
+
+- **Real `mmap`** — `sys_mmap` returns `ENOSYS` today. Anon pages,
+  file-backed pages, `PROT_*` enforcement.
+- **CoW on `sys_fork`** — fork copies every page eagerly today.
+- **`mprotect`** — works for `noexec`/`nowrite` flags but doesn't TLB-flush.
+
+### 5.6 Stability + DX
+
+- **Better panic handling** — walk the kernel stack on panic, print a
+  symbolised backtrace from debug info.
+- **`unsafe fn` audit** — 137 functions still missing per-call-site
+  SAFETY notes. T4.2 closed the `unsafe {` block backlog; the `unsafe fn`
+  body backlog is a separate effort.
+- **Property-based tests** — `proptest` for parser-heavy crates (racsh,
+  init, rpkg).
+- **More integration tests** — every new syscall ships with a racos-test
+  case.
+
+---
+
+## 6. Carried-forward TODOs
+
+Small, known issues that don't fit a milestone but should stay visible:
+
+- **racsh `$(...)` edge case** — script with leading keyword (`END`, …)
+  inside `$(...)` substitution fails with `sh: cannot open script:`
+  status 127. Re-enables the dropped awk END smoke once fixed.
+- **`try_deliver_user_handler:510` flaky panic** — `gs:[0x10]` syscall-
+  frame pointer is occasionally unaligned. Documented in the
+  `racos-ci-flakiness` memory. Fix the alignment invariant in
+  `syscall::entry`.
+- **`servicectl` CLI** — admin frontend for the RacInit engine
+  (ADR-011). Engine API exists; binary is the missing piece.
+- **Real RTC source** — unblocks proper `[timestamp]` log format from
+  ADR-013.
+- **Mount-flag enforcement** — `sys_mount` parses `noexec`/`nosuid`/
+  `nodev` but the kernel doesn't act on them (ADR-019 §Still deferred).
+- **VirtIO-net feature negotiation** — currently asks only for MAC;
+  modern devices want more (MRG_RXBUF, CTRL_VQ) for sane performance.
+- **`uefi` crate version bump** — pinned at 0.34. Track upstream
+  releases; bump when a CVE lands.
+
+---
+
+## 7. Long-term (post v1.0)
+
+Carried from `ARCHITECTURE.md §13` (explicitly excluded from v1.0):
+
 - GUI desktop environment
-- Pełna kompatybilność glibc / Linux userspace
-- Kontenery na poziomie Dockera
-- Szeroki support sterowników HW
-- ARM, RISC-V, inne architektury
+- Full glibc / Linux userspace compatibility
+- Container runtime (Docker-class)
+- Wide HW driver support beyond QEMU + a couple of physical test rigs
+- ARM, RISC-V, other architectures
 - Real-time scheduling
 
+New long-term items added by this revision:
+
+- **Mature packaging** — once rapt + signing are in place, build a real
+  community repo. `rapt install hello` returns a binary cryptographically
+  tied to a known maintainer key.
+- **Sandboxing extensions** — capability model + namespaces + seccomp
+  allowlist (capability bits and DAC exist today; ASLR + seccomp are
+  documented as deferred in ADR-019).
+- **Docs completion** — every `docs/*.md` referenced from README exists
+  and is current. Architecture diagrams. More ADRs for decisions made
+  post-bootstrap.
+- **Community** — `CONTRIBUTING.md`, GitHub issue templates, a real
+  release process for tagged versions, public discoverability work
+  (r/osdev posts, X / GitHub Discussions).
+- **Application ports** — proof of concept: a single non-trivial Rust
+  binary from crates.io running on RacOS (likely a TUI like `bottom` or
+  `gitui`).
+
 ---
 
-## 7. Jak aktualizować tę roadmapę
+## 8. Operating principles (carried forward from v0.1.0)
 
-- Każda zmiana priorytetów → PR z update tego pliku + uzasadnienie w commit message
-- Ukończenie zadania → zaznacz `[x]` w tym pliku w PR-ze który zamyka pracę
-- Nowa praca która nie pasuje do żadnego tieru → dyskusja w issue zanim trafi do roadmapy
-- Snapshot stanu obecnego (sekcja 1) refreshować po każdym domknięciu tieru
+- **Build from scratch where it teaches something** — the network stack
+  (no third-party crate), libc-lite (no `libc` fork), in-tree TOML
+  subset (no `toml` crate) are all examples. The kernel currently
+  has **zero** external Rust dependencies; the whole shipped target
+  carries two (`uefi` 0.34 + `log` 0.4, both bootloader-only). See
+  [`docs/DEPENDENCIES.md`](DEPENDENCIES.md) for the full inventory
+  and the "what we do not depend on" rationale.
+- **Minimise unsafe in userland** — every userland crate uses
+  `#![forbid(unsafe_code)]` where lints allow it, or annotates every
+  block with `// SAFETY:` per ARCHITECTURE.md §3.3. The
+  `Unsafe-safety annotation lint (--strict)` CI gate enforces this for
+  kernel and libc-lite.
+- **Write ADRs for big decisions** — see [`docs/adr/`](adr/). New ADRs
+  go through PR review and link from this roadmap once accepted.
+- **Test with QEMU device variety** — `-device virtio-blk-pci`,
+  `-vga std`, `-vga virtio`, `-device e1000` vs `-netdev virtio-net`
+  all surface different driver paths.
+- **Security reports** — see [`SECURITY.md`](../SECURITY.md) for the
+  disclosure channel + scope.
+
+---
+
+## 9. How to update this roadmap
+
+- Each merged PR with scope changes also amends this file (mark item
+  `[x]`, move to "completed" if a milestone closed, add new TODO if
+  one surfaced).
+- New milestones come from a discussion + PR that updates §2-§5 and
+  references the existing ADRs / planned ADRs.
+- Snapshot of §1 (Completed cycle) gets refreshed on each milestone
+  release tag.
+- [`CHANGELOG.md`](../CHANGELOG.md) gets the user-facing summary; this
+  file is the developer-facing plan.
