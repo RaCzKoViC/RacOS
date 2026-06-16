@@ -7,7 +7,7 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 // Modern unsafe-discipline: every unsafe op should sit in its own
-// `unsafe { ... }` block, even inside an `unsafe fn` (Rust 2024-edition
+// `unsafe`-block, even inside an `unsafe fn` (Rust 2024-edition
 // default, backported here as a warning so we can migrate gradually
 // without forcing the edition bump or a 200+ site refactor in one
 // commit). Each unsafe block touched in new code carries its own
@@ -72,6 +72,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial::init();
 
     // Initialize framebuffer console if available
+    // SAFETY: boot-once; boot_info points at the bootloader-supplied region.
     unsafe {
         fb_console::init(boot_info);
     }
@@ -143,6 +144,8 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // ACPI/MADT discovery now that the heap can hold parsed topology
     // (CPU + IOAPIC vectors). The arch layer intentionally leaves this for
     // main so that the rsdp_address from BootInfo stays explicit.
+    // SAFETY: boot-once sequence (ACPI parse, SMP enum, BSP LAPIC + timer,
+    // PerCpu slot claim, AP bring-up) — heap is up and IRQs still off.
     unsafe {
         arch::acpi::init(boot_info.rsdp_address);
         arch::smp::init();
@@ -204,11 +207,13 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Snapshot the boot-time kernel CR3. All future user page tables inherit
     // their kernel mappings from this snapshot (see virt::create_user_page_table).
     // Must happen before any user process is constructed.
+    // SAFETY: boot-once; CR3 reflects the bootloader-built kernel mapping.
     unsafe {
         mm::virt::capture_kernel_cr3();
     }
 
     // Initialize VFS
+    // SAFETY: boot-once init of the mount_table singleton.
     unsafe {
         vfs::mount::init();
     }
@@ -247,6 +252,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
         let initramfs_fs = vfs::initramfs::InitramfsFs::new(initramfs);
 
+        // SAFETY: mount_table is a kernel singleton initialised once at boot.
         unsafe {
             vfs::mount::mount_table().mount("/", initramfs_fs);
         }
@@ -258,6 +264,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         devfs.register_defaults();
         let devfs_fs = vfs::devfs::DevfsFilesystem::new(devfs);
 
+        // SAFETY: mount_table singleton.
         unsafe {
             vfs::mount::mount_table().mount("/dev", devfs_fs);
         }
@@ -265,8 +272,10 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Set up and mount tmpfs at /tmp
     {
+        // SAFETY: tmpfs::init is boot-once.
         let tmpfs = unsafe { vfs::tmpfs::init() };
         let tmpfs_fs = vfs::tmpfs::TmpfsFilesystem::new(tmpfs);
+        // SAFETY: mount_table singleton.
         unsafe {
             vfs::mount::mount_table().mount("/tmp", tmpfs_fs);
         }
@@ -276,6 +285,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     {
         let procfs = vfs::procfs::Procfs::new();
         let procfs_fs = vfs::procfs::ProcFilesystem::new(procfs);
+        // SAFETY: mount_table singleton.
         unsafe {
             vfs::mount::mount_table().mount("/proc", procfs_fs);
         }
@@ -283,8 +293,10 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Set up and mount racfs at /var (ephemeral, block-device-backed on ram0)
     {
+        // SAFETY: racfs::init is boot-once (singleton on ram0).
         let racfs = unsafe { vfs::racfs::init() };
         let racfs_fs = vfs::racfs::RacfsFilesystem::new(racfs);
+        // SAFETY: mount_table singleton.
         unsafe {
             vfs::mount::mount_table().mount("/var", racfs_fs);
         }
@@ -299,6 +311,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 vfs::fat32::smoke_test(&fat);
                 let fat_fs = vfs::fat32::Fat32Filesystem::new(fat);
                 // Mount point: create /fat on the root initramfs first.
+                // SAFETY: mount_table singleton.
                 let mt = unsafe { vfs::mount::mount_table() };
                 if mt.lookup_path("/fat").is_err() {
                     // initramfs doesn't expose mkdir; we mount on / and rely
@@ -306,6 +319,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                     // the FAT32 instance even without a directory entry on
                     // the root FS.
                 }
+                // SAFETY: mount_table singleton.
                 unsafe {
                     vfs::mount::mount_table().mount("/fat", fat_fs);
                 }
@@ -326,6 +340,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 // it off to the mount table.
                 vfs::racfs::persistence_test(&racfs, "sda");
                 let racfs_fs = vfs::racfs::RacfsFilesystem::new(racfs);
+                // SAFETY: mount_table singleton.
                 unsafe {
                     vfs::mount::mount_table().mount("/mnt", racfs_fs);
                 }
@@ -352,6 +367,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Phase F.2: kernel-side writeback daemon. Periodically flushes dirty
     // cache entries on every block-backed mount so user-visible data lands
     // on disk even without an explicit sync().
+    // SAFETY: scheduler::spawn from boot path before sti — single-threaded.
     unsafe {
         if let Err(e) = task::scheduler::spawn("flushd", flushd_task) {
             serial::serial_println!("[  0.000310] RACORE: flushd spawn failed: {}", e);
@@ -362,6 +378,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     if RUN_KERNEL_SELF_TESTS {
         // Optional bring-up self-tests.
+        // SAFETY: scheduler::spawn from boot path — single-threaded.
         unsafe {
             task::scheduler::spawn("test-task-a", test_task_a)
                 .expect("Failed to spawn test-task-a");
@@ -399,6 +416,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Enable interrupts
     serial::serial_println!("[  0.000400] RACORE: Enabling interrupts");
+    // SAFETY: bare sti — boot complete, IDT/PIC/PIT ready, scheduler armed.
     unsafe {
         core::arch::asm!("sti", options(nomem, nostack));
     }
@@ -428,6 +446,7 @@ fn try_spawn_init() -> Option<u32> {
 
     for path in INIT_PATHS {
         // Look up the file in VFS
+        // SAFETY: mount_table singleton.
         let mt = unsafe { vfs::mount::mount_table() };
         let data = match mt.lookup_path(path) {
             Ok((fs, ino)) => {
@@ -491,6 +510,7 @@ fn try_spawn_init() -> Option<u32> {
 
         // Set up stdin/stdout/stderr (FDs 0, 1, 2) pointing to /dev/console
         {
+            // SAFETY: mount_table singleton.
             let mt = unsafe { vfs::mount::mount_table() };
             if let Ok((fs, ino)) = mt.lookup_path("/dev/console") {
                 if let Ok(inode) = fs.get_inode(ino) {
@@ -508,6 +528,7 @@ fn try_spawn_init() -> Option<u32> {
         }
 
         // Spawn it
+        // SAFETY: scheduler::spawn_user — caller is the boot path or kernel.
         match unsafe { task::scheduler::spawn_user(process) } {
             Ok(pid) => {
                 serial::serial_println!(
@@ -535,6 +556,7 @@ fn arm_init_watchdog(init_pid: u32) {
     INIT_WATCH_PID.store(init_pid, Ordering::Relaxed);
     INIT_WATCH_START_TICK.store(interrupts::pit::ticks(), Ordering::Relaxed);
 
+    // SAFETY: scheduler::spawn for a kernel-side watchdog task.
     match unsafe { task::scheduler::spawn("init-watchdog", init_watchdog_task) } {
         Ok(pid) => serial::serial_println!(
             "[  0.000360] RACORE: init watchdog armed (PID {}, watches init PID {})",
@@ -558,6 +580,7 @@ fn init_watchdog_task() -> ! {
         let now = interrupts::pit::ticks();
 
         if init_pid != 0 {
+            // SAFETY: cli/sti window so the task-table read is consistent.
             let init_state = unsafe {
                 core::arch::asm!("cli", options(nomem, nostack));
                 let state = task::scheduler::with_task_by_pid(init_pid, |t| t.state);
@@ -601,6 +624,7 @@ fn spawn_kernel_shell_once() {
         return;
     }
 
+    // SAFETY: scheduler::spawn — emergency kernel-side shell, called once.
     unsafe {
         task::scheduler::spawn("kernel-shell", kernel_shell_task)
             .expect("Failed to spawn kernel-shell");
@@ -895,6 +919,7 @@ fn kernel_shell_task() -> ! {
 
     loop {
         if drivers::ps2_keyboard::input_mode() == drivers::ps2_keyboard::InputMode::Polling {
+            // SAFETY: poll_input touches PS/2 I/O ports; gated on Polling mode.
             unsafe {
                 drivers::ps2_keyboard::poll_input();
             }
@@ -945,6 +970,7 @@ fn test_racfs() -> ! {
     serial::serial_println!("[TEST-RACFS] Starting racfs block-device test");
 
     // 1. mkdir /var/test
+    // SAFETY: racfs::instance is a kernel singleton initialised at boot.
     let racfs = unsafe { vfs::racfs::instance() };
     match racfs.create_dir(0, "test") {
         Ok(dir_ino) => serial::serial_println!("[TEST-RACFS] mkdir /var/test => ino {}", dir_ino),
@@ -1085,6 +1111,7 @@ fn test_security() -> ! {
     }
 
     // C2/C4 integration: CAP_SETUID gates setuid behavior.
+    // SAFETY: cli/sti window so the creds mutation is atomic.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let _ = task::scheduler::with_current_task_mut(|t| {
@@ -1106,6 +1133,7 @@ fn test_security() -> ! {
         serial::serial_println!("[TEST-SEC ] C2 CAP_SETUID gate FAIL ({:?})", denied);
     }
 
+    // SAFETY: cli/sti window so the cap_effective mutation is atomic.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let _ = task::scheduler::with_current_task_mut(|t| {
@@ -1123,6 +1151,7 @@ fn test_security() -> ! {
     }
 
     // Restore root credentials for this long-lived kernel task.
+    // SAFETY: cli/sti window so the creds restore is atomic.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let _ = task::scheduler::with_current_task_mut(|t| {
@@ -1242,6 +1271,7 @@ fn flushd_task() -> ! {
     loop {
         let now = interrupts::pit::ticks();
         if now.saturating_sub(last_run) >= FLUSHD_INTERVAL_TICKS {
+            // SAFETY: flush_all walks the mount_table singleton.
             let synced = unsafe { vfs::mount::flush_all() };
             total_syncs += synced as u64;
             serial::serial_println!(
@@ -1269,6 +1299,8 @@ fn flushd_task() -> ! {
 /// returns. The port maps `eax` → `(eax << 1) | 1` as QEMU's exit code.
 #[cfg(feature = "ci-smoke")]
 fn exit_qemu(code: u32) -> ! {
+    // SAFETY: write to QEMU isa-debug-exit port 0xf4; documented as the
+    // CI exit channel and only compiled under the ci-smoke feature.
     unsafe {
         core::arch::asm!(
             "out dx, eax",
@@ -1355,12 +1387,15 @@ fn run_ci_smoke_and_exit() -> ! {
     // IF=0 (kernel_main hasn't enabled IRQs yet), so the BSP timer is
     // armed but masked until we sti briefly. APs sti'd in ap_entry, so
     // they may already have ticks; the busy wait gives them more.
+    // SAFETY: bare sti so the BSP LAPIC timer can fire during the
+    // busy-loop below.
     unsafe {
         core::arch::asm!("sti", options(nomem, nostack));
     }
     for _ in 0..2_000_000u32 {
         core::hint::spin_loop();
     }
+    // SAFETY: bare cli to restore the pre-smoke IF=0 invariant.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
     }
@@ -1422,6 +1457,7 @@ fn run_ci_smoke_and_exit() -> ! {
     }
 
     // 2. VFS mount table topology.
+    // SAFETY: mount_table singleton.
     let mt = unsafe { vfs::mount::mount_table() };
     check!("vfs::mount /", mt.is_mounted("/"));
     check!("vfs::mount /dev", mt.is_mounted("/dev"));
@@ -1435,6 +1471,7 @@ fn run_ci_smoke_and_exit() -> ! {
 
     // 3. racfs round-trip on ram0 (file create + write + read + unlink).
     {
+        // SAFETY: racfs::instance singleton.
         let racfs = unsafe { vfs::racfs::instance().clone() };
         let ino = racfs.create_file(0, "smoke.txt").unwrap_or(0);
         check!("racfs::create_file", ino > 0);
@@ -1458,6 +1495,7 @@ fn run_ci_smoke_and_exit() -> ! {
     //     coherency between mutating writes and a fresh mount-table
     //     lookup, it will surface here as either ENOENT or a 0-byte read.
     if has_sda {
+        // SAFETY: mount_table singleton.
         let mt = unsafe { vfs::mount::mount_table() };
         let mut subtest_pass = true;
         let payload = b"mnt-roundtrip-9876";
