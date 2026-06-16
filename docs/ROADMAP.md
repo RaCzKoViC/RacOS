@@ -146,28 +146,28 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
   - Crypto (ed25519 dla podpisów, ChaCha20-Poly1305 dla TLS) — duża praca
   - Odkładać do momentu gdy będzie repo paczek (T3.2 done)
 
-- [~] **T4.2 — Audyt `unsafe` pod policy z ARCHITECTURE.md §3.3** (first pass)
-  - Discovery: kernel + libs/libc-lite have **457 `unsafe {` blocks** (plus 137 `unsafe fn`). Before this PR only 67 of them had a `// SAFETY:` comment in the preceding window — a 14% coverage rate. Chipping at the backlog rather than gating the policy in CI right away is the right call.
-  - First sample pass (PR #18):
-    - [x] **`kernel/src/task/process.rs`** — fully annotated, 9 of 9 blocks now have WHY / INVARIANT / FAILURE per the §3.3 format.
-    - [x] **`scripts/check-unsafe-safety.sh`** — bash advisory lint. Walks `kernel/` and `libs/`, flags each `unsafe {` whose preceding 5 lines lack `// SAFETY:`. Default exit 0 (informational); a `--strict` flag flips to exit 1 so a future CI gate can pick it up once the backlog is small.
-  - Second pass (this PR — handlers.rs sample chunk):
-    - [x] **`kernel/src/syscall/handlers.rs`** — top-of-file through sys_dup2 (~24 unsafe blocks). Patterns documented: cli/sti scheduler windows (current_creds / current_umask / sys_read / sys_write / sys_open / sys_close / sys_dup / sys_dup2 / sys_pipe / sys_exit), mount_table singleton accesses, validate_user_ptr-then-deref pattern in argv/envp collection, SyscallFrame access via PER_CPU's gs:[0x10]. handlers.rs now at 41 / 136 covered (95 still missing).
-  - **Total after this PR: 100 of 457 covered (357 missing)**. Run `bash scripts/check-unsafe-safety.sh` for the live count.
-  - **To-do queue (sorted by gap size; same script reproduces the list):**
-    | File | covered / total | missing |
+- [x] **T4.2 — Audyt `unsafe` pod policy z ARCHITECTURE.md §3.3** (BACKLOG COMPLETE)
+  - Discovery: kernel + libs/libc-lite had **457 `unsafe {` blocks** (plus 137 `unsafe fn`). Pre-PR-#18, 67 had a `// SAFETY:` comment in the preceding window — 14% coverage.
+  - Chipped through the backlog over 11 sweep PRs (#18-#29). Final state: **456 / 456 covered, 0 missing.** (The `--` block count dropped from 457 to 456 in PR #26 when the crate-level discipline comment in `kernel/src/main.rs` was rephrased to stop matching the literal-text-grep false positive.)
+  - `bash scripts/check-unsafe-safety.sh --strict` now passes clean and is wired into CI as the `Unsafe-safety annotation lint` job. It runs advisory for one cycle (continue-on-error: true) and then flips to required.
+  - **Per-file completion table** (counts pre-T4.2 → 0):
+
+    | File | Pre-T4.2 missing | PR # |
     |---|---|---|
-    | `kernel/src/syscall/handlers.rs` | 41 / 136 | 95 |
-    | `libs/libc-lite/src/lib.rs` | 5 / 83 | 78 |
-    | `kernel/src/main.rs` | 5 / 41 | 36 |
-    | `kernel/src/drivers/ahci.rs` | 5 / 22 | 17 |
-    | `kernel/src/task/scheduler.rs` | 4 / 17 | 13 |
-    | `kernel/src/drivers/virtio_net.rs` | 3 / 15 | 12 |
-    | `kernel/src/elf.rs` | 2 / 10 | 8 |
-    | `kernel/src/vfs/fat32.rs` | 0 / 7 | 7 |
-    | `kernel/src/tty/vt.rs` | 0 / 7 | 7 |
-    | `kernel/src/arch/idt.rs` | 1 / 8 | 7 |
-  - **Pozostałe (deferred):** chip through the queue in follow-up PRs, biggest-bang-for-buck first (handlers.rs is one third of the remaining backlog by itself). Flip the lint to a CI gate (probably `continue-on-error: true` first, then mandatory) once the count clears 50.
+    | `kernel/src/syscall/handlers.rs` | 128 / 136 | #18, #20, #21, #23 |
+    | `libs/libc-lite/src/lib.rs` | 78 / 83 | #22, #24, #25 |
+    | `kernel/src/main.rs` | 36 / 41 | #26 |
+    | `kernel/src/drivers/ahci.rs` | 17 / 22 | #27 |
+    | `kernel/src/task/scheduler.rs` | 13 / 17 | #27 |
+    | `kernel/src/drivers/virtio_net.rs` | 12 / 15 | #27 |
+    | `kernel/src/elf.rs` | 8 / 10 | #28 |
+    | `kernel/src/vfs/fat32.rs` | 7 / 7 | #28 |
+    | `kernel/src/tty/vt.rs` | 7 / 7 | #28 |
+    | `kernel/src/arch/idt.rs` | 7 / 8 | #28 |
+    | All remaining files (process, procfs, fb_console, mm/*, vfs/*, arch/*, drivers/*, etc.) | 75 / 75 | #29 |
+
+  - **Patterns documented** (recurring rationales now codified in code): kernel-singleton accessors (SCHEDULER, FRAME_ALLOCATOR, LAPIC_BASE, ACPI_INFO, MODULE_MANAGER, NET_STATE, FB_CONSOLE, mount_table, racfs::instance, tmpfs::instance); cli/sti scheduler windows; MMIO/PIO at architectural ports (PCI CF8/CFC, PIC, PIT, LAPIC, AHCI, virtio); freshly-allocated-frame writes (exclusively-owned identity-mapped pages); cpuid/cr4/cr2/rdtsc/hlt/lgdt/ltr inline asm; SpinLockGuard exclusive ownership of UnsafeCell; Drop-time pipe close stores; exception/IRQ handler entries; user-pointer reads/writes bounded by validate_user_ptr / validate_user_string.
+  - **Pozostałe (deferred):** flip the new CI job from `continue-on-error: true` to required after one clean green run — single-line change. `unsafe fn` audit is a separate effort (137 functions) and not gated by the §3.3 block policy.
 
 - [x] **T4.3 — Synchronizacja ADR/spec z kodem** (first pass)
   - `ARCHITECTURE.md` §1.3 — language-stack table rewritten in place. C17 userland phase 1 was skipped outright; every shipped binary is Rust `#![no_std]` on libc-lite. New table separately calls out the bootloader (Rust UEFI), the asm extents (boot stub, syscall entry, AP trampoline, naked sigreturn helpers), and libc-lite as the Rust crate that *also* exposes a C ABI surface.
