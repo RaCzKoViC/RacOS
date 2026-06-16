@@ -389,6 +389,14 @@ name = "rpkg"
 version = "0.1.0"
 
 [[package]]
+name = "rpkg-bin"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+ "rpkg",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"

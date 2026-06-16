@@ -8,4 +8,6 @@ name = "rpkg"
 path = "src/main.rs"
 
 [dependencies]
-libc-lite = { path = "../../../libs/libc-lite" }
+# rpkg lib without its default `std` feature so the no_std bin can link.
+rpkg = { path = "../rpkg", default-features = false }
+libc-lite = { path = "../../libs/libc-lite", features = ["alloc"] }
