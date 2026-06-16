@@ -112,6 +112,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_ps_lists_running_processes();
     test_rpkg_install_list_remove();
     test_sed_substitute();
+    test_env_inherits_shell_vars();
     test_exec_loop_memory_cleanup();
     test_tty_ioctl_state();
     test_chdir_getcwd();
@@ -693,6 +694,39 @@ fn test_sed_substitute() {
 
     if s1 == Some(0) && s2 == Some(0) && s3 == Some(0) && s4 == Some(0) && s5 == Some(0) {
         println("T33-SED-OK");
+    }
+}
+
+/// Smoke for envp inheritance: racsh sets a variable, spawns /bin/env via
+/// command substitution, and we use case-match to assert the variable
+/// shows up in the printed environment. Exercises the full chain:
+///   shell builds envp from env.vars()
+///   → libc_lite::spawn_args_envp → sys_spawn(_, _, envp)
+///   → collect_user_envp → UserProcess::from_elf writes envp on user stack
+///   → /bin/env's libc-lite _start records ENVP_BLOCK
+///   → env walks ENVP_BLOCK and prints each KEY=VALUE.
+fn test_env_inherits_shell_vars() {
+    println("\n[test] /bin/env reads inherited environ");
+
+    // racsh ships with PATH preset; any spawn we make should see it.
+    let path_visible =
+        shell_run(b"result=$(/bin/env); case $result in *PATH=*) exit 0;; *) exit 1;; esac\0");
+    check!("env shows the inherited PATH", path_visible == Some(0));
+
+    // A variable set in the shell session must survive across the spawn
+    // and reach the child via envp.
+    let custom_visible = shell_run(
+        b"RACOS_SMOKE_KEY=racos-smoke-value; \
+          result=$(/bin/env); \
+          case $result in *RACOS_SMOKE_KEY=racos-smoke-value*) exit 0;; *) exit 1;; esac\0",
+    );
+    check!(
+        "env shows a freshly-set shell variable",
+        custom_visible == Some(0)
+    );
+
+    if path_visible == Some(0) && custom_visible == Some(0) {
+        println("T33-ENV-OK");
     }
 }
 

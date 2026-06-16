@@ -122,11 +122,16 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
     - [x] `racos-test::test_rpkg_install_list_remove` builds a minimal .rpk in memory, writes it to `/tmp/demo.rpk`, then spawns `/bin/rpkg install /tmp/demo.rpk`, `/bin/rpkg list`, `/bin/rpkg remove demo-rpkg` — asserting exit 0 for each and emitting `T32-RPKG-OK`.
   - **Pozostałe (deferred):** signature verification (no crypto yet), dependency resolution (rapt territory), repository protocol, multi-file packages (DATA is single-payload in MVP — multi-file would need a real archive format), `/bin/` deployment after T4.x makes initramfs writable or rootfs is on persistent disk.
 
-- [~] **T3.3 — Userland: dokończyć stuby** (ps + sed shipped; env/awk pending)
+- [~] **T3.3 — Userland: dokończyć stuby** (ps + sed + env shipped; awk pending)
   - [x] **`ps`** — real procfs reader. Walks `/proc` via getdents, reads `/proc/<pid>/status` for each numeric pid dir, prints `PID PPID STATE NAME` columns.
     - Fixed the dead-code state it was in: wrong libc-lite dep path (`../../../../` → `../../../`), missing `alloc` feature, missing from workspace `members`/`default-members`, missing from BIN_LIST in both build scripts (so the binary was never staged into initramfs). Procfs already serves `/proc/<pid>/status` in key:value form so no kernel changes were needed.
     - `racos-test::test_ps_lists_running_processes` smoke spawns `/bin/ps` and asserts exit 0; emits `T33-PS-OK` marker.
-  - [ ] `env` — pełne `getenv`/`setenv`/`unsetenv` + iteracja po environ (still 22-line stub printing only PWD+PATH; needs proper envp inheritance in fork/exec first)
+  - [x] **`env`** — real environ reader. End-to-end envp inheritance through sys_spawn:
+    - Kernel: new `collect_user_envp` mirrors `collect_user_argv`. `UserProcess::from_elf` extended with an envp slice and writes argv + argv-NULL + envp + envp-NULL on the user stack (per SysV AMD64 entry layout, kept 16-byte aligned). `sys_spawn` and `sys_exec` actually consume their previously-`_envp`-prefixed parameter slots.
+    - libc-lite: `_start` reads envp off the stack (RDX = `argv + (argc+1)*8`), stashes it in a static `ENVP_BLOCK`, exposes `environ()` and `getenv(name)` accessors. New `spawn_args_envp` wrapper hits the third syscall arg.
+    - shell: every external-command spawn (single, background, pipeline) now builds an envp from `env.vars()` and uses `spawn_args_envp`. MVP sends every set variable through; POSIX export-only is a follow-up.
+    - env binary: rewritten from the 22-line PWD/PATH stub to a real walk over `environ()` printing one `KEY=VALUE` per line.
+    - `racos-test::test_env_inherits_shell_vars` asserts (1) inherited PATH and (2) a freshly-set custom variable are both visible via `/bin/env`. Emits `T33-ENV-OK`.
   - [x] **`sed`** — MVP stream editor. Single-command scripts on byte-level input (no regex, no addresses, no multi-command `;`/`-e`).
     - Same dead-code wiring fixes as the ps PR: bad libc-lite path, no `alloc` feature, not in workspace, not in BIN_LIST.
     - Supported commands: `s/X/Y/[g]` (substitute first/global), `d` (delete = skip default print), `p` (explicit print). The `-n` flag suppresses the default per-line print so `p` is the only path that emits output.
