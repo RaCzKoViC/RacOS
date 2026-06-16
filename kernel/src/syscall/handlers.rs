@@ -2890,6 +2890,7 @@ pub fn sys_isatty(fd: i32) -> SyscallResult {
         return Err(SyscallError::EBADF);
     }
 
+    // SAFETY: cli/sti window guards the fd-table lookup.
     let is_tty = unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let is_tty = crate::task::scheduler::with_current_fd_table(|fds| {
@@ -2967,6 +2968,7 @@ pub fn sys_connect(fd: i32, addr: *const u8, len: u32) -> SyscallResult {
     // Synchronous wait for the handshake to complete (timer IRQ drains RX
     // and feeds the state machine in the meantime). Re-enable interrupts —
     // SYSCALL entry zeroed IF, but we must let PIT fire to make progress.
+    // SAFETY: bare sti — we explicitly want IRQs on for the spin-wait below.
     unsafe {
         core::arch::asm!("sti", options(nomem, nostack));
     }
@@ -2984,6 +2986,8 @@ pub fn sys_connect(fd: i32, addr: *const u8, len: u32) -> SyscallResult {
             }
         }
     };
+    // SAFETY: bare cli — restores the SYSCALL-entry invariant (IF=0) before
+    // returning to user via SYSRETQ.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
     }
@@ -2995,6 +2999,7 @@ pub fn sys_connect(fd: i32, addr: *const u8, len: u32) -> SyscallResult {
 pub fn sys_send(fd: i32, buf: *const u8, len: usize, _flags: u32) -> SyscallResult {
     validate_user_ptr(buf as u64, len)?;
     let pid = crate::task::scheduler::current_pid();
+    // SAFETY: validate_user_ptr above bounded [buf, buf+len) to user space.
     let data = unsafe { core::slice::from_raw_parts(buf, len) };
     if let Some(conn_id) = crate::net::tcp_id_by_fd(pid, fd) {
         crate::net::tcp::send(conn_id, data).map_err(|_| SyscallError::EPIPE)?;
@@ -3007,10 +3012,12 @@ pub fn sys_send(fd: i32, buf: *const u8, len: usize, _flags: u32) -> SyscallResu
 pub fn sys_recv(fd: i32, buf: *mut u8, len: usize, _flags: u32) -> SyscallResult {
     validate_user_ptr(buf as u64, len)?;
     let pid = crate::task::scheduler::current_pid();
+    // SAFETY: validate_user_ptr above bounded [buf, buf+len) to user space.
     let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
     if let Some(conn_id) = crate::net::tcp_id_by_fd(pid, fd) {
         // Block until something arrives, EOF is observed, or 5 s elapse.
         // PIT must be running so timer_handler drains the NIC RX queue.
+        // SAFETY: bare sti — same pattern as sys_connect's spin-wait.
         unsafe {
             core::arch::asm!("sti", options(nomem, nostack));
         }
@@ -3034,6 +3041,7 @@ pub fn sys_recv(fd: i32, buf: *mut u8, len: usize, _flags: u32) -> SyscallResult
             crate::net::stack::poll();
             core::hint::spin_loop();
         };
+        // SAFETY: bare cli — restores SYSCALL-entry invariant (IF=0).
         unsafe {
             core::arch::asm!("cli", options(nomem, nostack));
         }
@@ -3049,10 +3057,12 @@ pub fn sys_gethostbyname(name_ptr: *const u8, name_len: usize, ip_out: *mut u8) 
     }
     validate_user_ptr(name_ptr as u64, name_len)?;
     validate_user_ptr(ip_out as u64, 4)?;
+    // SAFETY: validate_user_ptr above bounded [name_ptr, name_ptr+name_len).
     let bytes = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
     let name = core::str::from_utf8(bytes).map_err(|_| SyscallError::EINVAL)?;
     match crate::net::stack::resolve(name) {
         Some(ip) => {
+            // SAFETY: ip_out bounded to 4 bytes by the validate_user_ptr above.
             unsafe {
                 core::ptr::copy_nonoverlapping(ip.as_ptr(), ip_out, 4);
             }
@@ -3135,6 +3145,8 @@ pub fn sys_pipe2(fds: *mut i32, _flags: u32) -> SyscallResult {
 /// UTS name structure: 5 fields × 65 bytes each = 325 bytes.
 pub fn sys_uname(buf: *mut u8) -> SyscallResult {
     validate_user_ptr(buf as u64, 325)?;
+    // SAFETY: validate_user_ptr above bounded [buf, buf+325) to user space;
+    // all subsequent offsets (0, 65, 130, 195, 260) + max-len writes fit.
     unsafe {
         core::ptr::write_bytes(buf, 0, 325);
         // sysname
@@ -3173,6 +3185,7 @@ pub fn sys_mount(
         None
     } else {
         let src_len = validate_user_string(src as u64)?;
+        // SAFETY: validate_user_string above bounded [src, src+src_len).
         let src = unsafe {
             core::str::from_utf8(core::slice::from_raw_parts(src, src_len))
                 .map_err(|_| SyscallError::EINVAL)?
@@ -3183,10 +3196,12 @@ pub fn sys_mount(
     let target_len = validate_user_string(target as u64)?;
     let fstype_len = validate_user_string(fstype as u64)?;
 
+    // SAFETY: validate_user_string above bounded [target, target+target_len).
     let target_str = unsafe {
         core::str::from_utf8(core::slice::from_raw_parts(target, target_len))
             .map_err(|_| SyscallError::EINVAL)?
     };
+    // SAFETY: validate_user_string above bounded [fstype, fstype+fstype_len).
     let fstype_str = unsafe {
         core::str::from_utf8(core::slice::from_raw_parts(fstype, fstype_len))
             .map_err(|_| SyscallError::EINVAL)?
@@ -3204,6 +3219,7 @@ pub fn sys_mount(
     };
 
     // Mount point must exist prior to mount.
+    // SAFETY: mount_table is a kernel singleton initialised once at boot.
     let _ = unsafe {
         crate::vfs::mount::mount_table()
             .lookup_path(target_norm)
@@ -3213,12 +3229,14 @@ pub fn sys_mount(
     let fs: alloc::sync::Arc<dyn crate::vfs::mount::Filesystem> = match fstype_str {
         "tmpfs" => {
             // Reuse the global tmpfs instance to keep writable syscall paths coherent.
+            // SAFETY: tmpfs::instance is a kernel singleton initialised at boot.
             let tmpfs = unsafe { crate::vfs::tmpfs::instance().clone() };
             crate::vfs::tmpfs::TmpfsFilesystem::new(tmpfs)
                 as alloc::sync::Arc<dyn crate::vfs::mount::Filesystem>
         }
         "racfs" => {
             // Reuse the global racfs instance (block-device-backed).
+            // SAFETY: racfs::instance is a kernel singleton initialised at boot.
             let racfs = unsafe { crate::vfs::racfs::instance().clone() };
             crate::vfs::racfs::RacfsFilesystem::new(racfs)
                 as alloc::sync::Arc<dyn crate::vfs::mount::Filesystem>
@@ -3249,6 +3267,8 @@ pub fn sys_mount(
         _ => return Err(SyscallError::EINVAL),
     };
 
+    // SAFETY: cli/sti window so the mount-table insert is atomic against any
+    // concurrent lookup_path (mount_table is the kernel singleton).
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         crate::vfs::mount::mount_table().mount(target_norm, fs);
@@ -3261,6 +3281,7 @@ pub fn sys_umount(target: *const u8) -> SyscallResult {
     require_cap(crate::security::capability::CAP_SYS_ADMIN)?;
 
     let target_len = validate_user_string(target as u64)?;
+    // SAFETY: validate_user_string above bounded [target, target+target_len).
     let target_str = unsafe {
         core::str::from_utf8(core::slice::from_raw_parts(target, target_len))
             .map_err(|_| SyscallError::EINVAL)?
@@ -3275,6 +3296,7 @@ pub fn sys_umount(target: *const u8) -> SyscallResult {
         target_str
     };
 
+    // SAFETY: cli/sti window so the mount-table remove is atomic.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::vfs::mount::mount_table()
@@ -3308,10 +3330,12 @@ pub fn sys_mkfs(
     }
     validate_user_ptr(src as u64, src_len)?;
     validate_user_ptr(fstype as u64, fstype_len)?;
+    // SAFETY: validate_user_ptr above bounded [src, src+src_len).
     let src_str = unsafe {
         core::str::from_utf8(core::slice::from_raw_parts(src, src_len))
             .map_err(|_| SyscallError::EINVAL)?
     };
+    // SAFETY: validate_user_ptr above bounded [fstype, fstype+fstype_len).
     let fstype_str = unsafe {
         core::str::from_utf8(core::slice::from_raw_parts(fstype, fstype_len))
             .map_err(|_| SyscallError::EINVAL)?
@@ -3322,6 +3346,7 @@ pub fn sys_mkfs(
     // Safety: refuse if the device is currently mounted somewhere. Without a
     // proper device→mount map we use a small hard-coded table; the kernel
     // mounts ram0 at /var and sda at /mnt by convention.
+    // SAFETY: mount_table is the kernel singleton.
     let mt = unsafe { crate::vfs::mount::mount_table() };
     let busy_path = match dev_name {
         "sda" => Some("/mnt"),
@@ -3355,6 +3380,8 @@ pub fn sys_mkfs(
 /// Flush all dirty block-cache entries to their backing devices.
 /// Returns the number of mounts synced (always >=0; never fails).
 pub fn sys_sync() -> SyscallResult {
+    // SAFETY: flush_all walks the mount_table singleton; the function itself
+    // is unsafe only because it touches the global mount-table state.
     let n = unsafe { crate::vfs::mount::flush_all() };
     Ok(n as i64)
 }
@@ -3373,6 +3400,7 @@ pub fn sys_mprotect(_addr: u64, _len: usize, _prot: u32) -> SyscallResult {
 // ─────────────────────────────────────────────────
 
 pub fn sys_fsync(fd: i32) -> SyscallResult {
+    // SAFETY: cli/sti window for the fd-table lookup + inode.sync.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {
@@ -3413,11 +3441,13 @@ pub fn sys_writev(fd: i32, iov_ptr: *const u8, iovcnt: i32) -> SyscallResult {
 
     let mut total = 0i64;
     for i in 0..iovcnt as usize {
+        // SAFETY: iov_ptr + iovcnt*sizeof(IoVec) bounded above; i < iovcnt.
         let iov = unsafe { &*((iov_ptr as *const IoVec).add(i)) };
         if iov.iov_len == 0 {
             continue;
         }
         validate_user_ptr(iov.iov_base, iov.iov_len as usize)?;
+        // SAFETY: validate_user_ptr above bounded the iov payload.
         let buf =
             unsafe { core::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len as usize) };
         match sys_write(fd, buf.as_ptr(), buf.len()) {
@@ -3442,6 +3472,7 @@ pub fn sys_readv(fd: i32, iov_ptr: *const u8, iovcnt: i32) -> SyscallResult {
 
     let mut total = 0i64;
     for i in 0..iovcnt as usize {
+        // SAFETY: iov_ptr + iovcnt*sizeof(IoVec) bounded above; i < iovcnt.
         let iov = unsafe { &*((iov_ptr as *const IoVec).add(i)) };
         if iov.iov_len == 0 {
             continue;
@@ -3488,6 +3519,8 @@ pub fn sys_reboot(cmd: u32) -> SyscallResult {
         REBOOT_POWER_OFF => {
             crate::serial::serial_println!("[REBOOT] Power-off requested");
             // Use QEMU-specific port for shutdown
+            // SAFETY: writing 0x2000 to port 0x604 is QEMU's documented
+            // ACPI shutdown trigger; only runs after CAP_SYS_BOOT check.
             unsafe {
                 core::arch::asm!(
                     "out dx, ax",
@@ -3497,6 +3530,7 @@ pub fn sys_reboot(cmd: u32) -> SyscallResult {
                 );
             }
             loop {
+                // SAFETY: hlt while waiting for the shutdown to take effect.
                 unsafe {
                     core::arch::asm!("hlt", options(nomem, nostack));
                 }
@@ -3505,6 +3539,8 @@ pub fn sys_reboot(cmd: u32) -> SyscallResult {
         REBOOT_RESTART => {
             crate::serial::serial_println!("[REBOOT] Restart requested");
             // Triple fault for reboot
+            // SAFETY: deliberate triple fault — load null IDT then int3 so
+            // the CPU resets. CAP_SYS_BOOT gated above; control never returns.
             unsafe {
                 core::arch::asm!(
                     "lidt [rax]",
@@ -3514,6 +3550,7 @@ pub fn sys_reboot(cmd: u32) -> SyscallResult {
                 core::arch::asm!("int3", options(nomem, nostack));
             }
             loop {
+                // SAFETY: hlt while waiting for the triple fault to fire.
                 unsafe {
                     core::arch::asm!("hlt", options(nomem, nostack));
                 }
@@ -3544,6 +3581,8 @@ pub fn sys_hostname(buf: *mut u8, len: usize, set: u32) -> SyscallResult {
         require_cap(crate::security::capability::CAP_SYS_ADMIN)?;
         validate_user_ptr(buf as u64, len)?;
         let new_len = len.min(255);
+        // SAFETY: mutating HOSTNAME + HOSTNAME_LEN — single-CPU MVP, no
+        // concurrent set_hostname callers. buf bounded above.
         unsafe {
             let hname = &mut *core::ptr::addr_of_mut!(HOSTNAME);
             core::ptr::copy_nonoverlapping(buf as *const u8, hname.as_mut_ptr(), new_len);
@@ -3553,6 +3592,8 @@ pub fn sys_hostname(buf: *mut u8, len: usize, set: u32) -> SyscallResult {
     } else {
         // Get hostname
         validate_user_ptr(buf as u64, len)?;
+        // SAFETY: read HOSTNAME / HOSTNAME_LEN — single-CPU MVP, no concurrent
+        // setter; buf bounded above; copy_len <= len-1 leaves room for NUL.
         unsafe {
             let hname = &*core::ptr::addr_of!(HOSTNAME);
             let hlen = *core::ptr::addr_of!(HOSTNAME_LEN);
@@ -3576,6 +3617,8 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> SyscallResult {
     validate_user_ptr(buf as u64, len)?;
     // Mix multiple entropy sources
     let tsc: u64;
+    // SAFETY: rdtsc has no operands beyond eax/edx output; always available
+    // on x86_64.
     unsafe {
         let lo: u32;
         let hi: u32;
@@ -3589,6 +3632,7 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> SyscallResult {
         .wrapping_add(pit)
         .wrapping_mul(2862933555777941757)
         .wrapping_add(pid);
+    // SAFETY: validate_user_ptr above bounded [buf, buf+len); i < len.
     unsafe {
         for i in 0..len {
             state = state
