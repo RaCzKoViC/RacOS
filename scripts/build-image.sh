@@ -108,7 +108,7 @@ mkdir -p "$INITRAMFS_ROOT/etc"
 BIN_LIST=(
     hello echo cat true false sh racterm racos-test ls wc uptime mkdir
     rm sleep head tail env basename dirname grep cp mv cut uniq find od ps
-    sed tee hexdump rpkg
+    sed awk tee hexdump rpkg
 )
 SBIN_LIST=(init)
 

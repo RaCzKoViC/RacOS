@@ -82,7 +82,7 @@ New-Item -ItemType Directory -Force "$InitramfsRoot\etc" | Out-Null
 # Copy binaries — bin names match the [[bin]] name in Cargo.toml.
 # Tuple form is "<cargo-bin-name>=<initramfs-name>"; plain entries map 1:1.
 # Cargo rejects '.' in crate names so mkfs_racfs is renamed to mkfs.racfs here.
-$BinList = @("hello", "echo", "cat", "true", "false", "sh", "racterm", "racos-test", "ls", "wc", "uptime", "mkdir", "rm", "sleep", "head", "tail", "env", "basename", "dirname", "grep", "cp", "mv", "cut", "uniq", "find", "od", "ps", "sed", "tee", "hexdump", "dig", "wget", "mount", "df", "umount", "mkfs_racfs=mkfs.racfs", "mkfs_fat32=mkfs.fat32", "sync", "rpkg")
+$BinList = @("hello", "echo", "cat", "true", "false", "sh", "racterm", "racos-test", "ls", "wc", "uptime", "mkdir", "rm", "sleep", "head", "tail", "env", "basename", "dirname", "grep", "cp", "mv", "cut", "uniq", "find", "od", "ps", "sed", "awk", "tee", "hexdump", "dig", "wget", "mount", "df", "umount", "mkfs_racfs=mkfs.racfs", "mkfs_fat32=mkfs.fat32", "sync", "rpkg")
 $SbinList = @("init")
 
 foreach ($entry in $BinList) {
