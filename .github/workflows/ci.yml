@@ -71,7 +71,7 @@ jobs:
         # binaries piled in this began failing at link time on racos-mkdir.
         # rpkg/rapt are host-side tooling (use std) so they can't share the
         # bare-metal target — excluded here, host build covered below.
-        run: cargo build --workspace --exclude racore --exclude racos-boot --exclude rpkg --exclude rapt --target x86_64-unknown-none -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
+        run: cargo build --workspace --exclude racore --exclude racos-boot --exclude rpkg --exclude rapt --features racterm/bin-target --target x86_64-unknown-none -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
 
       - name: Build host-side packaging tools (rpkg + rapt)
         run: cargo build -p rpkg -p rapt
@@ -108,7 +108,7 @@ jobs:
         # racsh parser/expander tests now run against the real crate. rpkg and
         # rapt are host-side package tools, so keep them in the same required
         # host test gate.
-        run: cargo test -p racsh -p rpkg -p rapt
+        run: cargo test -p racsh -p rpkg -p rapt -p init -p racterm
 
   boot-smoke:
     name: QEMU boot smoke (UEFI)

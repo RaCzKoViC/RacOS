@@ -54,7 +54,13 @@ $env:RUSTFLAGS = "$OldRustFlags -C debug-assertions=off"
 Write-Host "`n[2/4] Building coreutils..." -ForegroundColor Yellow
 $Coreutils = @("racos-hello", "racos-echo", "racos-cat", "racos-true", "racos-false", "racos-sh", "racos-init", "racos-test", "racos-ls", "racos-wc", "racos-uptime", "racos-mkdir", "racos-rm", "racos-sleep", "racos-head", "racos-tail", "racos-env", "racos-basename", "racos-dirname", "racos-grep", "racos-cp", "racos-mv", "racos-cut", "racos-uniq", "racos-find", "racos-od", "racos-tee", "racos-hexdump", "racterm", "racos-dig", "racos-wget", "racos-mount", "racos-df", "racos-umount", "racos-mkfs-racfs", "racos-mkfs-fat32", "racos-sync")
 foreach ($pkg in $Coreutils) {
-    cargo build --package $pkg @CargoFlags -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
+    # racterm gates its [[bin]] behind a required-feature so
+    # `cargo test -p racterm` on host doesn't drag libc-lite's _start in.
+    if ($pkg -eq "racterm") {
+        cargo build --package $pkg --features bin-target @CargoFlags -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
+    } else {
+        cargo build --package $pkg @CargoFlags -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
+    }
     if ($LASTEXITCODE -ne 0) { throw "Build failed for $pkg" }
 }
 
