@@ -557,7 +557,9 @@ pub struct SigAction {
 pub const SIG_DFL: u64 = 0;
 pub const SIG_IGN: u64 = 1;
 
-/// Install a signal handler.
+/// Install a raw signal handler. Most callers should use [`signal`] instead,
+/// which routes through the libc-lite dispatcher so signum is delivered to
+/// the user handler via System V's normal calling convention.
 pub fn sigaction(
     sig: i32,
     act: Option<&SigAction>,
@@ -571,6 +573,93 @@ pub fn sigaction(
     } else {
         Ok(())
     }
+}
+
+// ─────────────────────────────────────────────────
+// Signal dispatcher (kernel ↔ user handler bridge)
+// ─────────────────────────────────────────────────
+//
+// The kernel's signal delivery path (kernel::syscall::handlers) jumps to the
+// `handler` address it stored via sys_sigaction and sets RSP to point at the
+// UserSignalFrame it wrote on the user stack. SYSRETQ does not restore RDI,
+// so the kernel cannot pass `signum` via the System V calling convention
+// directly. Instead, libc-lite registers `__signal_dispatcher` as the kernel
+// handler for every cooked signal; the dispatcher reads `signum` from
+// [RSP+0] (where the kernel placed it in the UserSignalFrame), looks up the
+// real user handler in `USER_HANDLERS`, calls it, then issues sys_sigreturn.
+
+/// User-installed signal handler type.
+pub type SigHandler = unsafe extern "C" fn(i32);
+
+const MAX_SIGNAL: usize = 32;
+
+// SAFETY: signals are delivered serially within a single process and
+// USER_HANDLERS is only written by `signal()` which is called from regular
+// (non-handler) context. Concurrent reads during dispatch race with no-op
+// writes if a caller reinstalls the same handler. Per-thread signal masks
+// are post-MVP.
+static mut USER_HANDLERS: [u64; MAX_SIGNAL] = [0; MAX_SIGNAL];
+
+/// Kernel-facing dispatcher. Registered as the `handler` field for every
+/// cooked signal. The kernel arranges that on entry RSP points at the
+/// UserSignalFrame it wrote, with `signum` at offset 0. We invoke the
+/// real handler (looked up by signum) and then issue sys_sigreturn so the
+/// kernel restores the pre-signal user context.
+#[unsafe(naked)]
+unsafe extern "C" fn __signal_dispatcher() {
+    core::arch::naked_asm!(
+        // On entry: RSP = &UserSignalFrame, [RSP+0] = signum (u64).
+        // System V ABI requires (RSP - 8) % 16 == 0 at the call site; the
+        // kernel aligns the SignalFrame to 16, so we adjust by 8 first.
+        // We MUST NOT clobber the frame itself — sys_sigreturn re-reads it
+        // at the same address after we issue the syscall below.
+        "mov rdi, [rsp]",            // signum (first arg)
+        "sub rsp, 8",                // align for call
+        "call {dispatch}",
+        "add rsp, 8",                // restore — keeps RSP = &UserSignalFrame
+        "mov rax, {sigret}",
+        "syscall",
+        // sys_sigreturn rewrites the kernel SyscallFrame and SYSRETQs to
+        // the pre-signal RIP; control never returns here.
+        "ud2",
+        dispatch = sym __signal_dispatch_rust,
+        sigret = const SYS_SIGRETURN,
+    );
+}
+
+/// Look up the user-installed handler for `signum` and invoke it.
+unsafe extern "C" fn __signal_dispatch_rust(signum: i32) {
+    if signum <= 0 || (signum as usize) >= MAX_SIGNAL {
+        return;
+    }
+    // SAFETY: see the note on USER_HANDLERS above.
+    let raw = unsafe { USER_HANDLERS[signum as usize] };
+    if raw == 0 {
+        return;
+    }
+    let handler: SigHandler = unsafe { core::mem::transmute(raw) };
+    unsafe { handler(signum) };
+}
+
+/// Install a high-level signal handler. The handler is invoked as
+/// `handler(signum)` from the libc-lite dispatcher; signum is delivered via
+/// the normal System V calling convention.
+///
+/// Pass [`SIG_DFL`]-style (0) or [`SIG_IGN`]-style (1) via [`sigaction`] for
+/// reset/ignore semantics — this helper is for cooked user handlers only.
+pub fn signal(sig: i32, handler: SigHandler) -> Result<(), i64> {
+    if sig <= 0 || (sig as usize) >= MAX_SIGNAL {
+        return Err(-22); // EINVAL
+    }
+    unsafe {
+        USER_HANDLERS[sig as usize] = handler as *const () as u64;
+    }
+    let act = SigAction {
+        handler: __signal_dispatcher as *const () as u64,
+        flags: 0,
+        mask: 0,
+    };
+    sigaction(sig, Some(&act), None)
 }
 
 /// PollFd for poll().
