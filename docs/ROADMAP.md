@@ -2,7 +2,7 @@
 
 > Status: Living document
 > Utworzona: 2026-06-16
-> Last updated: 2026-06-16 (Tier 1 complete + T2.1 persistence wired in CI)
+> Last updated: 2026-06-16 (Tier 1 complete + T2.1 + T2.2)
 
 Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa praca powinna pasować do jednego z tierów poniżej. Zmiana priorytetów wymaga aktualizacji tego pliku w PR-ze.
 
@@ -84,13 +84,14 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
     - [x] Both boot1.log + boot2.log uploaded as artifacts
   - **Pozostałe (deferred):** VirtIO-block driver as alternative to AHCI (cleaner QEMU integration, mostly cosmetic); userland file-level persistence test via racos-test (kernel-level is sufficient for v0); making `/etc`, `/var`, `/home` persistent (currently initramfs/ram-based; needs init-side migration).
 
-- [ ] **T2.2 — RacTerm: minimal ANSI emulator**
-  - CSI (kursor: CUU/CUD/CUF/CUB/CUP, erase: ED/EL, scroll regions: DECSTBM)
-  - SGR (kolory 16 + 256 + truecolor)
-  - Alternate screen buffer (`\e[?1049h/l`)
-  - Scrollback ring 10k linii (konfigurowalne)
-  - Spec referencyjny: `docs/specs/TERMINAL_PROTOCOLS.md`
-  - **Definition of done:** ncurses-style "hello" działa (np. mini `vi`-clone), scroll, kolory
+- [x] **T2.2 — RacTerm: ANSI emulator tested + response drain fixed**
+  - Discovery: the emulator (1616 lines: buffer/cursor/escape/terminal) was already implemented and feature-complete for all DoD items — full CSI handler (CUU/CUD/CUF/CUB/CUP, ED/EL, IL/DL, SU/SD, ICH/DCH/ECH, SCP/RCP, DECSTBM, DSR, DA), SGR (16+256+truecolor + bold/italic/underline), DEC private (cursor show/hide, alternate buffer 1049), OSC 0 title, ESC (RIS/DECSC/DECRC/IND/NEL/RI), scrollback ring 10k, partial-sequence buffering. What was missing was test coverage + a bug in the PTY relay.
+  - This PR fills the gap:
+    - [x] Fixed: `terminal::Terminal::drain_response()` was never called in racterm's main PTY loop, so DSR (`\e[6n` cursor position query) and DA (`\e[c`) responses queued in the emulator never reached the shell. ncurses-style apps waiting for the reply would hang. main.rs now drains the response buffer back to ptmx_fd after each `term.feed(...)` cycle.
+    - [x] 31 host tests in `terminal/tests/ansi.rs`: parser (Print/Execute/partial-CSI/private-CSI), cursor movement (CUP absolute, CUU/CUD/CUF/CUB relative, clamp at edges), erase (ED 0/2, EL 0/2), SGR (basic + bright + 256 + truecolor + attrs + reset), alternate buffer (1049h/l with cursor save/restore), DECTCEM cursor visibility, DECSTBM scroll region, DSR (CPR + status), DA primary, scrollback retention, OSC 0 title, CR/LF semantics.
+    - [x] racterm's `[[bin]]` now gated behind `required-features = ["bin-target"]` so `cargo test -p racterm` on host doesn't pull libc-lite's `_start` / `panic_handler` (which need a bare-metal target). build-image.sh / build-image.ps1 / justfile / CI workflow updated to pass `--features racterm/bin-target` to the workspace build.
+    - [x] CI host test command now includes `racterm` and `init` alongside racsh/rpkg/rapt — 75 host tests run on every push.
+  - **Pozostałe (deferred):** real renderer that reads from `Terminal::buffer` and updates a framebuffer (currently the host terminal does rendering via PTY byte forwarding — sufficient for v0 since RacOS runs over serial); UTF-8 multibyte handling in the print path; mouse-tracking modes (1000/1006).
 
 - [ ] **T2.3 — Phase 1 cross-platform build**
   - Port `justfile` + skryptów PowerShell na bash (utrzymać oba)
