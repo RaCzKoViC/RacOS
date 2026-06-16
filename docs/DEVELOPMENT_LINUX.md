@@ -30,6 +30,25 @@ just build-image     # stage ESP + initramfs
 just run-uefi        # boot in QEMU (Ctrl-A X to quit)
 ```
 
+## Run the same smoke CI runs
+
+Before pushing a branch you can reproduce the kernel-smoke CI job locally
+in a few seconds:
+
+```bash
+just smoke           # bare ci-smoke (exit 33 = PASS)
+just smoke-disk      # ci-smoke with a 16 MiB AHCI disk attached
+```
+
+These wrap `scripts/run-ci-smoke.sh`, which is the bash counterpart of
+the `.ps1` helper used on Windows. Both invoke the same QEMU command,
+the same kernel feature (`--features ci-smoke`), and the same
+`isa-debug-exit` exit-code contract (33 = PASS, 35 = FAIL, 124 = timeout).
+
+If `tools/OVMF_CODE.fd` is present it takes priority over the system
+copy, useful when the runner ships a stripped-down OVMF that doesn't
+boot UEFI apps cleanly.
+
 ## Where artefacts live
 
 By default everything is under `target/` in the repo. To put it elsewhere,
