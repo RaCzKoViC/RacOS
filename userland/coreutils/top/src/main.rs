@@ -1,112 +1,208 @@
+// top — batch-mode process viewer (v0.2 §2.1 easy-win).
+//
+// Today this is the moral equivalent of `top -b -n 1` on Linux: prints
+// a single snapshot — header (uptime + total task count) plus the same
+// per-PID table that `ps` emits — then exits. Interactive refresh mode
+// (curses-style, redraw every N seconds, signal handling) is post-MVP.
+//
+// Why batch-only for v0.2:
+//   1. CI smokes work — `T20-TOP-OK` can just check exit 0 + that the
+//      header line appears.
+//   2. Reuses the procfs reading pattern from ps without dragging in
+//      terminal-state management (cursor save/restore, alternate
+//      screen, etc.) which is what makes a real top noticeably more
+//      complex than ps.
+
 #![no_std]
 #![no_main]
 
-use libc_lite;
+const PROC_DIR: &[u8] = b"/proc\0";
+const UPTIME_FILE: &[u8] = b"/proc/uptime\0";
 
 #[no_mangle]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    loop {
-        // Clear screen (simple)
-        unsafe { libc_lite::print("\x1b[2J\x1b[H") }; // ANSI clear
+    // ── Header ────────────────────────────────────────────────────────
+    let _ = libc_lite::write(1, b"top - RacOS\n");
 
-        unsafe { libc_lite::println("RacOS Process Monitor (top)") };
-        unsafe { libc_lite::println("PID\tPPID\tSTATE\tNAME") };
-
-        // List processes (same as ps)
-        list_processes();
-
-        // Sleep 1 second
-        unsafe { libc_lite::sleep_ms(1000) };
+    // /proc/uptime is a single text line — emit it as-is.
+    if let Ok(fd) = libc_lite::open(UPTIME_FILE, 0, 0) {
+        let mut buf = [0u8; 64];
+        if let Ok(n) = libc_lite::read(fd, &mut buf) {
+            let _ = libc_lite::write(1, b"uptime: ");
+            let _ = libc_lite::write(1, &buf[..n]);
+            // procfs's content already ends with \n.
+        }
+        let _ = libc_lite::close(fd);
     }
-}
 
-fn list_processes() {
-    let proc_dir = b"/proc";
-    let fd = match unsafe { libc_lite::open(proc_dir, 0, 0) } {
+    // ── Per-PID table ────────────────────────────────────────────────
+    let fd = match libc_lite::open(PROC_DIR, 0, 0) {
         Ok(fd) => fd,
-        Err(_) => return,
+        Err(_) => {
+            let _ = libc_lite::write(2, b"top: cannot open /proc\n");
+            return 1;
+        }
     };
 
-    let mut buf = [0u8; 4096];
-    loop {
-        let n = match unsafe { libc_lite::getdents(fd, &mut buf) } {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(_) => break,
-        };
+    let _ = libc_lite::write(1, b"  PID   PPID  STATE     NAME\n");
 
-        let mut offset = 0;
-        while offset < n {
-            let entry = &buf[offset..];
-            if entry.len() < 18 {
-                break;
-            }
-            let file_type = entry[16];
-            let name_len = entry[17] as usize;
-            if name_len == 0 || offset + 18 + name_len > n {
-                break;
-            }
-            let name = &entry[18..18 + name_len];
-            if file_type == 4 && name != b"." && name != b".." {
-                if let Ok(pid_str) = core::str::from_utf8(name) {
-                    if let Ok(pid) = pid_str.parse::<u32>() {
-                        print_process_info(pid);
-                    }
-                }
-            }
-            offset += 18 + name_len;
+    // Same single-call getdents pattern as ps. Looping would re-emit
+    // because the kernel's getdents implementation has no cursor —
+    // see kernel/src/syscall/handlers.rs:sys_getdents.
+    let mut buf = [0u8; 4096];
+    let n = match libc_lite::getdents(fd, &mut buf) {
+        Ok(n) => n,
+        Err(_) => {
+            let _ = libc_lite::write(2, b"top: getdents failed\n");
+            let _ = libc_lite::close(fd);
+            return 1;
         }
+    };
+
+    let mut tasks: u32 = 0;
+    let mut off = 0usize;
+    while off + 10 <= n {
+        let name_len = buf[off + 9] as usize;
+        let entry_size = 10 + name_len;
+        if off + entry_size > n {
+            break;
+        }
+        let name = &buf[off + 10..off + 10 + name_len];
+        if let Some(pid) = parse_pid(name) {
+            print_process_info(pid);
+            tasks = tasks.saturating_add(1);
+        }
+        off += entry_size;
     }
 
-    unsafe { libc_lite::close(fd) };
+    let _ = libc_lite::close(fd);
+
+    // ── Footer ───────────────────────────────────────────────────────
+    let mut tail = [b' '; 32];
+    let mut p = 0usize;
+    for &b in b"tasks: " {
+        tail[p] = b;
+        p += 1;
+    }
+    p += write_u32_into(tasks, &mut tail[p..]);
+    tail[p] = b'\n';
+    p += 1;
+    let _ = libc_lite::write(1, &tail[..p]);
+
+    0
+}
+
+/// Parse the name as ASCII decimal. Returns None for `.`, `..`, `self`,
+/// or anything else that isn't a pure-digit string.
+fn parse_pid(name: &[u8]) -> Option<u32> {
+    if name.is_empty() {
+        return None;
+    }
+    let mut n: u32 = 0;
+    for &b in name {
+        if !(b'0'..=b'9').contains(&b) {
+            return None;
+        }
+        n = n.checked_mul(10)?.checked_add((b - b'0') as u32)?;
+    }
+    Some(n)
 }
 
 fn print_process_info(pid: u32) {
+    // Build "/proc/<pid>/status\0" without dragging alloc::format in.
     let mut path = [0u8; 32];
-    let path_str = format_pid_path(pid, &mut path);
-    let fd = match unsafe { libc_lite::open(path_str.as_bytes(), 0, 0) } {
+    let mut pos = 0usize;
+    for &b in b"/proc/" {
+        path[pos] = b;
+        pos += 1;
+    }
+    pos += write_u32_into(pid, &mut path[pos..]);
+    for &b in b"/status\0" {
+        path[pos] = b;
+        pos += 1;
+    }
+
+    let fd = match libc_lite::open(&path[..pos], 0, 0) {
         Ok(fd) => fd,
         Err(_) => return,
     };
 
-    let mut buf = [0u8; 256];
-    let n = match unsafe { libc_lite::read(fd, &mut buf) } {
-        Ok(n) => n,
-        Err(_) => {
-            unsafe { libc_lite::close(fd) };
-            return;
-        }
-    };
-    unsafe { libc_lite::close(fd) };
-
+    let mut buf = [0u8; 512];
+    let n = libc_lite::read(fd, &mut buf).unwrap_or(0);
+    let _ = libc_lite::close(fd);
     if n == 0 {
         return;
     }
 
-    let stat = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
-    let fields: alloc::vec::Vec<&str> = stat.split_whitespace().collect();
-    if fields.len() < 4 {
-        return;
+    // procfs format (kernel/src/vfs/procfs.rs:generate_content) is
+    // tab-separated: Name:\tinit\nState:\trunning\nPid:\t1\nPPid:\t0
+    let mut name_bytes: &[u8] = b"?";
+    let mut state_bytes: &[u8] = b"?";
+    let mut ppid: u32 = 0;
+
+    for line in buf[..n].split(|&b| b == b'\n') {
+        if let Some(rest) = line.strip_prefix(b"Name:\t") {
+            name_bytes = rest;
+        } else if let Some(rest) = line.strip_prefix(b"State:\t") {
+            state_bytes = rest;
+        } else if let Some(rest) = line.strip_prefix(b"PPid:\t") {
+            ppid = parse_pid(rest).unwrap_or(0);
+        }
     }
 
-    let ppid = fields[3].parse::<u32>().unwrap_or(0);
-    let state = fields[2];
-    let name = fields[1].trim_matches('(').trim_matches(')');
-
-    unsafe { libc_lite::print(&pid.to_string()) };
-    unsafe { libc_lite::print("\t") };
-    unsafe { libc_lite::print(&ppid.to_string()) };
-    unsafe { libc_lite::print("\t") };
-    unsafe { libc_lite::print(state) };
-    unsafe { libc_lite::print("\t") };
-    unsafe { libc_lite::println(name) };
+    let mut row = [b' '; 64];
+    let mut p = 0usize;
+    p += pad_u32(pid, 5, &mut row[p..]);
+    row[p] = b' ';
+    p += 1;
+    p += pad_u32(ppid, 5, &mut row[p..]);
+    row[p] = b' ';
+    p += 1;
+    p += pad_bytes(state_bytes, 9, &mut row[p..]);
+    p += pad_bytes(name_bytes, name_bytes.len().min(16), &mut row[p..]);
+    row[p] = b'\n';
+    p += 1;
+    let _ = libc_lite::write(1, &row[..p]);
 }
 
-fn format_pid_path(pid: u32, buf: &mut [u8; 32]) -> &str {
-    let s = alloc::format!("/proc/{}/stat", pid);
-    let bytes = s.as_bytes();
-    buf[..bytes.len()].copy_from_slice(bytes);
-    unsafe { core::str::from_utf8_unchecked(&buf[..bytes.len()]) }
+/// Write `n` as ASCII decimal into `dst`. Returns bytes written.
+fn write_u32_into(mut n: u32, dst: &mut [u8]) -> usize {
+    if n == 0 {
+        dst[0] = b'0';
+        return 1;
+    }
+    let mut tmp = [0u8; 10];
+    let mut i = 0;
+    while n > 0 {
+        tmp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        i += 1;
+    }
+    for j in 0..i {
+        dst[j] = tmp[i - 1 - j];
+    }
+    i
 }
 
-extern crate alloc;
+/// Right-align `n` into `width` columns, padding with spaces on the left.
+fn pad_u32(n: u32, width: usize, dst: &mut [u8]) -> usize {
+    let mut tmp = [b' '; 16];
+    let len = write_u32_into(n, &mut tmp[..]);
+    let pad = width.saturating_sub(len);
+    for i in 0..pad {
+        dst[i] = b' ';
+    }
+    dst[pad..pad + len].copy_from_slice(&tmp[..len]);
+    pad + len
+}
+
+/// Left-align `src` into `width` columns, padding with spaces on the right.
+fn pad_bytes(src: &[u8], width: usize, dst: &mut [u8]) -> usize {
+    let len = src.len().min(width);
+    dst[..len].copy_from_slice(&src[..len]);
+    let pad = width.saturating_sub(len);
+    for i in 0..pad {
+        dst[len + i] = b' ';
+    }
+    len + pad
+}

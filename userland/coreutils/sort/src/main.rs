@@ -2,8 +2,8 @@
 #![no_main]
 
 extern crate alloc;
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
 use libc_lite;
 
 /// sort — sort lines
@@ -16,9 +16,15 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     // Parse arguments
     for i in 1..argc {
         let arg_ptr = unsafe { *argv.add(i as usize) };
-        if arg_ptr.is_null() { continue; }
+        if arg_ptr.is_null() {
+            continue;
+        }
         let mut arg_len = 0;
-        unsafe { while *arg_ptr.add(arg_len) != 0 { arg_len += 1; } }
+        unsafe {
+            while *arg_ptr.add(arg_len) != 0 {
+                arg_len += 1;
+            }
+        }
         let arg_bytes = unsafe { core::slice::from_raw_parts(arg_ptr, arg_len) };
 
         if arg_bytes.len() > 0 && arg_bytes[0] == b'-' {
@@ -38,9 +44,15 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     } else {
         for idx in file_idx..argc {
             let file_ptr = unsafe { *argv.add(idx as usize) };
-            if file_ptr.is_null() { continue; }
+            if file_ptr.is_null() {
+                continue;
+            }
             let mut len = 0;
-            unsafe { while *file_ptr.add(len) != 0 { len += 1; } }
+            unsafe {
+                while *file_ptr.add(len) != 0 {
+                    len += 1;
+                }
+            }
             let path = unsafe { core::slice::from_raw_parts(file_ptr, len + 1) };
             match libc_lite::open(path, 0, 0) {
                 Ok(fd) => {
