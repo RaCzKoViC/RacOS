@@ -714,13 +714,21 @@ fn push_word_part(kind: &TokenKind, parts: &mut Vec<WordPart>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::{Word, WordPart};
     use crate::lexer::Lexer;
 
     fn parse_str(input: &str) -> Result<AstNode, ParseError> {
         let mut lexer = Lexer::new(input);
-        let tokens = lexer.lex().unwrap();
+        let tokens = lexer.tokenize().unwrap();
         let mut parser = Parser::new(tokens);
         parser.parse()
+    }
+
+    fn literal(word: &Word) -> &str {
+        match word.parts.as_slice() {
+            [WordPart::Literal(value)] => value.as_str(),
+            other => panic!("expected literal word, got {:?}", other),
+        }
     }
 
     #[test]
@@ -732,8 +740,8 @@ mod tests {
                 match &commands[0] {
                     AstNode::SimpleCommand { words, .. } => {
                         assert_eq!(words.len(), 2);
-                        assert_eq!(words[0], "ls");
-                        assert_eq!(words[1], "-l");
+                        assert_eq!(literal(&words[0]), "ls");
+                        assert_eq!(literal(&words[1]), "-l");
                     }
                     _ => panic!("Expected SimpleCommand"),
                 }
@@ -751,9 +759,9 @@ mod tests {
                 match &commands[0] {
                     AstNode::SimpleCommand { words, .. } => {
                         assert_eq!(words.len(), 3);
-                        assert_eq!(words[0], "echo");
-                        assert_eq!(words[1], "hello");
-                        assert_eq!(words[2], "world");
+                        assert_eq!(literal(&words[0]), "echo");
+                        assert_eq!(literal(&words[1]), "hello");
+                        assert_eq!(literal(&words[2]), "world");
                     }
                     _ => panic!("Expected SimpleCommand"),
                 }
@@ -774,14 +782,14 @@ mod tests {
                         // Check left command
                         match &**left {
                             AstNode::SimpleCommand { words, .. } => {
-                                assert_eq!(words[0], "ls");
+                                assert_eq!(literal(&words[0]), "ls");
                             }
                             _ => panic!("Expected SimpleCommand in left"),
                         }
                         // Check right command
                         match &**right {
                             AstNode::SimpleCommand { words, .. } => {
-                                assert_eq!(words[0], "pwd");
+                                assert_eq!(literal(&words[0]), "pwd");
                             }
                             _ => panic!("Expected SimpleCommand in right"),
                         }

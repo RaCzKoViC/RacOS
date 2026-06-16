@@ -437,8 +437,17 @@ pub fn sys_exit(status: i32) -> ! {
         crate::task::scheduler::current_pid()
     );
 
-    // Mark task as zombie and schedule away
-    // TODO: proper process cleanup (release address space, fds, signal parent)
+    // Release all file descriptors now; address space is freed during reaping.
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+        let _ = crate::task::scheduler::with_current_fd_table(|fds| {
+            fds.close_all();
+        });
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
+
+    // Mark task as zombie and schedule away.
+    // Parent is notified via SIGCHLD and reaped children are reparented.
     unsafe {
         crate::task::scheduler::exit_current(status);
     }
@@ -1287,13 +1296,43 @@ const TIOCSWINSZ: u32 = 0x5414;
 const TIOCGPGRP: u32 = 0x540F;
 const TIOCSPGRP: u32 = 0x5410;
 
+fn with_current_tty_pty<R>(
+    fd: i32,
+    f: impl FnOnce(&mut crate::tty::pty::PtyMaster) -> R,
+) -> Result<R, SyscallError> {
+    if fd < 0 {
+        return Err(SyscallError::EBADF);
+    }
+
+    let is_pty = unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+        let is_pty = crate::task::scheduler::with_current_fd_table(|fds| {
+            let file = fds.get(fd).map_err(map_vfs_error)?;
+            Ok(file.inode.is_pty())
+        })
+        .unwrap_or(Err(SyscallError::EBADF));
+        core::arch::asm!("sti", options(nomem, nostack));
+        is_pty?
+    };
+    if !is_pty {
+        return Err(SyscallError::ENOTTY);
+    }
+
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+        let result =
+            crate::task::scheduler::with_current_pty_master_mut(fd, f).ok_or(SyscallError::ENOTTY);
+        core::arch::asm!("sti", options(nomem, nostack));
+        result
+    }
+}
+
 /// I/O control on a file descriptor.
 pub fn sys_ioctl(fd: i32, request: u32, arg: u64) -> SyscallResult {
     match request {
         TIOCGWINSZ => {
-            // Get window size — return default 80x25 for now
             validate_user_ptr(arg, 4)?;
-            let ws = crate::tty::line_discipline::WinSize::default();
+            let ws = with_current_tty_pty(fd, |pty| pty.winsize())?;
             unsafe {
                 let ptr = arg as *mut u16;
                 *ptr = ws.rows;
@@ -1308,26 +1347,24 @@ pub fn sys_ioctl(fd: i32, request: u32, arg: u64) -> SyscallResult {
                 let ptr = arg as *const u16;
                 (*ptr, *ptr.add(1))
             };
-            // TODO: find the TTY associated with this fd and update winsize
-            // For now, just deliver SIGWINCH to current process group
-            let pgid = crate::task::scheduler::current_pgid();
-            if pgid != 0 {
-                unsafe {
-                    core::arch::asm!("cli", options(nomem, nostack));
-                    crate::task::scheduler::send_signal_to_group(
-                        pgid,
-                        crate::task::signal::Signal::SIGWINCH,
-                    );
-                    core::arch::asm!("sti", options(nomem, nostack));
-                }
+            if rows == 0 || cols == 0 || rows >= 10_000 || cols >= 10_000 {
+                return Err(SyscallError::EINVAL);
             }
-            let _ = (rows, cols);
+
+            with_current_tty_pty(fd, |pty| {
+                pty.set_winsize(rows, cols);
+            })?;
             Ok(0)
         }
         TIOCGPGRP => {
             // Get foreground process group
             validate_user_ptr(arg, 4)?;
-            let pgid = crate::task::scheduler::current_pgid();
+            let pty_pgid = with_current_tty_pty(fd, |pty| pty.foreground_pgid)?;
+            let pgid = if pty_pgid > 0 {
+                pty_pgid as u32
+            } else {
+                crate::task::scheduler::current_pgid()
+            };
             unsafe {
                 *(arg as *mut u32) = pgid;
             }
@@ -1337,8 +1374,29 @@ pub fn sys_ioctl(fd: i32, request: u32, arg: u64) -> SyscallResult {
             // Set foreground process group
             validate_user_ptr(arg, 4)?;
             let pgid = unsafe { *(arg as *const u32) };
-            // TODO: update the TTY's foreground pgid
-            let _ = pgid;
+            if pgid == 0 {
+                return Err(SyscallError::EINVAL);
+            }
+
+            let caller_session = crate::task::scheduler::current_session_id();
+            let valid = unsafe {
+                core::arch::asm!("cli", options(nomem, nostack));
+                let pids = crate::task::scheduler::pids_in_group(pgid);
+                let same_session = pids.iter().any(|pid| {
+                    crate::task::scheduler::session_id_of(*pid)
+                        .map(|session| session == caller_session)
+                        .unwrap_or(false)
+                });
+                core::arch::asm!("sti", options(nomem, nostack));
+                !pids.is_empty() && same_session
+            };
+            if !valid {
+                return Err(SyscallError::EPERM);
+            }
+
+            with_current_tty_pty(fd, |pty| {
+                pty.set_foreground(pgid as i32);
+            })?;
             Ok(0)
         }
         _ => {
@@ -1948,8 +2006,7 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SyscallRes
 /// Return from a signal handler (restores pre-signal context).
 /// For now, this is a stub — signal delivery is default-action only.
 pub fn sys_sigreturn() -> SyscallResult {
-    // TODO: restore saved user context from signal frame
-    Ok(0)
+    Err(SyscallError::ENOSYS)
 }
 
 // ─────────────────────────────────────────────────
@@ -1980,7 +2037,33 @@ pub fn sys_poll(fds_ptr: *mut u8, nfds: u32, timeout_ms: i32) -> SyscallResult {
         validate_user_ptr(fds_ptr as u64, size)?;
     }
 
-    // Simple implementation: check all fds once, mark readable/writable.
+    let ready = poll_once(fds_ptr, nfds);
+    if ready != 0 || timeout_ms == 0 {
+        return Ok(ready);
+    }
+
+    if timeout_ms < 0 {
+        loop {
+            crate::task::scheduler::yield_now();
+            let ready = poll_once(fds_ptr, nfds);
+            if ready != 0 {
+                return Ok(ready);
+            }
+        }
+    }
+
+    let deadline = crate::interrupts::pit::uptime_ms().saturating_add(timeout_ms as u64);
+    while crate::interrupts::pit::uptime_ms() < deadline {
+        crate::task::scheduler::yield_now();
+        let ready = poll_once(fds_ptr, nfds);
+        if ready != 0 {
+            return Ok(ready);
+        }
+    }
+    Ok(0)
+}
+
+fn poll_once(fds_ptr: *mut u8, nfds: u32) -> i64 {
     let mut ready = 0i64;
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
@@ -2015,9 +2098,7 @@ pub fn sys_poll(fds_ptr: *mut u8, nfds: u32, timeout_ms: i32) -> SyscallResult {
         }
         core::arch::asm!("sti", options(nomem, nostack));
     }
-
-    let _ = timeout_ms; // TODO: blocking poll with timeout
-    Ok(ready)
+    ready
 }
 
 // ─────────────────────────────────────────────────
@@ -2447,8 +2528,22 @@ pub fn sys_fcntl(fd: i32, cmd: i32, _arg: u64) -> SyscallResult {
 // ─────────────────────────────────────────────────
 
 pub fn sys_isatty(fd: i32) -> SyscallResult {
-    // fd 0, 1, 2 are TTY
-    if fd >= 0 && fd <= 2 {
+    if fd < 0 {
+        return Err(SyscallError::EBADF);
+    }
+
+    let is_tty = unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+        let is_tty = crate::task::scheduler::with_current_fd_table(|fds| {
+            let file = fds.get(fd).map_err(map_vfs_error)?;
+            Ok(file.inode.is_tty())
+        })
+        .unwrap_or(Err(SyscallError::EBADF));
+        core::arch::asm!("sti", options(nomem, nostack));
+        is_tty?
+    };
+
+    if is_tty {
         Ok(1)
     } else {
         Err(SyscallError::ENOTTY)

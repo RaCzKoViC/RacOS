@@ -105,11 +105,10 @@ jobs:
       - name: Install nasm
         run: sudo apt-get update && sudo apt-get install -y nasm
       - name: Run host-side workspace tests
-        # racsh's parser has #[test]s that run cleanly on host. Other crates
-        # depend on libc-lite which collides with libgcc when linked against
-        # the host toolchain, so we narrow the host-test set to racsh only.
-        run: cargo test -p racsh
-        continue-on-error: true
+        # racsh parser/expander tests now run against the real crate. rpkg and
+        # rapt are host-side package tools, so keep them in the same required
+        # host test gate.
+        run: cargo test -p racsh -p rpkg -p rapt
 
   boot-smoke:
     name: QEMU boot smoke (UEFI)
@@ -314,15 +313,11 @@ jobs:
         # be PIE or the bootloader hands it off with unfixed RIP-relative
         # GOT addresses).
         run: |
-          RUSTFLAGS="-C relocation-model=static -C link-arg=-no-pie" \
-            cargo build --package racore --target x86_64-unknown-none
           cargo build --package racos-boot --target x86_64-unknown-uefi
+          bash scripts/build-image.sh
           mkdir -p esp/EFI/BOOT
           cp target/x86_64-unknown-uefi/debug/bootx64.efi esp/EFI/BOOT/BOOTX64.EFI
           cp target/x86_64-unknown-none/debug/racore esp/racore.elf
-          if [ -d initramfs-root ]; then
-            python3 scripts/pack-initramfs.py initramfs-root esp/initramfs.img
-          fi
 
       - name: Boot + drive racsh over TCP-serial
         run: |
@@ -352,11 +347,14 @@ jobs:
           # leave the channel open ~5s so trailing kernel log + prompt make
           # it back into shell.log. timeout caps the whole exchange.
           (
+            sleep 2; printf '\n'
+            sleep 2; printf 'pwd\n'
             sleep 2; printf 'pwd\n'
             sleep 2; printf 'echo ci-smoke-ok\n'
             sleep 2; printf 'cat /proc/version\n'
-            sleep 5
-          ) | timeout 25 ncat 127.0.0.1 4444 > shell.log || true
+            sleep 2; printf 'racos-test\n'
+            sleep 70
+          ) | timeout 100 ncat 127.0.0.1 4444 > shell.log || true
           kill $QEMU_PID 2>/dev/null || true
           wait $QEMU_PID 2>/dev/null || true
           echo "--- qemu-host.log (whatever QEMU printed before being killed) ---"
@@ -366,14 +364,25 @@ jobs:
 
       - name: Assert shell responded
         run: |
-          grep -q "racsh\\$" shell.log \
+          tr -d '\r' < shell.log > shell.normalized.log
+          grep -q "racsh\\$" shell.normalized.log \
             || (echo "FAIL: racsh prompt not seen" && exit 1)
-          grep -q "^/\s*$" shell.log \
+          grep -q "^/$" shell.normalized.log \
             || (echo "FAIL: pwd did not return /" && exit 1)
-          grep -q "ci-smoke-ok" shell.log \
+          grep -q "ci-smoke-ok" shell.normalized.log \
             || (echo "FAIL: echo did not roundtrip" && exit 1)
-          grep -q "RacOS version" shell.log \
+          grep -q "RacOS version" shell.normalized.log \
             || (echo "FAIL: cat /proc/version did not return content" && exit 1)
+          grep -q "PHASE21-SIGNAL-TERM-OK" shell.normalized.log \
+            || (echo "FAIL: Phase 2.1 signal default-action test did not pass" && exit 1)
+          grep -q "PHASE21-SIGCHLD-WAIT-OK" shell.normalized.log \
+            || (echo "FAIL: Phase 2.1 SIGCHLD wait test did not pass" && exit 1)
+          grep -q "PHASE21-EXEC-LOOP-OK" shell.normalized.log \
+            || (echo "FAIL: Phase 2.1 exec-loop cleanup test did not pass" && exit 1)
+          grep -q "POLL-TIMEOUT-OK" shell.normalized.log \
+            || (echo "FAIL: poll timeout test did not pass" && exit 1)
+          grep -q "TTY-IOCTL-OK" shell.normalized.log \
+            || (echo "FAIL: TTY ioctl state test did not pass" && exit 1)
           echo "Interactive shell PASSED"
 
       - name: Upload shell log
