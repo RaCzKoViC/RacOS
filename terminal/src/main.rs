@@ -69,6 +69,21 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
             Ok(n) => {
                 term.feed(&out_buf[..n]);
                 let _ = libc_lite::write(1, &out_buf[..n]);
+                // Drain any DSR/DA response the emulator queued while
+                // processing the bytes above and feed it back to the shell
+                // via the PTY master. Without this, ncurses-style apps
+                // that issue ESC[6n (cursor position) or ESC[c (device
+                // attributes) wait forever for a reply.
+                let response = term.drain_response();
+                if !response.is_empty() {
+                    let mut written = 0usize;
+                    while written < response.len() {
+                        match libc_lite::write(ptmx_fd, &response[written..]) {
+                            Ok(0) | Err(_) => break,
+                            Ok(m) => written += m,
+                        }
+                    }
+                }
             }
             Err(_) => {
                 let _ = libc_lite::sched_yield();
