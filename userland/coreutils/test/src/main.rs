@@ -15,6 +15,8 @@ const O_RDWR: u32 = 0x0002;
 const O_CREAT: u32 = 0x0040;
 const O_TRUNC: u32 = 0x0200;
 const SIGTERM: i32 = 15;
+const SIGINT: i32 = 2;
+const SIGUSR1: i32 = 10;
 const TIOCGWINSZ: u32 = 0x5413;
 const TIOCSWINSZ: u32 = 0x5414;
 const TIOCGPGRP: u32 = 0x540F;
@@ -103,6 +105,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_spawn_wait();
     test_signal_default_terminate();
     test_sigchld_waitpid();
+    test_signal_user_handler();
+    test_signal_user_handler_reentrant_syscall();
     test_exec_loop_memory_cleanup();
     test_tty_ioctl_state();
     test_chdir_getcwd();
@@ -350,6 +354,86 @@ fn test_sigchld_waitpid() {
         if waited.is_ok() && status != 0 {
             println("PHASE21-SIGCHLD-WAIT-OK");
         }
+    }
+}
+
+// User signal handler state. The kernel delivers signals one-at-a-time on
+// the syscall return path, so HANDLER_COUNTER is single-threaded from the
+// test's POV: a synchronous `kill(getpid(), SIG)` returns only after the
+// handler has run (the SYSRET goes to the dispatcher, the dispatcher calls
+// the handler, then sigreturn restores RIP to the instruction after kill).
+static mut HANDLER_COUNTER: u32 = 0;
+static mut HANDLER_LAST_SIGNUM: i32 = 0;
+
+unsafe extern "C" fn sigint_counting_handler(signum: i32) {
+    unsafe {
+        HANDLER_COUNTER += 1;
+        HANDLER_LAST_SIGNUM = signum;
+    }
+}
+
+static mut REENTRANT_BYTES_WRITTEN: i32 = 0;
+
+unsafe extern "C" fn sigusr1_writing_handler(_signum: i32) {
+    // Re-entrant syscall from within a signal handler. If the kernel mis-
+    // tracks STAC/SMAP or the signal frame across nested syscalls this
+    // write will either return EFAULT or corrupt the frame.
+    let n = write(1, b"[handler]").map(|v| v as i32).unwrap_or(-1);
+    unsafe {
+        REENTRANT_BYTES_WRITTEN = n;
+    }
+}
+
+fn test_signal_user_handler() {
+    println("\n[test] user signal handler delivery");
+
+    unsafe {
+        HANDLER_COUNTER = 0;
+        HANDLER_LAST_SIGNUM = 0;
+    }
+    let installed = signal(SIGINT, sigint_counting_handler);
+    check!("signal(SIGINT, handler) returns Ok", installed.is_ok());
+
+    let pid = getpid();
+    let sent = kill(pid, SIGINT);
+    check!("kill(self, SIGINT) returns Ok", sent.is_ok());
+
+    // After kill() returns the handler must have run exactly once.
+    let count = unsafe { HANDLER_COUNTER };
+    let last = unsafe { HANDLER_LAST_SIGNUM };
+    check!("user handler invoked exactly once", count == 1);
+    check!("user handler received correct signum", last == SIGINT);
+
+    // After sigreturn, subsequent syscalls must still work — verifies that
+    // the kernel restored RIP/RFLAGS/RSP cleanly and didn't leave the FD
+    // table or scheduler in a bad state.
+    let after = getpid();
+    check!("post-handler getpid() succeeds", after == pid);
+
+    if count == 1 && last == SIGINT && after == pid {
+        println("PHASE21-USER-HANDLER-OK");
+    }
+}
+
+fn test_signal_user_handler_reentrant_syscall() {
+    println("\n[test] signal handler issues syscall");
+
+    unsafe {
+        REENTRANT_BYTES_WRITTEN = 0;
+    }
+    let installed = signal(SIGUSR1, sigusr1_writing_handler);
+    check!("signal(SIGUSR1, handler) returns Ok", installed.is_ok());
+
+    let pid = getpid();
+    let sent = kill(pid, SIGUSR1);
+    check!("kill(self, SIGUSR1) returns Ok", sent.is_ok());
+
+    let written = unsafe { REENTRANT_BYTES_WRITTEN };
+    // "[handler]" is 9 bytes.
+    check!("re-entrant write() in handler returns 9", written == 9);
+
+    if written == 9 {
+        println("PHASE21-USER-HANDLER-REENTRANT-OK");
     }
 }
 
