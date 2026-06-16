@@ -1,43 +1,64 @@
-// racinit — RacOS init process (PID 1) — minimal bring-up version.
+// RacInit (PID 1) — user-space init for RacOS.
 //
-// Responsibility:
-//  1. Become session leader.
-//  2. Spawn /bin/sh from initramfs (racsh) wired to console.
-//  3. Wait for it. If it exits, respawn after a short backoff so PID 1
-//     never returns (kernel treats PID 1 exit as fatal).
-//  4. Drain orphan zombies non-blockingly between supervises.
+// Boot sequence:
+//   1. Become session leader (setsid).
+//   2. Try loading unit files from /etc/racinit/. If any unit loaded,
+//      start them in dependency order and hand off to the engine's
+//      supervise loop (restart policy + burst limit handled there).
+//   3. Otherwise fall back to the legacy "spawn /bin/sh and respawn on
+//      exit" bring-up path — same behaviour as before this PR for
+//      images that haven't been refreshed with unit files yet.
 //
-// Unit-file driven service supervision lives in the `init` library crate
-// (engine.rs) and will replace this once enough syscalls are stable.
-// During Sprint 2 bring-up we keep this path deliberately small so any
-// failure on the "kernel → user mode → racsh" boundary is easy to isolate.
+// The kernel treats PID 1 exit as fatal, so every branch is an infinite
+// loop or `supervise() -> !`.
 
 #![no_std]
 #![no_main]
-#![deny(unsafe_code)]
 
+extern crate init;
 extern crate libc_lite;
 
+use init::engine::Engine;
+
+const UNIT_DIR: &str = "/etc/racinit";
 const SHELL_PATH: &[u8] = b"/bin/sh\0";
 
-#[allow(unsafe_code)] // C ABI entry point: linker symbol exemption only
 #[no_mangle]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    let _ = libc_lite::write(1, b"[init] RacInit starting (PID 1)\n");
+    let _ = libc_lite::write(1, b"[init] RacInit v0.1.0 starting (PID 1)\n");
 
-    // PID 1 is the session leader. Ignore errors during bring-up.
+    // PID 1 must be the session leader so children inherit a session id
+    // and TTY ownership works. Errors here are non-fatal during bring-up.
     let _ = libc_lite::setsid();
 
+    let mut engine = Engine::new();
+    engine.load_units_from(UNIT_DIR);
+
+    if engine.unit_count() > 0 {
+        let _ = libc_lite::write(1, b"[init] engine path: starting units\n");
+        let skipped_cycles = engine.start_all();
+        if skipped_cycles > 0 {
+            let _ = libc_lite::write(2, b"[init] some units skipped due to dependency cycle\n");
+        }
+        engine.supervise();
+    }
+
+    // Fallback bring-up: no unit files (older initramfs). Same loop as
+    // before — keep PID 1 alive by respawning the shell.
+    let _ = libc_lite::write(
+        1,
+        b"[init] no units found in /etc/racinit, falling back to bare-shell mode\n",
+    );
     loop {
         match spawn_shell() {
             Ok(pid) => {
                 let _ = libc_lite::write(1, b"[init] spawned /bin/sh, waiting...\n");
-                wait_for(pid);
-                let _ = libc_lite::write(1, b"[init] /bin/sh exited, respawning in 1s\n");
+                wait_for_child(pid);
+                let _ = libc_lite::write(1, b"[init] /bin/sh exited, restarting in 1s\n");
                 let _ = libc_lite::nanosleep(1, 0);
             }
             Err(_) => {
-                let _ = libc_lite::write(2, b"[init] cannot spawn /bin/sh, retrying in 5s\n");
+                let _ = libc_lite::write(2, b"[init] failed to spawn /bin/sh, retrying in 5s\n");
                 let _ = libc_lite::nanosleep(5, 0);
             }
         }
@@ -50,9 +71,7 @@ fn spawn_shell() -> Result<i32, i64> {
     libc_lite::spawn_args(SHELL_PATH, &argv)
 }
 
-fn wait_for(target_pid: i32) {
-    // Wait specifically for the shell. Reap any other reparented children
-    // in passing and keep waiting for the target.
+fn wait_for_child(target_pid: i32) {
     loop {
         let mut status: i32 = 0;
         match libc_lite::waitpid(-1, &mut status, 0) {
