@@ -210,7 +210,9 @@ fn apply_relocations(
     let mut rela_ent_size: usize = core::mem::size_of::<Elf64Rela>();
 
     for i in 0..dyn_count {
+        // SAFETY: i < dyn_count = dynamic_size / dyn_ent_size; offset stays in range.
         let ent_ptr = unsafe { dyn_ptr.add(i * dyn_ent_size) as *const Elf64Dyn };
+        // SAFETY: ent_ptr is bounded; read_unaligned handles packed Elf64Dyn.
         let ent: Elf64Dyn = unsafe { core::ptr::read_unaligned(ent_ptr) };
         let tag = ent.d_tag;
         let val = ent.d_val;
@@ -245,7 +247,9 @@ fn apply_relocations(
     let mut applied = 0usize;
 
     for i in 0..rela_count {
+        // SAFETY: i < rela_count = rela_size / rela_ent_size; offset stays in range.
         let ent_ptr = unsafe { rela_ptr.add(i * rela_ent_size) as *const Elf64Rela };
+        // SAFETY: ent_ptr is bounded; read_unaligned handles packed Elf64Rela.
         let rela: Elf64Rela = unsafe { core::ptr::read_unaligned(ent_ptr) };
 
         let r_offset = rela.r_offset;
@@ -257,6 +261,8 @@ fn apply_relocations(
             let place_vaddr = runtime_vaddr(r_offset, load_bias)?;
             let place_ptr = resolve_loaded_ptr(segments, seg_count, place_vaddr, 8)?;
             let relocated = load_bias.wrapping_add(r_addend as u64);
+            // SAFETY: resolve_loaded_ptr confirmed 8 bytes fit at place_ptr
+            // within a loaded segment.
             unsafe {
                 core::ptr::write_unaligned(place_ptr as *mut u64, relocated);
             }
@@ -403,6 +409,7 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
         let phys_addr = frame.addr();
 
         // Zero the entire allocation (for BSS)
+        // SAFETY: freshly-allocated identity-mapped frames, exclusively owned.
         unsafe {
             core::ptr::write_bytes(phys_addr as *mut u8, 0, pages * FRAME_SIZE);
         }
@@ -410,6 +417,8 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
         // Copy file data into the physical allocation
         if p_filesz > 0 {
             let src = &data[p_offset as usize..file_end];
+            // SAFETY: src bounded by file_end <= data.len(); dst within our
+            // freshly-allocated pages*FRAME_SIZE region.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     src.as_ptr(),
@@ -450,6 +459,7 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
     let stack_phys = stack_frame.addr();
 
     // Zero the stack
+    // SAFETY: freshly-allocated user stack pages, exclusively owned.
     unsafe {
         core::ptr::write_bytes(stack_phys as *mut u8, 0, USER_STACK_SIZE);
     }
