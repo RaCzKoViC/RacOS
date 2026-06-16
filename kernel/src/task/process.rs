@@ -60,7 +60,12 @@ impl UserProcess {
     ///
     /// Allocates a kernel stack, sets up the initial context to jump to
     /// `user_entry_trampoline` which will IRETQ into user mode.
-    pub fn from_elf(name: &str, loaded: &LoadedElf, argv: &[&[u8]]) -> Result<Self, &'static str> {
+    pub fn from_elf(
+        name: &str,
+        loaded: &LoadedElf,
+        argv: &[&[u8]],
+        envp: &[&[u8]],
+    ) -> Result<Self, &'static str> {
         let pid = alloc_user_pid();
         crate::serial::serial_println!("[ USERPROC ] from_elf('{}') pid={} start", name, pid);
 
@@ -90,23 +95,33 @@ impl UserProcess {
             alloc_base
         );
 
-        // ── Push argv onto the user stack ─────────────────────────────────
-        // System V AMD64 ABI: at the entry RSP must be 16-byte aligned and
-        // [rsp+0]=argc, [rsp+8..]=argv pointers ending in NULL, [rsp+8(N+2)..]=envp.
-        // (We skip envp/auxv for now.)
+        // ── Push argv + envp onto the user stack ──────────────────────────
+        // System V AMD64 ABI on entry:
+        //   [rsp+0]                = argc
+        //   [rsp+8 .. +8N]         = argv[0..N-1]
+        //   [rsp+8(N+1)]           = NULL          (argv terminator)
+        //   [rsp+8(N+2) .. +8(N+2+M-1)] = envp[0..M-1]
+        //   [rsp+8(N+2+M)]         = NULL          (envp terminator)
+        //   rsp                    must be 16-byte aligned
+        //
+        // Earlier history: this routine aligned to 16 AFTER writing argc,
+        // which could shift sp downward by 8 — argc would end up at
+        // [user_rsp+8] instead of [user_rsp+0] and _start would read 0
+        // (alignment pad) as argc. Now we compute the exact block size up
+        // front and align sp down to it.
         //
         // Layout (growing downward from stack_virt_top):
-        //   [argv string data ...]       ← null-terminated strings (top of stack)
+        //   [argv + envp string data ...]  ← null-terminated bytes
         //   [padding to 16-byte align]
-        //   NULL                         ← argv terminator
+        //   NULL                            ← envp terminator
+        //   envp[M-1] ptr
+        //   ...
+        //   envp[0] ptr
+        //   NULL                            ← argv terminator
         //   argv[N-1] ptr
         //   ...
         //   argv[0] ptr
-        //   argc                          ← user_rsp points here, 16-byte aligned
-        //
-        // The previous version aligned to 16 AFTER writing argc, which could
-        // shift sp downward by 8 — argc would end up at [user_rsp+8] instead
-        // of [user_rsp+0] and _start would read 0 (alignment pad) as argc.
+        //   argc                             ← user_rsp, 16-byte aligned
 
         let stack_virt_base = loaded.stack_virt_top - loaded.stack_size as u64;
         let virt_to_phys =
@@ -114,9 +129,12 @@ impl UserProcess {
 
         let mut sp = loaded.stack_virt_top;
         let argc = argv.len();
+        let envc = envp.len();
 
-        // 1. Write string data at the top of the stack.
-        let mut string_vaddrs = alloc::vec::Vec::with_capacity(argc);
+        // 1. Write argv + envp string data at the top of the stack. envp
+        //    strings come "below" argv in virtual address order, but that's
+        //    fine — we just need to remember each one's virtual address.
+        let mut argv_vaddrs = alloc::vec::Vec::with_capacity(argc);
         for arg in argv.iter().rev() {
             sp -= 1;
             unsafe {
@@ -130,17 +148,37 @@ impl UserProcess {
                     arg.len(),
                 );
             }
-            string_vaddrs.push(sp);
+            argv_vaddrs.push(sp);
         }
-        string_vaddrs.reverse(); // argv[0] first
+        argv_vaddrs.reverse();
+
+        let mut envp_vaddrs = alloc::vec::Vec::with_capacity(envc);
+        for var in envp.iter().rev() {
+            sp -= 1;
+            unsafe {
+                *(virt_to_phys(sp) as *mut u8) = 0;
+            }
+            sp -= var.len() as u64;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    var.as_ptr(),
+                    virt_to_phys(sp) as *mut u8,
+                    var.len(),
+                );
+            }
+            envp_vaddrs.push(sp);
+        }
+        envp_vaddrs.reverse();
 
         // 2. Drop sp to a 16-byte boundary so the pointer block stays aligned.
         sp &= !15u64;
 
-        // 3. Reserve the argc/argv block, rounded up to 16 bytes. Layout
-        //    inside the block (low → high addresses): argc, argv[0], ...,
-        //    argv[N-1], NULL, then optional padding.
-        let block_bytes = 8 + 8 * (argc as u64 + 1); // argc + N pointers + NULL
+        // 3. Reserve the argc/argv/envp block, rounded up to 16 bytes.
+        //    Layout inside the block (low → high addresses):
+        //      argc, argv[0], ..., argv[N-1], NULL,
+        //      envp[0], ..., envp[M-1], NULL,
+        //      [optional padding].
+        let block_bytes = 8 + 8 * (argc as u64 + 1) + 8 * (envc as u64 + 1);
         let block_bytes_aligned = (block_bytes + 15) & !15;
         sp -= block_bytes_aligned;
 
@@ -151,19 +189,28 @@ impl UserProcess {
             // argc at [rsp+0]
             *(virt_to_phys(user_rsp) as *mut u64) = argc as u64;
             // argv[i] at [rsp + 8*(i+1)]
-            for (i, vaddr) in string_vaddrs.iter().enumerate() {
+            for (i, vaddr) in argv_vaddrs.iter().enumerate() {
                 let slot = user_rsp + 8 + 8 * i as u64;
                 *(virt_to_phys(slot) as *mut u64) = *vaddr;
             }
-            // NULL at [rsp + 8*(argc+1)]
-            let null_slot = user_rsp + 8 + 8 * argc as u64;
-            *(virt_to_phys(null_slot) as *mut u64) = 0;
+            // argv NULL terminator at [rsp + 8*(argc+1)]
+            let argv_null = user_rsp + 8 + 8 * argc as u64;
+            *(virt_to_phys(argv_null) as *mut u64) = 0;
+            // envp[i] at [rsp + 8*(argc+2+i)]
+            for (i, vaddr) in envp_vaddrs.iter().enumerate() {
+                let slot = user_rsp + 8 + 8 * (argc as u64 + 1 + i as u64 + 1);
+                *(virt_to_phys(slot) as *mut u64) = *vaddr;
+            }
+            // envp NULL terminator at [rsp + 8*(argc+2+M)]
+            let envp_null = user_rsp + 8 + 8 * (argc as u64 + 1 + envc as u64 + 1);
+            *(virt_to_phys(envp_null) as *mut u64) = 0;
         }
 
         crate::serial::serial_println!(
-            "[ USERPROC ] argv/user stack prepared rsp=0x{:X} argc={} block_bytes={}",
+            "[ USERPROC ] argv+envp/user stack prepared rsp=0x{:X} argc={} envc={} block_bytes={}",
             user_rsp,
             argc,
+            envc,
             block_bytes_aligned,
         );
 

@@ -477,7 +477,7 @@ fn try_spawn_init() -> Option<u32> {
 
         // Create user process
         let mut process =
-            match task::process::UserProcess::from_elf(path, &loaded, &[path.as_bytes()]) {
+            match task::process::UserProcess::from_elf(path, &loaded, &[path.as_bytes()], &[]) {
                 Ok(p) => p,
                 Err(e) => {
                     serial::serial_println!(
