@@ -111,6 +111,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
     test_rpkg_install_list_remove();
+    test_sed_substitute();
     test_exec_loop_memory_cleanup();
     test_tty_ioctl_state();
     test_chdir_getcwd();
@@ -642,6 +643,57 @@ fn run_and_wait(path: &[u8], argv: &[*const u8]) -> Option<i32> {
         return None;
     }
     Some(status)
+}
+
+/// Smoke for /bin/sed: drive it through racsh with command substitution
+/// + case matching. racsh's echo has no `-e` flag and there's no
+/// `printf`, so each test sticks to single-line input — d/p semantics
+/// are still exercised, just on a single line.
+fn test_sed_substitute() {
+    println("\n[test] /bin/sed s/X/Y/[g], d, -n p");
+
+    // s/X/Y/ — first-occurrence substitution.
+    let s1 = shell_run(
+        b"result=$(echo hello | /bin/sed 's/hello/world/'); \
+          case $result in world) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("sed s/X/Y/ swaps hello → world", s1 == Some(0));
+
+    // s/X/Y/g — global substitution across multiple matches on one line.
+    let s2 = shell_run(
+        b"result=$(echo aaa | /bin/sed 's/a/b/g'); \
+          case $result in bbb) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("sed s/X/Y/g hits every match (aaa → bbb)", s2 == Some(0));
+
+    // s/X/Y/ without g must NOT substitute the second occurrence.
+    let s3 = shell_run(
+        b"result=$(echo aXa | /bin/sed 's/a/b/'); \
+          case $result in bXa) exit 0;; *) exit 1;; esac\0",
+    );
+    check!(
+        "sed s/X/Y/ (no g) only first hit (aXa → bXa)",
+        s3 == Some(0)
+    );
+
+    // -n with `p` — suppress default, explicit print emits the line once
+    // (the `p` print is the only one when -n is set).
+    let s4 = shell_run(
+        b"result=$(echo hello | /bin/sed -n p); \
+          case $result in hello) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("sed -n p echoes each line exactly once", s4 == Some(0));
+
+    // d — deletes the line, so substitution output is empty.
+    let s5 = shell_run(
+        b"result=$(echo dropme | /bin/sed d); \
+          case $result in '') exit 0;; *) exit 1;; esac\0",
+    );
+    check!("sed d drops the line", s5 == Some(0));
+
+    if s1 == Some(0) && s2 == Some(0) && s3 == Some(0) && s4 == Some(0) && s5 == Some(0) {
+        println("T33-SED-OK");
+    }
 }
 
 fn test_signal_user_handler_reentrant_syscall() {

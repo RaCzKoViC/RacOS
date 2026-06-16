@@ -122,12 +122,15 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
     - [x] `racos-test::test_rpkg_install_list_remove` builds a minimal .rpk in memory, writes it to `/tmp/demo.rpk`, then spawns `/bin/rpkg install /tmp/demo.rpk`, `/bin/rpkg list`, `/bin/rpkg remove demo-rpkg` — asserting exit 0 for each and emitting `T32-RPKG-OK`.
   - **Pozostałe (deferred):** signature verification (no crypto yet), dependency resolution (rapt territory), repository protocol, multi-file packages (DATA is single-payload in MVP — multi-file would need a real archive format), `/bin/` deployment after T4.x makes initramfs writable or rootfs is on persistent disk.
 
-- [~] **T3.3 — Userland: dokończyć stuby** (ps shipped; env/sed/awk pending)
+- [~] **T3.3 — Userland: dokończyć stuby** (ps + sed shipped; env/awk pending)
   - [x] **`ps`** — real procfs reader. Walks `/proc` via getdents, reads `/proc/<pid>/status` for each numeric pid dir, prints `PID PPID STATE NAME` columns.
     - Fixed the dead-code state it was in: wrong libc-lite dep path (`../../../../` → `../../../`), missing `alloc` feature, missing from workspace `members`/`default-members`, missing from BIN_LIST in both build scripts (so the binary was never staged into initramfs). Procfs already serves `/proc/<pid>/status` in key:value form so no kernel changes were needed.
     - `racos-test::test_ps_lists_running_processes` smoke spawns `/bin/ps` and asserts exit 0; emits `T33-PS-OK` marker.
   - [ ] `env` — pełne `getenv`/`setenv`/`unsetenv` + iteracja po environ (still 22-line stub printing only PWD+PATH; needs proper envp inheritance in fork/exec first)
-  - [ ] `sed` — minimal: `s/X/Y/g`, `d`, `p`, `-n` (currently 92-line skeleton)
+  - [x] **`sed`** — MVP stream editor. Single-command scripts on byte-level input (no regex, no addresses, no multi-command `;`/`-e`).
+    - Same dead-code wiring fixes as the ps PR: bad libc-lite path, no `alloc` feature, not in workspace, not in BIN_LIST.
+    - Supported commands: `s/X/Y/[g]` (substitute first/global), `d` (delete = skip default print), `p` (explicit print). The `-n` flag suppresses the default per-line print so `p` is the only path that emits output.
+    - `racos-test::test_sed_substitute` exercises all five paths (s, s/g, s/no-g, -n p, d) via shell command substitution + case-match assertions, emits `T33-SED-OK`.
   - [ ] `awk` — minimal: pola `$1..$N`, `BEGIN/END`, basic actions (not present)
 
 ---
