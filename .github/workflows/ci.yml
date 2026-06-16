@@ -490,3 +490,21 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy (kernel)
         run: cargo clippy --package racore --target x86_64-unknown-none -- -W clippy::all
+
+  unsafe-safety:
+    # Enforces ARCHITECTURE.md §3.3: every `unsafe {` block under kernel/
+    # and libs/libc-lite must have a `// SAFETY:` comment in the preceding
+    # 5 lines. The backlog cleared in T4.2 (10 sweep PRs, 350 → 0); from
+    # this point on the lint is the only thing keeping us at 0.
+    #
+    # Starts as advisory (continue-on-error: true) for one cycle so any
+    # toolchain weirdness around the bash script can surface without
+    # blocking merges; flip to required after the first clean green run.
+    name: Unsafe-safety annotation lint (--strict)
+    runs-on: ubuntu-latest
+    needs: build
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run check-unsafe-safety.sh --strict
+        run: bash scripts/check-unsafe-safety.sh --strict
