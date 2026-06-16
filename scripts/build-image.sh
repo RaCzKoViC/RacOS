@@ -77,8 +77,14 @@ COREUTILS=(
     racos-find racos-od racos-tee racos-hexdump racterm
 )
 for pkg in "${COREUTILS[@]}"; do
+    # racterm gates its [[bin]] behind a required-feature so
+    # `cargo test -p racterm` on host doesn't drag libc-lite's _start in.
+    EXTRA_FEATURES=()
+    if [[ "$pkg" == "racterm" ]]; then
+        EXTRA_FEATURES=(--features bin-target)
+    fi
     RUSTFLAGS="$OLD_RUSTFLAGS" \
-        cargo build --package "$pkg" "${CARGO_FLAGS[@]}" \
+        cargo build --package "$pkg" "${EXTRA_FEATURES[@]}" "${CARGO_FLAGS[@]}" \
             -Z build-std=core,alloc \
             -Z build-std-features=compiler-builtins-mem
 done

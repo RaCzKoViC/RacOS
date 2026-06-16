@@ -34,7 +34,7 @@ build-boot:
 
 # Build userland crates (default members)
 build-userland:
-    cargo build --workspace --exclude racore --exclude racos-boot --exclude rpkg --exclude rapt --target {{target}} -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
+    cargo build --workspace --exclude racore --exclude racos-boot --exclude rpkg --exclude rapt --features racterm/bin-target --target {{target}} -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
     cargo build --package rpkg --package rapt
 
 # Run all tests
