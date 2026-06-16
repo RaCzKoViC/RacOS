@@ -143,6 +143,27 @@ test-uefi: image
 test-uefi: image
     powershell -NoProfile -Command "& {{qemu}} -machine q35 -cpu qemu64 -m 512M -drive if=pflash,format=raw,file=tools\\OVMF_CODE.fd,readonly=on -drive file=fat:rw:esp,format=raw -serial stdio -display none -no-reboot 2>&1 | Select-Object -First 60"
 
+# CI-equivalent kernel smoke (isa-debug-exit). Returns exit 0 on PASS,
+# non-zero otherwise. Run before pushing to catch the same class of
+# regressions the kernel-smoke-isadbg CI job catches.
+[unix]
+smoke:
+    bash scripts/run-ci-smoke.sh
+
+[windows]
+smoke:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-ci-smoke.ps1
+
+# Kernel smoke with an AHCI disk attached (covers the persistent /mnt
+# round-trip path that the boot-smoke CI job exercises across two boots).
+[unix]
+smoke-disk:
+    bash scripts/run-ci-smoke.sh --disk
+
+[windows]
+smoke-disk:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-ci-smoke.ps1 -Disk
+
 # Clean build artifacts
 [unix]
 clean:

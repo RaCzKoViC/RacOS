@@ -2,7 +2,7 @@
 
 > Status: Living document
 > Utworzona: 2026-06-16
-> Last updated: 2026-06-16 (Tier 1 complete + T2.1 + T2.2)
+> Last updated: 2026-06-16 (Tier 1 complete + Tier 2 complete)
 
 Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa praca powinna pasować do jednego z tierów poniżej. Zmiana priorytetów wymaga aktualizacji tego pliku w PR-ze.
 
@@ -93,11 +93,13 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
     - [x] CI host test command now includes `racterm` and `init` alongside racsh/rpkg/rapt — 75 host tests run on every push.
   - **Pozostałe (deferred):** real renderer that reads from `Terminal::buffer` and updates a framebuffer (currently the host terminal does rendering via PTY byte forwarding — sufficient for v0 since RacOS runs over serial); UTF-8 multibyte handling in the print path; mouse-tracking modes (1000/1006).
 
-- [ ] **T2.3 — Phase 1 cross-platform build**
-  - Port `justfile` + skryptów PowerShell na bash (utrzymać oba)
-  - `docs/DEVELOPMENT_LINUX.md` z full setup
-  - CI weryfikujący że bash-side i ps-side dają identyczny output
-  - **Definition of done:** kontrybutor na Ubuntu może zbudować + odpalić smoke test w QEMU
+- [x] **T2.3 — Phase 1 cross-platform build**
+  - Discovery: the bulk was already in place. `justfile` already has `[unix]`/`[windows]` attributes routing every build/run/image/iso recipe to the right shell. Bash counterparts existed for the heavy lifters (`build-image.sh`, `make-image.sh`, `make-iso.sh`, `boot-test.sh`); `pack-initramfs.py` covers the initramfs packing cross-platform. CI has been building from `build-image.sh` for months. `DEVELOPMENT_LINUX.md` existed too. Real gap: the local "did I just break CI?" loop (`run-ci-smoke.ps1`) was Windows-only.
+  - This PR fills the gap:
+    - [x] `scripts/run-ci-smoke.sh` — bash port of the PS smoke runner. Rebuilds the kernel with `--features ci-smoke` and the static-relocation RUSTFLAGS the bootloader needs, stages it into `esp/`, launches QEMU with `isa-debug-exit`, and asserts exit code 33 (PASS) / 35 (FAIL) / 124 (timeout). Supports `--disk` to attach the AHCI image that the boot-smoke two-boot test uses.
+    - [x] `justfile` gets `smoke` and `smoke-disk` recipes routed to the bash/PS script via `[unix]`/`[windows]` attributes — `just smoke` works on Ubuntu.
+    - [x] `DEVELOPMENT_LINUX.md` documents `just smoke` / `just smoke-disk` and the exit-code contract.
+  - **Pozostałe (deferred):** CI parity check that runs `bash scripts/run-ci-smoke.sh` alongside the inline kernel-smoke job (would catch script rot but is a doubling of an already-covered code path; skipped for v0). PowerShell-only local helpers (`launch-interactive.ps1`, `runtime-validation-*.ps1`, `validate-*.ps1`) — not needed for the contributor-on-Ubuntu DoD path.
 
 ---
 
