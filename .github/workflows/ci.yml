@@ -175,19 +175,30 @@ jobs:
           # class-0x01.06.01 device, AHCI driver binds, sda registers.
           truncate -s 16M disk.img
 
+          # Build a real FAT32 ESP image instead of relying on QEMU's
+          # `fat:rw:esp` auto-mode. The auto-mode synthesises the FAT
+          # view in memory and its writeback path occasionally leaves
+          # the second QEMU run unable to load Boot0002 ("Load Error"
+          # → falls through to PXE). `fat:ro:esp` is rejected by QEMU
+          # 8.2 ("Block node is read-only"). A pre-baked image gives us
+          # stable, deterministic content across both boots.
+          truncate -s 64M esp.img
+          mkfs.vfat -F 32 -n RACOS-ESP esp.img > /dev/null
+          mmd -i esp.img ::/EFI
+          mmd -i esp.img ::/EFI/BOOT
+          mcopy -i esp.img esp/EFI/BOOT/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
+          mcopy -i esp.img esp/racore.elf ::/racore.elf
+          if [ -f esp/initramfs.img ]; then
+            mcopy -i esp.img esp/initramfs.img ::/initramfs.img
+          fi
+
           QEMU_ARGS=(-machine q35 -cpu qemu64,+smep,+smap -m 512M
             -drive if=pflash,format=raw,file=$OVMF,readonly=on
-            -drive file=fat:ro:esp,format=raw
+            -drive file=esp.img,if=ide,format=raw
             -device ich9-ahci,id=ahci0
             -drive id=disk0,file=disk.img,if=none,format=raw
             -device ide-hd,bus=ahci0.0,drive=disk0
             -serial stdio -display none -no-reboot)
-          # ESP is `fat:ro:esp` (readonly auto-FAT). With `rw`, QEMU's
-          # in-memory FAT writeback on boot 1 occasionally left the
-          # synthesised volume in a state OVMF refused on boot 2 ("Load
-          # Error" loading Boot0002), even though boot 1's RacOS never
-          # wrote to it. The kernel does its own writes via the AHCI
-          # disk on /mnt; the ESP only needs to be read at boot.
 
           # Boot 1 — first time the disk is touched. racfs::open_or_format
           # formats it; persistence_test creates boot-counter=1.
