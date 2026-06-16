@@ -394,6 +394,33 @@ fn collect_user_argv(
     Ok(args)
 }
 
+/// Read a null-terminated array of `KEY=VALUE` string pointers from user
+/// space. If `envp_ptr == 0`, returns an empty vec — the new process gets
+/// no inherited environment. Caps at MAX_ENV_VARS to bound memory and at
+/// 4 KiB per string via validate_user_string.
+fn collect_user_envp(envp_ptr: u64) -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, SyscallError> {
+    const MAX_ENV_VARS: usize = 256;
+
+    let mut env_vars = alloc::vec::Vec::new();
+    if envp_ptr == 0 {
+        return Ok(env_vars);
+    }
+    validate_user_ptr(envp_ptr, 8)?;
+
+    for i in 0..MAX_ENV_VARS {
+        let ptr_addr = envp_ptr + (i * 8) as u64;
+        validate_user_ptr(ptr_addr, 8)?;
+        let str_ptr = unsafe { *(ptr_addr as *const u64) };
+        if str_ptr == 0 {
+            break;
+        }
+        let str_len = validate_user_string(str_ptr)?;
+        let slice = unsafe { core::slice::from_raw_parts(str_ptr as *const u8, str_len) };
+        env_vars.push(alloc::vec::Vec::from(slice));
+    }
+    Ok(env_vars)
+}
+
 // ─────────────────────────────────────────────────
 // Signal delivery — kernel ↔ user-handler bridge
 // ─────────────────────────────────────────────────
@@ -967,7 +994,7 @@ pub fn sys_dup2(oldfd: i32, newfd: i32) -> SyscallResult {
 
 /// Replace the current process with a new executable.
 /// `path` is a null-terminated string in user space.
-pub fn sys_exec(path: *const u8, _argv: u64, _envp: u64) -> SyscallResult {
+pub fn sys_exec(path: *const u8, argv_ptr: u64, envp_ptr: u64) -> SyscallResult {
     let path_len = validate_user_string(path as u64)?;
     // SAFETY: path is validated to be in user space with a null terminator.
     let path_str = unsafe {
@@ -1000,13 +1027,16 @@ pub fn sys_exec(path: *const u8, _argv: u64, _envp: u64) -> SyscallResult {
     let loaded = crate::elf::load_elf(&buf).map_err(|_| SyscallError::ENOEXEC)?;
 
     // Collect argv from user space (if provided).
-    let argv_strs = collect_user_argv(path_str, _argv)?;
+    let argv_strs = collect_user_argv(path_str, argv_ptr)?;
     let argv_refs: alloc::vec::Vec<&[u8]> = argv_strs.iter().map(|s| s.as_slice()).collect();
+    let envp_strs = collect_user_envp(envp_ptr)?;
+    let envp_refs: alloc::vec::Vec<&[u8]> = envp_strs.iter().map(|s| s.as_slice()).collect();
 
     // Build a new UserProcess from the loaded ELF.
     // from_elf creates new page table and maps segments + stack.
-    let process = crate::task::process::UserProcess::from_elf(path_str, &loaded, &argv_refs)
-        .map_err(|_| SyscallError::ENOMEM)?;
+    let process =
+        crate::task::process::UserProcess::from_elf(path_str, &loaded, &argv_refs, &envp_refs)
+            .map_err(|_| SyscallError::ENOMEM)?;
 
     // Replace the current task's state with the new process's state in-place.
     // This preserves PID, parent_pid, pgid, session_id and open fds (non-CLOEXEC).
@@ -1039,7 +1069,7 @@ pub fn sys_exec(path: *const u8, _argv: u64, _envp: u64) -> SyscallResult {
 /// Create a child process from an ELF path (posix_spawn style).
 /// `path` is a null-terminated string in user space.
 /// Returns child PID to the caller.
-pub fn sys_spawn(path: *const u8, _argv: u64, _envp: u64) -> SyscallResult {
+pub fn sys_spawn(path: *const u8, argv_ptr: u64, envp_ptr: u64) -> SyscallResult {
     let path_len = validate_user_string(path as u64)?;
     let path_str = unsafe {
         core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
@@ -1068,11 +1098,14 @@ pub fn sys_spawn(path: *const u8, _argv: u64, _envp: u64) -> SyscallResult {
     let loaded = crate::elf::load_elf(&buf).map_err(|_| SyscallError::ENOEXEC)?;
 
     // Collect argv from user space (if provided).
-    let argv_strs = collect_user_argv(path_str, _argv)?;
+    let argv_strs = collect_user_argv(path_str, argv_ptr)?;
     let argv_refs: alloc::vec::Vec<&[u8]> = argv_strs.iter().map(|s| s.as_slice()).collect();
+    let envp_strs = collect_user_envp(envp_ptr)?;
+    let envp_refs: alloc::vec::Vec<&[u8]> = envp_strs.iter().map(|s| s.as_slice()).collect();
 
-    let mut process = crate::task::process::UserProcess::from_elf(path_str, &loaded, &argv_refs)
-        .map_err(|_| SyscallError::ENOMEM)?;
+    let mut process =
+        crate::task::process::UserProcess::from_elf(path_str, &loaded, &argv_refs, &envp_refs)
+            .map_err(|_| SyscallError::ENOMEM)?;
 
     // Snapshot inheritable parent state first, then apply it to the child.
     let (parent_fds, parent_creds, parent_umask, parent_cwd, parent_cwd_len) = unsafe {
