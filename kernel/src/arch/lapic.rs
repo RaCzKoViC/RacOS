@@ -94,7 +94,7 @@ pub unsafe fn init_bsp() {
             0xFEE0_0000
         }
     };
-    LAPIC_BASE.store(base, Ordering::SeqCst);
+    LAPIC_BASE.store(base & !0xFFF, Ordering::SeqCst);
 
     // 1. Sanity-check the hardware-global enable bit. We don't try to fix
     //    it because writing IA32_APIC_BASE can relocate the LAPIC and we'd
@@ -275,14 +275,20 @@ unsafe fn write_icr(apic_id: u32, low: u32) {
 
 #[inline]
 unsafe fn read_reg(off: usize) -> u32 {
-    let base = LAPIC_BASE.load(Ordering::SeqCst) as *mut u8;
-    read_volatile(base.add(off) as *const u32)
+    read_volatile(lapic_reg_ptr(off) as *const u32)
 }
 
 #[inline]
 unsafe fn write_reg(off: usize, val: u32) {
-    let base = LAPIC_BASE.load(Ordering::SeqCst) as *mut u8;
-    write_volatile(base.add(off) as *mut u32, val);
+    write_volatile(lapic_reg_ptr(off), val);
+}
+
+#[inline]
+fn lapic_reg_ptr(off: usize) -> *mut u32 {
+    let base = LAPIC_BASE.load(Ordering::SeqCst) & !0xFFF;
+    let addr = base.saturating_add(off as u64);
+    debug_assert_eq!(addr & 0x3, 0, "LAPIC register pointer must be u32-aligned");
+    addr as *mut u32
 }
 
 #[inline]
