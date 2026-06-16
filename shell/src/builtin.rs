@@ -5,7 +5,10 @@
 
 extern crate alloc;
 
+use crate::exec;
 use crate::expand::Env;
+use crate::lexer::Lexer;
+use crate::parser::Parser;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -39,6 +42,8 @@ pub fn is_builtin(name: &str) -> bool {
             | "type"
             | "kill"
             | "wait"
+            | "source"
+            | "."
     )
 }
 
@@ -68,6 +73,7 @@ pub fn run_builtin(args: &[String], env: &mut Env, write_fn: &dyn Fn(&[u8])) -> 
         "type" => builtin_type(args, env, write_fn),
         "kill" => builtin_kill(args, write_fn),
         "wait" => builtin_wait(args, write_fn),
+        "source" | "." => builtin_source(args, env, write_fn),
         _ => BuiltinResult::NotBuiltin,
     }
 }
@@ -548,6 +554,130 @@ fn builtin_kill(args: &[String], write_fn: &dyn Fn(&[u8])) -> BuiltinResult {
 // ─────────────────────────────────────────────────
 // wait builtin — wait for background jobs
 // ─────────────────────────────────────────────────
+
+/// Lex, parse and execute `source` in `env`. If `script_name` is `Some`, it
+/// replaces `env.arg0` for the duration of the script, and `positional`
+/// replaces `env.positional`. Both are restored on exit (even on error).
+/// Returns the script's final exit status (or 2 for lex/parse error).
+///
+/// This is the entry point used by the `source`/`.` builtin and by host
+/// tests that want to drive shell execution without going through file I/O.
+pub fn run_source_in_env(
+    source: &str,
+    env: &mut Env,
+    script_name: Option<String>,
+    positional: Option<Vec<String>>,
+    write_fn: &dyn Fn(&[u8]),
+) -> i32 {
+    let saved_arg0 = if script_name.is_some() {
+        Some(core::mem::take(&mut env.arg0))
+    } else {
+        None
+    };
+    if let Some(name) = script_name {
+        env.arg0 = name;
+    }
+    let saved_positional = if positional.is_some() {
+        Some(core::mem::take(&mut env.positional))
+    } else {
+        None
+    };
+    if let Some(p) = positional {
+        env.positional = p;
+    }
+
+    let mut lexer = Lexer::new(source);
+    let status = match lexer.tokenize() {
+        Err(e) => {
+            write_fn(b"racsh: source: syntax error: ");
+            write_fn(e.message.as_bytes());
+            write_fn(b"\n");
+            2
+        }
+        Ok(tokens) => {
+            let mut parser = Parser::new(tokens);
+            match parser.parse() {
+                Err(e) => {
+                    write_fn(b"racsh: source: parse error: ");
+                    write_fn(e.message.as_bytes());
+                    write_fn(b"\n");
+                    2
+                }
+                Ok(ast) => exec::execute(&ast, env),
+            }
+        }
+    };
+
+    env.last_status = status;
+    if let Some(name) = saved_arg0 {
+        env.arg0 = name;
+    }
+    if let Some(p) = saved_positional {
+        env.positional = p;
+    }
+    status
+}
+
+/// Read a file via libc_lite. Returns its contents on success.
+fn read_file_bytes(path: &[u8]) -> Option<Vec<u8>> {
+    let mut nul_path = Vec::with_capacity(path.len() + 1);
+    nul_path.extend_from_slice(path);
+    nul_path.push(0);
+
+    let fd = libc_lite::open(&nul_path, 0, 0).ok()?; // O_RDONLY
+    let mut data = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        match libc_lite::read(fd, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => data.extend_from_slice(&buf[..n]),
+            Err(_) => {
+                let _ = libc_lite::close(fd);
+                return None;
+            }
+        }
+    }
+    let _ = libc_lite::close(fd);
+    Some(data)
+}
+
+fn builtin_source(args: &[String], env: &mut Env, write_fn: &dyn Fn(&[u8])) -> BuiltinResult {
+    if args.len() < 2 {
+        write_fn(b"source: filename argument required\n");
+        return BuiltinResult::Ok(2);
+    }
+    let path = args[1].as_bytes();
+    let data = match read_file_bytes(path) {
+        Some(d) => d,
+        None => {
+            write_fn(b"source: cannot read: ");
+            write_fn(path);
+            write_fn(b"\n");
+            return BuiltinResult::Ok(1);
+        }
+    };
+    let src = match core::str::from_utf8(&data) {
+        Ok(s) => s,
+        Err(_) => {
+            write_fn(b"source: script is not valid UTF-8: ");
+            write_fn(path);
+            write_fn(b"\n");
+            return BuiltinResult::Ok(1);
+        }
+    };
+
+    // POSIX: `source file [args...]` makes args[2..] visible as $1.. inside
+    // the sourced script. If no args are passed, the parent's positional
+    // parameters remain visible.
+    let positional = if args.len() > 2 {
+        Some(args[2..].to_vec())
+    } else {
+        None
+    };
+
+    let status = run_source_in_env(src, env, Some(args[1].clone()), positional, write_fn);
+    BuiltinResult::Ok(status)
+}
 
 fn builtin_wait(args: &[String], write_fn: &dyn Fn(&[u8])) -> BuiltinResult {
     if args.len() < 2 {
