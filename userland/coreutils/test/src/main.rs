@@ -109,6 +109,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_signal_user_handler_reentrant_syscall();
     test_shell_control_flow();
     test_init_engine_supervises_shell();
+    test_ps_lists_running_processes();
     test_exec_loop_memory_cleanup();
     test_tty_ioctl_state();
     test_chdir_getcwd();
@@ -506,6 +507,38 @@ fn test_init_engine_supervises_shell() {
     // is the shell that init started from shell.service.
     if my_pid > 1 && parent_pid > 1 && parent_pid != my_pid {
         println("T13-INIT-ENGINE-OK");
+    }
+}
+
+/// Smoke for /bin/ps: spawn it, expect exit 0. ps walks /proc, opens
+/// each numeric pid dir's status file, prints PID/PPID/STATE/NAME. Since
+/// at least init (PID 1) and our shell ancestor are running, the table
+/// will be non-empty. We can't easily capture stdout from a forked child
+/// here, but exit 0 is sufficient evidence that /proc + status parsing
+/// + getdents + write all worked together.
+fn test_ps_lists_running_processes() {
+    println("\n[test] /bin/ps lists running processes");
+
+    let path = b"/bin/ps\0";
+    let arg0 = b"ps\0";
+    let argv: [*const u8; 2] = [arg0.as_ptr(), core::ptr::null()];
+
+    let pid = match spawn_args(path, &argv) {
+        Ok(p) => p,
+        Err(_) => {
+            check!("spawn /bin/ps returns Ok", false);
+            return;
+        }
+    };
+    check!("spawn /bin/ps returns Ok", true);
+
+    let mut status: i32 = -99;
+    let waited = waitpid(pid, &mut status, 0);
+    check!("waitpid returns the ps child", waited.unwrap_or(-1) == pid);
+    check!("ps exits with status 0", status == 0);
+
+    if waited.unwrap_or(-1) == pid && status == 0 {
+        println("T33-PS-OK");
     }
 }
 

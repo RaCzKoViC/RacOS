@@ -116,11 +116,13 @@ Ten dokument jest źródłem prawdy o kierunku rozwoju RacOS. Każda większa pr
   - Spec referencyjny: `docs/specs/PACKAGE_FORMAT.md`
   - **Definition of done:** zbudować `.rpk` z testowego userland tool'a, zainstalować, uruchomić, usunąć
 
-- [ ] **T3.3 — Userland: dokończyć stuby**
-  - `env` — pełne `getenv`/`setenv`/`unsetenv` + iteracja po environ
-  - `ps` — real reader procfs (must-have do debugowania od momentu gdy init odpala >1 procesu)
-  - `sed` — minimal: `s/X/Y/g`, `d`, `p`, `-n`
-  - `awk` — minimal: pola `$1..$N`, `BEGIN/END`, basic actions
+- [~] **T3.3 — Userland: dokończyć stuby** (ps shipped; env/sed/awk pending)
+  - [x] **`ps`** — real procfs reader. Walks `/proc` via getdents, reads `/proc/<pid>/status` for each numeric pid dir, prints `PID PPID STATE NAME` columns.
+    - Fixed the dead-code state it was in: wrong libc-lite dep path (`../../../../` → `../../../`), missing `alloc` feature, missing from workspace `members`/`default-members`, missing from BIN_LIST in both build scripts (so the binary was never staged into initramfs). Procfs already serves `/proc/<pid>/status` in key:value form so no kernel changes were needed.
+    - `racos-test::test_ps_lists_running_processes` smoke spawns `/bin/ps` and asserts exit 0; emits `T33-PS-OK` marker.
+  - [ ] `env` — pełne `getenv`/`setenv`/`unsetenv` + iteracja po environ (still 22-line stub printing only PWD+PATH; needs proper envp inheritance in fork/exec first)
+  - [ ] `sed` — minimal: `s/X/Y/g`, `d`, `p`, `-n` (currently 92-line skeleton)
+  - [ ] `awk` — minimal: pola `$1..$N`, `BEGIN/END`, basic actions (not present)
 
 ---
 
