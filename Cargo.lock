@@ -113,6 +113,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-chmod"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-chown"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-cp"
 version = "0.1.0"
 dependencies = [
@@ -347,6 +361,13 @@ dependencies = [
 
 [[package]]
 name = "racos-top"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-touch"
 version = "0.1.0"
 dependencies = [
  "libc-lite",

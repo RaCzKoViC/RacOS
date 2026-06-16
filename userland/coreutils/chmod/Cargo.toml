@@ -1,0 +1,11 @@
+[package]
+name = "racos-chmod"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "chmod"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }

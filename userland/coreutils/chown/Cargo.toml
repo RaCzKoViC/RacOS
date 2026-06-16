@@ -1,0 +1,11 @@
+[package]
+name = "racos-chown"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "chown"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite" }
