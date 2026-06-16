@@ -227,6 +227,8 @@ impl Fat32Fs {
             .read_sector(0, &mut sector)
             .map_err(|_| VfsError::IoError)?;
 
+        // SAFETY: sector is SECTOR_SIZE bytes which exceeds sizeof(BpbFat32);
+        // read_unaligned handles the packed struct layout.
         let bpb: BpbFat32 =
             unsafe { core::ptr::read_unaligned(sector.as_ptr() as *const BpbFat32) };
 
@@ -327,6 +329,8 @@ impl Fat32Fs {
         self.device
             .read_sector(fat_sector, &mut sector_data)
             .map_err(|_| VfsError::IoError)?;
+        // SAFETY: offset = (cluster*4) % SECTOR_SIZE so [offset, offset+4) is
+        // within sector_data; read_unaligned handles the unaligned u32 read.
         let entry =
             unsafe { core::ptr::read_unaligned(sector_data.as_ptr().add(offset) as *const u32) };
         Ok(entry & FAT_ENTRY_MASK)
@@ -346,8 +350,10 @@ impl Fat32Fs {
             self.device
                 .read_sector(lba, &mut buf)
                 .map_err(|_| VfsError::IoError)?;
+            // SAFETY: offset fits within a SECTOR_SIZE buffer (same calc as above).
             let old = unsafe { core::ptr::read_unaligned(buf.as_ptr().add(offset) as *const u32) };
             let new = (old & 0xF000_0000) | value;
+            // SAFETY: same bounded offset.
             unsafe {
                 core::ptr::write_unaligned(buf.as_mut_ptr().add(offset) as *mut u32, new);
             }
@@ -569,6 +575,9 @@ impl Fat32Fs {
                     .map_err(|_| VfsError::IoError)?;
                 for slot in 0..(SECTOR_SIZE / DIR_ENTRY_SIZE) {
                     let off = slot * DIR_ENTRY_SIZE;
+                    // SAFETY: off = slot * DIR_ENTRY_SIZE < SECTOR_SIZE and
+                    // DIR_ENTRY_SIZE >= sizeof(FatDirEntry); read_unaligned
+                    // handles the packed dir-entry layout.
                     let entry: FatDirEntry = unsafe {
                         core::ptr::read_unaligned(sector.as_ptr().add(off) as *const FatDirEntry)
                     };
@@ -631,6 +640,7 @@ impl Fat32Fs {
             .read_sector(lba, &mut sector)
             .map_err(|_| VfsError::IoError)?;
         let off = slot * DIR_ENTRY_SIZE;
+        // SAFETY: off < SECTOR_SIZE; DIR_ENTRY_SIZE >= sizeof(FatDirEntry).
         unsafe {
             core::ptr::write_unaligned(sector.as_mut_ptr().add(off) as *mut FatDirEntry, *entry);
         }
@@ -1139,6 +1149,7 @@ pub fn format_fat32(device: Arc<dyn BlockDevice>, label: &str) -> VfsResult<Arc<
 
     // Sector 0: boot sector with BPB + signature.
     let mut boot = [0u8; SECTOR_SIZE];
+    // SAFETY: BpbFat32 (~90 bytes) fits in SECTOR_SIZE (512 bytes).
     unsafe {
         core::ptr::write_unaligned(boot.as_mut_ptr() as *mut BpbFat32, bpb);
     }

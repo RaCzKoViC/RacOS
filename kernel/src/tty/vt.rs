@@ -162,6 +162,7 @@ impl VirtualTerminal {
 
         // If this VT is active, we also write to the actual framebuffer
         if self.active {
+            // SAFETY: fb_console singleton initialised once at boot.
             if let Some(console) = unsafe { get_console() } {
                 console.put_char(c);
             }
@@ -192,6 +193,7 @@ impl VirtualTerminal {
         self.cursor_y = 0;
 
         if self.active {
+            // SAFETY: fb_console singleton initialised once at boot.
             if let Some(console) = unsafe { get_console() } {
                 console.clear();
             }
@@ -207,6 +209,7 @@ impl VirtualTerminal {
 
     /// Redraw this VT from its buffer.
     pub fn redraw(&self) {
+        // SAFETY: fb_console singleton initialised once at boot.
         if let Some(console) = unsafe { get_console() } {
             console.clear();
 
@@ -240,6 +243,7 @@ impl VtManager {
     pub fn new() -> Self {
         let mut vts = Vec::new();
         // Get actual dimensions from the framebuffer console, fall back to 80x25.
+        // SAFETY: fb_console singleton initialised once at boot.
         let (cols, rows) = unsafe {
             if let Some(console) = get_console() {
                 (console.cols(), console.rows())
@@ -279,6 +283,7 @@ impl VtManager {
 static mut VT_MANAGER: Option<VtManager> = None;
 
 pub fn init() {
+    // SAFETY: VT_MANAGER is set once at boot.
     unsafe {
         VT_MANAGER = Some(VtManager::new());
     }
@@ -297,6 +302,7 @@ pub unsafe fn get_manager() -> &'static mut VtManager {
 /// multiple sys_write calls — producing garbage like `[K[14C` after every
 /// backspace in racsh.
 pub fn vt_print(s: &str) {
+    // SAFETY: VT_MANAGER + fb_console are boot-once singletons; single-CPU MVP.
     unsafe {
         if let Some(mgr) = VT_MANAGER.as_mut() {
             // Update the off-screen VT buffer with stripped text (skip CSI).
@@ -310,6 +316,7 @@ pub fn vt_print(s: &str) {
 }
 
 pub fn vt_clear_current() {
+    // SAFETY: VT_MANAGER is a boot-once singleton; single-CPU MVP.
     unsafe {
         if let Some(mgr) = VT_MANAGER.as_mut() {
             mgr.current().clear();

@@ -70,6 +70,8 @@ macro_rules! exception_handler {
             // some toolchains. Fall back to reading the canonical CPU-pushed
             // frame from TSS.RSP0 - 40 so the printout is always correct.
             let rsp0 = crate::arch::gdt::current_kernel_stack();
+            // SAFETY: TSS.RSP0-40 is the canonical IRET frame the CPU
+            // pushed on entry to this exception handler.
             let frame_words: [u64; 5] = unsafe {
                 core::ptr::read_unaligned(rsp0.wrapping_sub(40) as *const [u64; 5])
             };
@@ -81,6 +83,7 @@ macro_rules! exception_handler {
                 crate::task::scheduler::current_pid(),
             );
             loop {
+                // SAFETY: cli; hlt to park the CPU after an unrecoverable exception.
                 unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
             }
         }
@@ -97,6 +100,7 @@ macro_rules! exception_handler_with_error {
                 error_code
             );
             loop {
+                // SAFETY: cli; hlt — unrecoverable exception, park CPU.
                 unsafe {
                     core::arch::asm!("cli; hlt", options(nomem, nostack));
                 }
@@ -139,6 +143,7 @@ extern "x86-interrupt" fn page_fault(stack_frame: &InterruptStackFrame, error_co
     let current_is_user_task =
         current_pid >= 100 && crate::task::scheduler::current_page_table_phys() != 0;
     let fault_addr: u64;
+    // SAFETY: reading CR2 — always valid in ring 0; holds the faulting linear address.
     unsafe {
         core::arch::asm!("mov {}, cr2", out(reg) fault_addr, options(nomem, nostack));
     }
@@ -155,6 +160,7 @@ extern "x86-interrupt" fn page_fault(stack_frame: &InterruptStackFrame, error_co
         );
         // Signal handling is not complete yet; terminate immediately to avoid
         // fault loops on the same instruction.
+        // SAFETY: exit_current — caller is the page-fault handler with IF=0.
         unsafe {
             crate::task::scheduler::exit_current(128 + 11);
         }
@@ -169,6 +175,7 @@ extern "x86-interrupt" fn page_fault(stack_frame: &InterruptStackFrame, error_co
         error_code,
     );
     loop {
+        // SAFETY: cli; hlt — unrecoverable kernel page fault, park CPU.
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack));
         }
@@ -236,6 +243,8 @@ extern "x86-interrupt" fn lapic_timer_handler(_stack_frame: &InterruptStackFrame
     // Bump this CPU's own counter via GS base. No `lock` prefix: only the
     // owning CPU writes its tick_count, so an atomic RMW is overkill and
     // we want a single non-locked memory op in the IRQ fast path.
+    // SAFETY: GS base was set by arch::percpu::init_for_this_cpu to point
+    // at this CPU's PerCpu slot; OFFSET_TICK_COUNT is within that slot.
     unsafe {
         core::arch::asm!(
             "inc qword ptr gs:[{off}]",
