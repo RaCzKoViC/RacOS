@@ -10,14 +10,47 @@ use crate::{parse_unit, RestartPolicy, ServiceType, Unit, UnitState, UnitType};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Maximum number of units the engine can manage.
-const _MAX_UNITS: usize = 32;
+/// Result of `Engine::resolve_start_order`.
+pub struct ResolveResult {
+    /// Indices into `self.units` in dependency-respecting start order.
+    pub order: Vec<usize>,
+    /// Indices that could not be scheduled because they're part of a
+    /// dependency cycle. Empty on a clean DAG.
+    pub cycle: Vec<usize>,
+}
+
+/// Restart-burst tracking for a single unit. Keeps the wall-clock-ish
+/// time (in seconds since boot, fed by the engine) of each restart so we
+/// can refuse to keep restarting a service that fails immediately after
+/// every restart — that would otherwise saturate PID 1.
+const BURST_WINDOW_SEC: u64 = 30;
+const BURST_LIMIT: usize = 5;
+
+#[derive(Default, Debug, Clone)]
+pub struct RestartTracker {
+    timestamps: Vec<u64>,
+}
+
+impl RestartTracker {
+    /// Record a restart at `now_secs`. Returns `true` if the unit has
+    /// burned through its budget within the burst window and should be
+    /// quarantined (state → Failed, no more restarts).
+    pub fn record_and_check(&mut self, now_secs: u64) -> bool {
+        // Drop timestamps older than the burst window before counting.
+        self.timestamps
+            .retain(|&t| now_secs.saturating_sub(t) <= BURST_WINDOW_SEC);
+        self.timestamps.push(now_secs);
+        self.timestamps.len() > BURST_LIMIT
+    }
+}
 
 /// The init engine — holds all loaded units and manages their lifecycle.
 pub struct Engine {
     units: Vec<Unit>,
     /// PIDs of running services: (unit_index, pid).
     pids: Vec<(usize, i32)>,
+    /// Per-unit restart-burst tracker (parallel-indexed with `units`).
+    restart_trackers: Vec<RestartTracker>,
 }
 
 impl Engine {
@@ -25,6 +58,7 @@ impl Engine {
         Engine {
             units: Vec::new(),
             pids: Vec::new(),
+            restart_trackers: Vec::new(),
         }
     }
 
@@ -48,6 +82,7 @@ impl Engine {
                 match parse_unit(name, &content) {
                     Ok(unit) => {
                         self.units.push(unit);
+                        self.restart_trackers.push(RestartTracker::default());
                     }
                     Err(e) => {
                         log("racinit: parse error for ");
@@ -64,6 +99,12 @@ impl Engine {
     /// Add a unit directly (for built-in/fallback units).
     pub fn add_unit(&mut self, unit: Unit) {
         self.units.push(unit);
+        self.restart_trackers.push(RestartTracker::default());
+    }
+
+    /// Read-only access to the loaded units (used by host tests).
+    pub fn units(&self) -> &[Unit] {
+        &self.units
     }
 
     /// Get the number of loaded units.
@@ -71,102 +112,83 @@ impl Engine {
         self.units.len()
     }
 
-    /// Resolve dependencies and return a start order (topological sort).
-    /// Returns indices into self.units in the order they should be started.
-    pub fn resolve_start_order(&self) -> Vec<usize> {
+    /// Resolve dependencies and return a start order (topological sort
+    /// via Kahn's algorithm). On a clean DAG the returned `Vec` is a full
+    /// permutation of `0..units.len()` and `cycle` is empty. If a cycle is
+    /// detected, the units that could not be scheduled are returned in
+    /// `cycle` (in arbitrary order); the caller decides whether to refuse
+    /// startup or fall back to best-effort.
+    pub fn resolve_start_order(&self) -> ResolveResult {
         let n = self.units.len();
         if n == 0 {
-            return Vec::new();
+            return ResolveResult {
+                order: Vec::new(),
+                cycle: Vec::new(),
+            };
         }
 
-        // Build adjacency: after[i] = set of indices that unit i must start after
-        let mut after_deps: Vec<Vec<usize>> = Vec::with_capacity(n);
-        for _ in 0..n {
-            after_deps.push(Vec::new());
-        }
-
+        // depends_on[i] = indices that unit i must start AFTER.
+        // `After=` is a direct dep; `Requires=` implies After unless already
+        // listed (matches systemd's ordering-only-via-After semantics).
+        let mut depends_on: Vec<Vec<usize>> = (0..n).map(|_| Vec::new()).collect();
         for (i, unit) in self.units.iter().enumerate() {
-            for dep_name in &unit.after {
+            for dep_name in unit.after.iter().chain(unit.requires.iter()) {
                 if let Some(j) = self.find_unit(dep_name) {
-                    after_deps[i].push(j);
-                }
-            }
-            // Requires implies After (if not explicitly listed)
-            for dep_name in &unit.requires {
-                if let Some(j) = self.find_unit(dep_name) {
-                    if !after_deps[i].contains(&j) {
-                        after_deps[i].push(j);
+                    if i != j && !depends_on[i].contains(&j) {
+                        depends_on[i].push(j);
                     }
                 }
             }
         }
 
-        // Topological sort (Kahn's algorithm)
-        let mut in_degree = Vec::with_capacity(n);
-        for _ in 0..n {
-            in_degree.push(0usize);
-        }
-
-        for _deps in &after_deps {
-            // This unit depends on deps → deps must come first
-            // In-degree counts how many things must come before
-        }
-
-        // Build reverse edges: for each (i depends on j), unit j has an "enables" edge to i
-        let mut enables: Vec<Vec<usize>> = Vec::with_capacity(n);
-        for _ in 0..n {
-            enables.push(Vec::new());
-        }
-
-        for (i, deps) in after_deps.iter().enumerate() {
-            in_degree.push(0); // extra safety
+        // Reverse edges so we can decrement in_degree as deps complete.
+        let mut enables: Vec<Vec<usize>> = (0..n).map(|_| Vec::new()).collect();
+        for (i, deps) in depends_on.iter().enumerate() {
             for &j in deps {
                 enables[j].push(i);
             }
         }
 
-        // Recalculate in_degree
-        for i in 0..n {
-            in_degree[i] = after_deps[i].len();
-        }
-
-        let mut queue: Vec<usize> = Vec::new();
-        for i in 0..n {
-            if in_degree[i] == 0 {
-                queue.push(i);
-            }
-        }
-
+        let mut in_degree: Vec<usize> = depends_on.iter().map(|d| d.len()).collect();
+        let mut ready: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
         let mut order: Vec<usize> = Vec::with_capacity(n);
-        while let Some(idx) = queue.pop() {
+        while let Some(idx) = ready.pop() {
             order.push(idx);
             for &next in &enables[idx] {
                 in_degree[next] -= 1;
                 if in_degree[next] == 0 {
-                    queue.push(next);
+                    ready.push(next);
                 }
             }
         }
 
-        // If order.len() < n, there's a cycle — append remaining units anyway
+        let mut cycle: Vec<usize> = Vec::new();
         if order.len() < n {
             for i in 0..n {
-                if !order.contains(&i) {
-                    order.push(i);
+                if in_degree[i] > 0 {
+                    cycle.push(i);
                 }
             }
         }
-
-        order
+        ResolveResult { order, cycle }
     }
 
-    /// Start all units in dependency order.
-    pub fn start_all(&mut self) {
-        let order = self.resolve_start_order();
-
-        for &idx in &order {
+    /// Start all units in dependency order. Units that participate in a
+    /// dependency cycle are skipped and marked Failed; the rest still
+    /// start in order. Returns the number of cycle-skipped units (0 on a
+    /// clean DAG).
+    pub fn start_all(&mut self) -> usize {
+        let resolve = self.resolve_start_order();
+        for &idx in &resolve.order {
             self.start_unit(idx);
         }
+        for &idx in &resolve.cycle {
+            log("racinit: refusing to start ");
+            log(&self.units[idx].name);
+            log(" — depends on a cycle\n");
+            self.units[idx].state = UnitState::Failed;
+        }
+        resolve.cycle.len()
     }
 
     /// Start a single unit by index.
@@ -242,47 +264,69 @@ impl Engine {
         loop {
             let mut status: i32 = 0;
             match libc_lite::wait(&mut status) {
-                Ok(pid) => {
-                    // Find which unit this PID belongs to
-                    if let Some(pos) = self.pids.iter().position(|&(_, p)| p == pid) {
-                        let (unit_idx, _) = self.pids[pos];
-                        self.pids.remove(pos);
-
-                        let unit = &mut self.units[unit_idx];
-                        let should_restart = match unit.restart {
-                            RestartPolicy::Always => true,
-                            RestartPolicy::OnFailure => status != 0,
-                            RestartPolicy::OnAbnormal => status != 0,
-                            RestartPolicy::No => false,
-                        };
-
-                        if should_restart {
-                            log("racinit: restarting ");
-                            log(&unit.name);
-                            log("\n");
-                            unit.state = UnitState::Stopped;
-                            self.start_unit(unit_idx);
-                        } else {
-                            if status == 0 {
-                                unit.state = UnitState::Stopped;
-                            } else {
-                                unit.state = UnitState::Failed;
-                            }
-                            log("racinit: ");
-                            log(&unit.name);
-                            log(" exited with status ");
-                            log_i32(status);
-                            log("\n");
-                        }
-                    }
-                }
+                Ok(pid) => self.on_child_exit(pid, status),
                 Err(_) => {
-                    // No children or error — yield CPU
-                    // In a real system we'd use a blocking wait syscall
-                    // For now, just loop slowly
+                    // No children to wait for (ECHILD) or other error.
+                    // Sleep briefly to avoid busy-spinning; orphan zombies
+                    // reparented to PID 1 will surface via the next wait.
+                    let _ = libc_lite::nanosleep(1, 0);
                 }
             }
         }
+    }
+
+    /// Internal: handle one child's exit. Looks up the owning unit (if any),
+    /// applies the restart policy, and either respawns the service or
+    /// quarantines it if it has exceeded its restart burst budget.
+    pub(crate) fn on_child_exit(&mut self, pid: i32, status: i32) {
+        let pos = match self.pids.iter().position(|&(_, p)| p == pid) {
+            Some(p) => p,
+            None => return, // Unowned orphan; just reaped.
+        };
+        let (unit_idx, _) = self.pids.remove(pos);
+
+        let should_restart = {
+            let unit = &self.units[unit_idx];
+            match unit.restart {
+                RestartPolicy::Always => true,
+                RestartPolicy::OnFailure | RestartPolicy::OnAbnormal => status != 0,
+                RestartPolicy::No => false,
+            }
+        };
+
+        if !should_restart {
+            let unit = &mut self.units[unit_idx];
+            unit.state = if status == 0 {
+                UnitState::Stopped
+            } else {
+                UnitState::Failed
+            };
+            log("racinit: ");
+            log(&unit.name);
+            log(" exited with status ");
+            log_i32(status);
+            log("\n");
+            return;
+        }
+
+        // Burst gate: if this unit has restarted too many times in the
+        // window, give up rather than crashloop forever.
+        let now = now_secs();
+        let burst = self.restart_trackers[unit_idx].record_and_check(now);
+        if burst {
+            let unit = &mut self.units[unit_idx];
+            unit.state = UnitState::Failed;
+            log("racinit: ");
+            log(&unit.name);
+            log(" hit restart burst limit — quarantined\n");
+            return;
+        }
+
+        log("racinit: restarting ");
+        log(&self.units[unit_idx].name);
+        log("\n");
+        self.units[unit_idx].state = UnitState::Stopped;
+        self.start_unit(unit_idx);
     }
 
     fn find_unit(&self, name: &str) -> Option<usize> {
@@ -312,6 +356,21 @@ fn read_file_to_string(path: &[u8]) -> Option<String> {
     } else {
         Some(content)
     }
+}
+
+/// Coarse "seconds since some fixed epoch" used only for restart-burst
+/// gating. Defaults to clock_gettime; on host or if the syscall fails we
+/// fall back to a monotonic counter so tests can still drive the burst
+/// logic without QEMU.
+fn now_secs() -> u64 {
+    let mut ts = libc_lite::Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if libc_lite::clock_gettime(libc_lite::CLOCK_MONOTONIC, &mut ts).is_ok() {
+        return ts.tv_sec as u64;
+    }
+    0
 }
 
 fn log(s: &str) {

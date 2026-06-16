@@ -3,12 +3,15 @@ name = "init"
 version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "init"
-path = "src/main.rs"
-
-[lib]
-test = false
+# Library-only crate. The PID 1 binary lives in userland/coreutils/init
+# (package "racos-init") which depends on this lib for Engine + parser.
+# Removing the [[bin]] here also resolves the target/debug/init filename
+# collision with the userland init binary.
 
 [dependencies]
 libc-lite = { path = "../libs/libc-lite", features = ["alloc"] }
+
+[dev-dependencies]
+# Host-test feature gates out libc-lite's panic_handler/_start so the
+# library compiles cleanly under cargo test on the host toolchain.
+libc-lite = { path = "../libs/libc-lite", features = ["alloc", "host-test"] }
