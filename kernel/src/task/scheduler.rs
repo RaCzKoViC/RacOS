@@ -229,12 +229,16 @@ impl Scheduler {
             })
             .unwrap_or(0);
         if incoming_kernel_stack_top != 0 {
+            // SAFETY: incoming task's kstack top was validated by the
+            // process::from_elf invariant; SYSCALL entry must see this RSP.
             unsafe {
                 crate::syscall::entry::set_kernel_rsp(incoming_kernel_stack_top);
                 crate::arch::gdt::set_kernel_stack(incoming_kernel_stack_top);
             }
         }
 
+        // SAFETY: context_switch saves/restores GP regs + RSP between two
+        // TaskContexts we own. Both ctx pointers were derived from &mut Task.
         unsafe {
             context::context_switch(old_ctx, new_ctx);
         }
@@ -261,6 +265,8 @@ impl Scheduler {
                 - (super::task::KERNEL_STACK_GUARD_PAGES * crate::mm::phys::FRAME_SIZE) as u64;
             // Check the first 8 bytes of the guard page. If any of those is
             // not the sentinel, overflow happened.
+            // SAFETY: guard_addr is the page immediately below this task's
+            // kernel stack — identity-mapped, allocated alongside the stack.
             let first_qword = unsafe { core::ptr::read_volatile(guard_addr as *const u64) };
             let expected_byte = super::task::KERNEL_STACK_GUARD_BYTE as u64;
             let expected_qword = expected_byte
@@ -317,6 +323,8 @@ impl Scheduler {
             }
 
             // Notify the parent about child state change.
+            // SAFETY: send_signal_to walks the task-table — we're already
+            // holding scheduler state mutably here.
             unsafe {
                 let _ = send_signal_to(parent_pid, super::signal::Signal::SIGCHLD);
             }
@@ -372,6 +380,9 @@ impl Scheduler {
 
                     // Free the user page table (and all mapped user frames)
                     if page_table_phys != 0 {
+                        // SAFETY: page_table_phys came from this zombie's
+                        // task struct; we just nulled the slot so no other
+                        // path references it.
                         unsafe {
                             crate::mm::virt::free_page_table(page_table_phys, true);
                         }
@@ -669,6 +680,8 @@ pub fn timer_tick() {
 
 /// Yield the current task.
 pub fn yield_now() {
+    // SAFETY: cli/sti window so the SCHEDULER static access is serialised
+    // against the timer-tick path.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         if let Some(ref mut sched) = *core::ptr::addr_of_mut!(SCHEDULER) {
@@ -696,6 +709,7 @@ pub unsafe fn exit_current(status: i32) {
 
 /// Get the current PID.
 pub fn current_pid() -> Pid {
+    // SAFETY: read-only access to the SCHEDULER singleton.
     unsafe {
         (*core::ptr::addr_of!(SCHEDULER))
             .as_ref()
@@ -706,6 +720,7 @@ pub fn current_pid() -> Pid {
 
 /// Get the physical address of the current task's page table (0 = kernel task).
 pub fn current_page_table_phys() -> u64 {
+    // SAFETY: read-only access to the SCHEDULER singleton.
     unsafe {
         (*core::ptr::addr_of!(SCHEDULER))
             .as_ref()
@@ -716,6 +731,7 @@ pub fn current_page_table_phys() -> u64 {
 
 /// Get the kernel stack top of the current task.
 pub fn current_kernel_stack_top() -> u64 {
+    // SAFETY: read-only access to the SCHEDULER singleton.
     unsafe {
         (*core::ptr::addr_of!(SCHEDULER))
             .as_ref()
@@ -829,6 +845,7 @@ pub unsafe fn send_signal_to(pid: Pid, sig: super::signal::Signal) -> bool {
 /// Must be called with interrupts disabled.
 pub fn current_deliver_signal(sig_num: u8) {
     if let Some(sig) = super::signal::Signal::from_u8(sig_num) {
+        // SAFETY: caller (exception handler) runs with IF=0; SCHEDULER mut access.
         unsafe {
             if let Some(ref mut sched) = *core::ptr::addr_of_mut!(SCHEDULER) {
                 let idx = sched.current;
@@ -903,6 +920,7 @@ pub unsafe fn create_session() -> Pid {
 
 /// Get the current task's process group ID.
 pub fn current_pgid() -> Pid {
+    // SAFETY: read-only access to the SCHEDULER singleton.
     unsafe {
         (*core::ptr::addr_of!(SCHEDULER))
             .as_ref()
@@ -913,6 +931,7 @@ pub fn current_pgid() -> Pid {
 
 /// Get the current task's session ID.
 pub fn current_session_id() -> Pid {
+    // SAFETY: read-only access to the SCHEDULER singleton.
     unsafe {
         (*core::ptr::addr_of!(SCHEDULER))
             .as_ref()
@@ -993,6 +1012,7 @@ pub unsafe fn spawn_forked(task: super::task::Task) -> Result<Pid, &'static str>
 
 /// Get the parent PID of the current task.
 pub fn current_parent_pid() -> Pid {
+    // SAFETY: read-only access to the SCHEDULER singleton.
     unsafe {
         (*core::ptr::addr_of!(SCHEDULER))
             .as_ref()
@@ -1098,6 +1118,7 @@ pub unsafe fn set_cwd(path: &[u8]) -> bool {
 /// we send the signal to the currently running user process. If it's a
 /// kernel task (PID < 100), we skip.
 pub fn signal_foreground(sig: super::signal::Signal) {
+    // SAFETY: called from IRQ context (serial Ctrl-C); IF=0 implicit.
     unsafe {
         if let Some(ref mut sched) = *core::ptr::addr_of_mut!(SCHEDULER) {
             // Find the running user process (or any ready user process)
