@@ -241,7 +241,10 @@ pub extern "C" fn syscall_dispatch(
     };
 
     // Deliver any pending signals before returning to user space.
-    handlers::deliver_pending_signals();
-
-    result_to_raw(result)
+    // We thread the raw return value through so user-handler delivery can
+    // stash it in the on-stack SignalFrame; sys_sigreturn restores it as
+    // RAX so the original syscall's caller sees the return value it would
+    // have observed had no signal been pending.
+    let raw = result_to_raw(result);
+    handlers::deliver_pending_signals(raw)
 }
