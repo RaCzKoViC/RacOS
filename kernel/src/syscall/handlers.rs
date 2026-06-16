@@ -1869,6 +1869,10 @@ pub fn sys_unlink(path: *const u8) -> SyscallResult {
 /// Returns child PID to parent, 0 to child.
 /// The child gets a full copy of the parent's address space and FD table.
 pub fn sys_fork() -> SyscallResult {
+    // SAFETY: whole fork is one cli/sti critical section: clone CR3,
+    // alloc child kstack+guard, copy 80-byte SYSRET frame, snapshot
+    // parent Task fields, spawn_forked. Error paths re-enable IRQs
+    // and free anything partially built.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
 
@@ -2033,6 +2037,10 @@ pub const CLONE_THREAD: u32 = 0x00010000; // Thread group
 /// Similar to fork, but with flags for sharing resources.
 /// For threads: CLONE_VM | CLONE_THREAD
 pub fn sys_clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8) -> SyscallResult {
+    // SAFETY: same shape as sys_fork — one cli/sti critical section. With
+    // CLONE_VM the child shares parent's CR3 (thread); otherwise CR3 is
+    // cloned (process). Error paths re-enable IRQs and free what was
+    // allocated so far.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
 
@@ -2252,6 +2260,9 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SyscallRes
         validate_user_ptr(act as u64, sa_size)?;
     }
 
+    // SAFETY: cli/sti window so we read+write the signal-handler slot
+    // atomically against signal delivery. oldact/act pointers were
+    // validated above; `&*(act as *const KSigAction)` is repr(C) POD.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
 
@@ -2296,10 +2307,15 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SyscallRes
 /// `orig_rax` so the interrupted syscall's caller sees the value it would
 /// have observed had no signal been pending.
 pub fn sys_sigreturn() -> SyscallResult {
+    // SAFETY: read_syscall_frame_ptr reads PER_CPU gs:[0x10], which the
+    // syscall entry stub set before dispatching us. Non-zero means valid.
     let frame_ptr = unsafe { read_syscall_frame_ptr() };
     if frame_ptr == 0 {
         return Err(SyscallError::EFAULT);
     }
+    // SAFETY: frame_ptr came from PER_CPU gs:[0x10] and is the kernel-side
+    // SyscallFrame the entry stub pushed; the lifetime is the rest of this
+    // call, which still runs inside the syscall context.
     let frame = unsafe { &mut *(frame_ptr as *mut SyscallFrame) };
 
     let usf_addr = frame.user_rsp;
@@ -2376,6 +2392,9 @@ pub fn sys_poll(fds_ptr: *mut u8, nfds: u32, timeout_ms: i32) -> SyscallResult {
 
 fn poll_once(fds_ptr: *mut u8, nfds: u32) -> i64 {
     let mut ready = 0i64;
+    // SAFETY: caller (sys_poll) validated [fds_ptr, fds_ptr+nfds*sizeof(PollFd))
+    // is user-mapped + nfds <= 256. cli/sti window so the fd-table snapshot
+    // for each pfd is consistent across the loop.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         for i in 0..nfds as usize {
@@ -2427,6 +2446,7 @@ pub fn sys_getppid() -> SyscallResult {
 
 /// Get real user ID.
 pub fn sys_getuid() -> SyscallResult {
+    // SAFETY: cli/sti window so the creds read is consistent.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let uid = crate::task::scheduler::with_current_task(|t| t.creds.uid).unwrap_or(0);
@@ -2436,6 +2456,7 @@ pub fn sys_getuid() -> SyscallResult {
 }
 /// Get real group ID.
 pub fn sys_getgid() -> SyscallResult {
+    // SAFETY: cli/sti window so the creds read is consistent.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let gid = crate::task::scheduler::with_current_task(|t| t.creds.gid).unwrap_or(0);
@@ -2445,6 +2466,8 @@ pub fn sys_getgid() -> SyscallResult {
 }
 /// Set user ID.
 pub fn sys_setuid(uid: u32) -> SyscallResult {
+    // SAFETY: cli/sti window so the CAP_SETUID check + creds mutation are
+    // atomic against the rest of the scheduler.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let res = crate::task::scheduler::with_current_task_mut(|t| {
@@ -2471,6 +2494,8 @@ pub fn sys_setuid(uid: u32) -> SyscallResult {
 }
 /// Set group ID.
 pub fn sys_setgid(gid: u32) -> SyscallResult {
+    // SAFETY: cli/sti window so the CAP_SETGID check + creds mutation are
+    // atomic against the rest of the scheduler.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let res = crate::task::scheduler::with_current_task_mut(|t| {
@@ -2496,6 +2521,7 @@ pub fn sys_setgid(gid: u32) -> SyscallResult {
 }
 /// Get effective user ID.
 pub fn sys_geteuid() -> SyscallResult {
+    // SAFETY: cli/sti window so the creds read is consistent.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let euid = crate::task::scheduler::with_current_task(|t| t.creds.euid).unwrap_or(0);
@@ -2505,6 +2531,7 @@ pub fn sys_geteuid() -> SyscallResult {
 }
 /// Get effective group ID.
 pub fn sys_getegid() -> SyscallResult {
+    // SAFETY: cli/sti window so the creds read is consistent.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let egid = crate::task::scheduler::with_current_task(|t| t.creds.egid).unwrap_or(0);
@@ -2520,6 +2547,8 @@ pub fn sys_getegid() -> SyscallResult {
 /// Sleep for the specified duration.
 pub fn sys_nanosleep(req: *const u8, _rem: *mut u8) -> SyscallResult {
     validate_user_ptr(req as u64, 16)?;
+    // SAFETY: validate_user_ptr above bounded 16 bytes (= sizeof(Timespec))
+    // at req; Timespec is repr(C) POD.
     let ts = unsafe { &*(req as *const Timespec) };
     let ms = ts.tv_sec * 1000 + ts.tv_nsec / 1_000_000;
     let target = crate::interrupts::pit::uptime_ms() + ms;
@@ -2548,6 +2577,8 @@ pub fn sys_truncate(_path: *const u8, _length: u64) -> SyscallResult {
 pub fn sys_fstat(fd: i32, buf: *mut u8) -> SyscallResult {
     validate_user_ptr(buf as u64, core::mem::size_of::<StatBuf>())?;
 
+    // SAFETY: cli/sti window for fd-table lookup; buf bounded by
+    // validate_user_ptr above so copy_nonoverlapping into it is in-range.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {
@@ -2590,6 +2621,8 @@ const SEEK_END: i32 = 2;
 
 /// Reposition read/write offset.
 pub fn sys_lseek(fd: i32, offset: i64, whence: i32) -> SyscallResult {
+    // SAFETY: cli/sti window so fd-table lookup + offset atomic store are
+    // consistent against close()/dup() on the same fd.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {
@@ -2637,11 +2670,14 @@ pub fn sys_lseek(fd: i32, offset: i64, whence: i32) -> SyscallResult {
 /// Check file accessibility.
 pub fn sys_access(path: *const u8, _mode: u32) -> SyscallResult {
     let path_len = validate_user_string(path as u64)?;
+    // SAFETY: validate_user_string above confirmed [path, path+path_len) is
+    // user-mapped and NUL-terminated.
     let path_str = unsafe {
         core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
             .map_err(|_| SyscallError::EINVAL)?
     };
 
+    // SAFETY: mount_table is a kernel singleton initialised once at boot.
     let (fs, ino) = unsafe {
         crate::vfs::mount::mount_table()
             .lookup_path(path_str)
@@ -2671,11 +2707,14 @@ pub fn sys_access(path: *const u8, _mode: u32) -> SyscallResult {
 
 pub fn sys_chmod(path: *const u8, mode: u32) -> SyscallResult {
     let path_len = validate_user_string(path as u64)?;
+    // SAFETY: validate_user_string above confirmed [path, path+path_len) is
+    // user-mapped and NUL-terminated.
     let path_str = unsafe {
         core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
             .map_err(|_| SyscallError::EINVAL)?
     };
 
+    // SAFETY: mount_table singleton — same as sys_access.
     let (fs, ino) = unsafe {
         crate::vfs::mount::mount_table()
             .lookup_path(path_str)
@@ -2696,11 +2735,14 @@ pub fn sys_chmod(path: *const u8, mode: u32) -> SyscallResult {
 
 pub fn sys_chown(path: *const u8, uid: u32, gid: u32) -> SyscallResult {
     let path_len = validate_user_string(path as u64)?;
+    // SAFETY: validate_user_string above confirmed [path, path+path_len) is
+    // user-mapped and NUL-terminated.
     let path_str = unsafe {
         core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
             .map_err(|_| SyscallError::EINVAL)?
     };
 
+    // SAFETY: mount_table singleton — same as sys_access.
     let (fs, ino) = unsafe {
         crate::vfs::mount::mount_table()
             .lookup_path(path_str)
@@ -2718,6 +2760,7 @@ pub fn sys_chown(path: *const u8, uid: u32, gid: u32) -> SyscallResult {
 
 pub fn sys_umask(mask: u32) -> SyscallResult {
     let new_mask = mask & 0o777;
+    // SAFETY: cli/sti window so the umask swap is atomic.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let old = crate::task::scheduler::with_current_task_mut(|t| {
@@ -2753,16 +2796,19 @@ pub fn sys_readlink(_path: *const u8, _buf: *mut u8, _bufsiz: usize) -> SyscallR
 pub fn sys_rename(old: *const u8, new: *const u8) -> SyscallResult {
     let old_len = validate_user_string(old as u64)?;
     let new_len = validate_user_string(new as u64)?;
+    // SAFETY: validate_user_string above bounded [old, old+old_len).
     let old_str = unsafe {
         core::str::from_utf8(core::slice::from_raw_parts(old, old_len))
             .map_err(|_| SyscallError::EINVAL)?
     };
+    // SAFETY: validate_user_string above bounded [new, new+new_len).
     let new_str = unsafe {
         core::str::from_utf8(core::slice::from_raw_parts(new, new_len))
             .map_err(|_| SyscallError::EINVAL)?
     };
 
     // Only writable tmpfs/racfs filesystems supported.
+    // SAFETY: mount_table is a kernel singleton.
     let mt = unsafe { crate::vfs::mount::mount_table() };
     let (mount, _) = mt.resolve(old_str).ok_or(SyscallError::ENOENT)?;
     let store = writable_store_from_mount(mount).ok_or(SyscallError::EACCES)?;
@@ -2819,6 +2865,7 @@ pub fn sys_fcntl(fd: i32, cmd: i32, _arg: u64) -> SyscallResult {
     const F_DUPFD: i32 = 0;
 
     match cmd {
+        // SAFETY: cli/sti window so the dup target slot is allocated atomically.
         F_DUPFD => unsafe {
             core::arch::asm!("cli", options(nomem, nostack));
             let result = crate::task::scheduler::with_current_fd_table(|fds| {
