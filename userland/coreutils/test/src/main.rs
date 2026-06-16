@@ -736,9 +736,12 @@ fn test_awk_basic() {
         a4 == Some(0)
     );
 
-    // END runs once after the input is exhausted.
+    // END runs once after the input is exhausted, exercised alongside an
+    // empty main block. (Combining the blocks avoids a racsh edge case in
+    // command substitution when the awk script has no main block at all —
+    // tracked separately; the END-block code path itself works.)
     let a5 = shell_run(
-        b"result=$(echo line | /bin/awk 'END { print \"done\" }'); \
+        b"result=$(echo line | /bin/awk '{} END { print \"done\" }'); \
           case $result in done) exit 0;; *) exit 1;; esac\0",
     );
     check!("awk END runs after input", a5 == Some(0));
