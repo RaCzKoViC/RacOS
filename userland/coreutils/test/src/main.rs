@@ -822,6 +822,34 @@ fn test_top_prints_snapshot() {
     }
 }
 
+/// Run a userland binary directly (bypassing /bin/sh) and return its
+/// exit status. Sidesteps a racsh $(...) edge case where `shell_run`
+/// occasionally produces `sh: cannot open script:` status 127 even
+/// for simple command lines — the racsh fix is tracked in
+/// ROADMAP.md §6 as a carried-forward TODO. Direct spawn is also a
+/// closer match to what's actually being tested (the binary).
+fn run_bin(path: &[u8], args: &[&[u8]]) -> Option<i32> {
+    // Build an argv array of pointers. Cap at 8 args incl. argv[0]
+    // + NULL terminator — every smoke today fits.
+    let mut argv: [*const u8; 8] = [core::ptr::null(); 8];
+    let mut n = 0usize;
+    while n < args.len() && n + 1 < argv.len() {
+        argv[n] = args[n].as_ptr();
+        n += 1;
+    }
+    argv[n] = core::ptr::null();
+
+    let pid = match spawn_args(path, &argv[..=n]) {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+    let mut status: i32 = -99;
+    if waitpid(pid, &mut status, 0).is_err() {
+        return None;
+    }
+    Some(status)
+}
+
 /// Smoke for /bin/touch (v0.2 §2.1). Asserts: (a) touching a non-existent
 /// path creates the file (verified by stat); (b) touching an existing
 /// path is a no-op that still exits 0.
@@ -832,7 +860,7 @@ fn test_touch_creates_file() {
     let _ = unlink(path);
 
     // First touch: create.
-    let s1 = shell_run(b"/bin/touch /tmp/t_touch\0");
+    let s1 = run_bin(b"/bin/touch\0", &[b"touch\0", b"/tmp/t_touch\0"]);
     check!("touch (create) exit 0", s1 == Some(0));
 
     let mut raw = [0u8; 80];
@@ -840,7 +868,7 @@ fn test_touch_creates_file() {
     check!("stat touched file returns Ok", st_ret.is_ok());
 
     // Second touch: existing file path, no-op exit 0.
-    let s2 = shell_run(b"/bin/touch /tmp/t_touch\0");
+    let s2 = run_bin(b"/bin/touch\0", &[b"touch\0", b"/tmp/t_touch\0"]);
     check!("touch (existing) exit 0", s2 == Some(0));
 
     let _ = unlink(path);
@@ -851,7 +879,7 @@ fn test_touch_creates_file() {
 }
 
 /// Smoke for /bin/chmod (v0.2 §2.1). Creates a file, runs chmod 0600
-/// via shell, stats it back and asserts the mode bits.
+/// directly via spawn, stats it back and asserts the mode bits.
 fn test_chmod_sets_mode() {
     println("\n[test] /bin/chmod sets mode");
 
@@ -865,7 +893,7 @@ fn test_chmod_sets_mode() {
         return;
     }
 
-    let s = shell_run(b"/bin/chmod 0600 /tmp/t_chmod\0");
+    let s = run_bin(b"/bin/chmod\0", &[b"chmod\0", b"0600\0", b"/tmp/t_chmod\0"]);
     check!("chmod exit 0", s == Some(0));
 
     let mut raw = [0u8; 80];
@@ -886,8 +914,8 @@ fn test_chmod_sets_mode() {
 }
 
 /// Smoke for /bin/chown (v0.2 §2.1). Creates a file, runs chown 1234:5678
-/// via shell, stats it back and asserts uid+gid. Runs as root so chown
-/// to an arbitrary uid is allowed.
+/// directly via spawn, stats it back and asserts uid+gid. Runs as root
+/// so chown to an arbitrary uid is allowed.
 fn test_chown_sets_uid_gid() {
     println("\n[test] /bin/chown sets uid:gid");
 
@@ -901,7 +929,10 @@ fn test_chown_sets_uid_gid() {
         return;
     }
 
-    let s = shell_run(b"/bin/chown 1234:5678 /tmp/t_chown\0");
+    let s = run_bin(
+        b"/bin/chown\0",
+        &[b"chown\0", b"1234:5678\0", b"/tmp/t_chown\0"],
+    );
     check!("chown exit 0", s == Some(0));
 
     let mut raw = [0u8; 80];
