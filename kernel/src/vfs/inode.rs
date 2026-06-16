@@ -145,6 +145,11 @@ pub trait InodeOps: Send + Sync {
         false
     }
 
+    /// Return true when this inode represents an interactive terminal device.
+    fn is_tty(&self) -> bool {
+        self.is_pty()
+    }
+
     /// Flush pending file metadata/data to backing storage.
     fn sync(&self) -> VfsResult<()> {
         Err(VfsError::NotImplemented)

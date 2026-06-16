@@ -2528,8 +2528,22 @@ pub fn sys_fcntl(fd: i32, cmd: i32, _arg: u64) -> SyscallResult {
 // ─────────────────────────────────────────────────
 
 pub fn sys_isatty(fd: i32) -> SyscallResult {
-    // fd 0, 1, 2 are TTY
-    if fd >= 0 && fd <= 2 {
+    if fd < 0 {
+        return Err(SyscallError::EBADF);
+    }
+
+    let is_tty = unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+        let is_tty = crate::task::scheduler::with_current_fd_table(|fds| {
+            let file = fds.get(fd).map_err(map_vfs_error)?;
+            Ok(file.inode.is_tty())
+        })
+        .unwrap_or(Err(SyscallError::EBADF));
+        core::arch::asm!("sti", options(nomem, nostack));
+        is_tty?
+    };
+
+    if is_tty {
         Ok(1)
     } else {
         Err(SyscallError::ENOTTY)

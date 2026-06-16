@@ -474,6 +474,9 @@ fn test_tty_ioctl_state() {
         (Err(_), Err(_)) => return,
     };
 
+    check!("isatty(/dev/ptmx)", isatty(master_fd));
+    check!("isatty(/dev/pts0)", isatty(slave_fd));
+
     let bad_ws = [0u16, 80u16];
     let bad_resize = ioctl(master_fd, TIOCSWINSZ, bad_ws.as_ptr() as u64);
     check!("TIOCSWINSZ rejects zero rows", bad_resize.is_err());
@@ -515,15 +518,22 @@ fn test_tty_ioctl_state() {
         check!("TIOCSWINSZ rejects /dev/null", set_ws_non_tty.is_err());
         check!("TIOCGPGRP rejects /dev/null", get_fg_non_tty.is_err());
         check!("TIOCSPGRP rejects /dev/null", set_fg_non_tty.is_err());
+        check!("isatty(/dev/null) is false", !isatty(null_fd));
         non_tty_rejected = get_ws_non_tty.is_err()
             && set_ws_non_tty.is_err()
             && get_fg_non_tty.is_err()
-            && set_fg_non_tty.is_err();
+            && set_fg_non_tty.is_err()
+            && !isatty(null_fd);
         let _ = close(null_fd);
     }
 
     let _ = close(slave_fd);
     let _ = close(master_fd);
+    let closed_master_isatty = isatty(master_fd);
+    check!(
+        "isatty(closed /dev/ptmx fd) is false",
+        !closed_master_isatty
+    );
 
     if resize.is_ok()
         && get_ws.is_ok()
@@ -531,6 +541,7 @@ fn test_tty_ioctl_state() {
         && set_fg.is_ok()
         && got_pgid == pgid
         && non_tty_rejected
+        && !closed_master_isatty
     {
         println("TTY-IOCTL-OK");
     }

@@ -394,6 +394,14 @@ impl InodeOps for DevfsInode {
         let dev = &self.fs.devices[self.idx];
         dev.name == "ptmx" || dev.name == "pts0"
     }
+
+    fn is_tty(&self) -> bool {
+        let dev = &self.fs.devices[self.idx];
+        matches!(
+            dev.name.as_str(),
+            "ptmx" | "pts0" | "tty" | "console" | "serial0" | "stdin" | "stdout" | "stderr"
+        )
+    }
 }
 
 /// Devfs root directory inode.
