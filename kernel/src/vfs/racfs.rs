@@ -586,14 +586,19 @@ impl Racfs {
         Ok(new_ino)
     }
 
-    /// Remove a file or empty directory from parent.
+    /// Remove a name. The inode itself is freed only when its last name goes.
+    ///
+    /// This is what makes hard links work: `link()` adds a second directory
+    /// entry for one inode and bumps `nlink`, so unlinking either name must
+    /// drop the count rather than free blocks the other name still points at.
+    /// A file with `nlink == 1` behaves exactly as before.
     pub fn unlink(&self, parent_ino: u32, name: &str) -> VfsResult<()> {
         let parent = self.read_inode(parent_ino)?;
         if parent.itype != ITYPE_DIR {
             return Err(VfsError::NotADirectory);
         }
         let child_ino = self.dir_lookup(&parent, name)?.ok_or(VfsError::NotFound)?;
-        let child = self.read_inode(child_ino)?;
+        let mut child = self.read_inode(child_ino)?;
 
         // If directory, must be empty.
         if child.itype == ITYPE_DIR && child.dir_entry_count > 0 {
@@ -602,8 +607,55 @@ impl Racfs {
 
         // Remove dir entry from parent.
         self.dir_remove_entry(parent_ino, name)?;
-        // Free child inode and its blocks.
-        self.free_inode(child_ino)?;
+
+        // Directories are never hard-linked, so their nlink bookkeeping (2 for
+        // "." plus the parent's entry) says nothing about liveness — drop them
+        // outright, as before. Files fall through to refcounting.
+        if child.itype == ITYPE_DIR || child.nlink <= 1 {
+            self.free_inode(child_ino)?;
+        } else {
+            child.nlink -= 1;
+            self.write_inode(child_ino, &child)?;
+        }
+
+        self.flush_sb()?;
+        self.cache_mut().flush().map_err(|_| VfsError::IoError)?;
+        Ok(())
+    }
+
+    /// Create `name` in `parent_ino` as another name for the existing inode
+    /// `target_ino`.
+    ///
+    /// Refuses to link a directory: with no `..` fixups and no cycle detection
+    /// in the VFS, a directory hard link turns the tree into a graph that
+    /// `du`, `find` and the mount logic would all walk forever.
+    pub fn link(&self, parent_ino: u32, name: &str, target_ino: u32) -> VfsResult<()> {
+        if name.is_empty() || name.len() > MAX_NAME_LEN - 4 {
+            return Err(VfsError::InvalidArgument);
+        }
+
+        let parent = self.read_inode(parent_ino)?;
+        if parent.itype != ITYPE_DIR {
+            return Err(VfsError::NotADirectory);
+        }
+        if self.dir_lookup(&parent, name)?.is_some() {
+            return Err(VfsError::AlreadyExists);
+        }
+
+        let mut target = self.read_inode(target_ino)?;
+        if target.itype == ITYPE_DIR {
+            return Err(VfsError::IsADirectory);
+        }
+        // u16 counter: refuse rather than wrap into a count that would free
+        // live data on the next unlink.
+        if target.nlink == u16::MAX {
+            return Err(VfsError::InvalidArgument);
+        }
+
+        self.dir_add_entry(parent_ino, target_ino, name)?;
+        target.nlink += 1;
+        self.write_inode(target_ino, &target)?;
+
         self.flush_sb()?;
         self.cache_mut().flush().map_err(|_| VfsError::IoError)?;
         Ok(())

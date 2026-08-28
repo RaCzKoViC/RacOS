@@ -566,6 +566,22 @@ pub fn unlink(path: &[u8]) -> Result<(), i64> {
     }
 }
 
+/// Utwórz twarde dowiązanie: `new` staje się kolejną nazwą pliku `old`.
+///
+/// Obie ścieżki muszą leżeć na tym samym mount poincie — numery i-węzłów mają
+/// znaczenie tylko wewnątrz swojego systemu plików. Przekroczenie granicy
+/// zwraca `EXDEV` (-18).
+pub fn link(old: &[u8], new: &[u8]) -> Result<(), i64> {
+    // SAFETY: syscall ABI; both pointers come from &[u8] slices that the
+    // caller NUL-terminated, and the kernel re-validates them.
+    let ret = unsafe { syscall2(SYS_LINK, old.as_ptr() as u64, new.as_ptr() as u64) };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
+}
+
 /// Fork the current process. Returns 0 in child, child PID in parent.
 pub fn fork() -> Result<i32, i64> {
     // SAFETY: syscall ABI; no args.

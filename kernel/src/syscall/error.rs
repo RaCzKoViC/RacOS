@@ -35,6 +35,10 @@ pub enum SyscallError {
     EADDRINUSE = -98,
     ENOTCONN = -107,
     ETIMEDOUT = -110,
+    /// Cross-device link. A hard link is a second directory entry pointing at
+    /// one inode, and inode numbers only mean anything inside the filesystem
+    /// that issued them, so `link()` across mounts cannot work.
+    EXDEV = -18,
 }
 
 impl SyscallError {
