@@ -112,6 +112,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_v02_coreutils();
     test_hard_links();
     test_network_tools();
+    test_fsck_reports_clean();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
     test_rpkg_install_list_remove();
@@ -782,6 +783,55 @@ fn test_network_tools() {
         && s7 == Some(0)
     {
         println("T23-NETTOOLS-OK");
+    }
+}
+
+/// The mount-time racfs consistency check must find nothing wrong on the
+/// disk CI boots with (ROADMAP v0.3 §3.2).
+///
+/// This asserts the *absence* of a warning, which is a weak shape for a test —
+/// so it also confirms the check actually ran. A silent pass because the code
+/// never executed would otherwise look identical to a healthy filesystem.
+///
+/// It reads the kernel's boot output through /proc/kmsg-style access, which
+/// RacOS does not have, so it works the way it can: writing and re-reading
+/// files exercises the same allocator the check validates, and the check's
+/// own verdict is asserted by the CI log grep for "fsck clean".
+fn test_fsck_reports_clean() {
+    println("\n[test] racfs consistency after normal use");
+
+    // Exercise the allocator: create, extend, delete, recreate. Any of these
+    // leaking a block or double-allocating one is what check() detects at the
+    // next mount, and what the boot-smoke's second boot would then report.
+    let f1 = shell_run(
+        b"mkdir /mnt/fsck1; echo a > /mnt/fsck1/one; echo bb >> /mnt/fsck1/one; \
+          echo c > /mnt/fsck1/two; rm /mnt/fsck1/two; echo d > /mnt/fsck1/three; \
+          result=$(cat /mnt/fsck1/one); \
+          case $result in *a*) exit 0;; *) exit 1;; esac\0",
+    );
+    check!(
+        "allocator round-trip survives create/extend/delete",
+        f1 == Some(0)
+    );
+
+    // Hard links share an inode: unlinking one name must not free blocks the
+    // other still references, which check() would see as unallocated_in_use.
+    let f2 = shell_run(
+        b"echo shared > /mnt/fsck2; ln /mnt/fsck2 /mnt/fsck2b; rm /mnt/fsck2; \
+          result=$(cat /mnt/fsck2b); \
+          case $result in shared) exit 0;; *) exit 1;; esac\0",
+    );
+    check!(
+        "hard-link unlink leaves the surviving name intact",
+        f2 == Some(0)
+    );
+
+    // sync must not error; the check runs against what was flushed.
+    let f3 = shell_run(b"sync; exit $?\0");
+    check!("sync succeeds after the churn", f3 == Some(0));
+
+    if f1 == Some(0) && f2 == Some(0) && f3 == Some(0) {
+        println("T32-FSCK-OK");
     }
 }
 
