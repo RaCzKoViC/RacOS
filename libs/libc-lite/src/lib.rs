@@ -95,6 +95,8 @@ pub const SYS_CLONE: u64 = 77;
 pub const SYS_GETHOSTBYNAME: u64 = 78;
 pub const SYS_MKFS: u64 = 79;
 pub const SYS_SYNC: u64 = 80;
+/// Send one ICMP echo and wait for the reply. Returns RTT in PIT ticks.
+pub const SYS_ICMP_ECHO: u64 = 81;
 pub const SYS_PTHREAD_CREATE: u64 = 0x400;
 
 // ─────────────────────────────────────────────────
@@ -563,6 +565,22 @@ pub fn unlink(path: &[u8]) -> Result<(), i64> {
         Err(ret)
     } else {
         Ok(())
+    }
+}
+
+/// Wyślij jedno żądanie ICMP echo i poczekaj na odpowiedź.
+///
+/// `ip` to adres IPv4 w kolejności sieciowej. Zwraca czas round-trip w
+/// tickach PIT (1 tick = 1 ms) albo błąd: `ETIMEDOUT` (-110) przy braku
+/// odpowiedzi, `EFAULT` przy złym wskaźniku.
+pub fn icmp_echo(ip: &[u8; 4], timeout_ms: u32) -> Result<u64, i64> {
+    // SAFETY: syscall ABI; the pointer comes from a &[u8; 4] and the kernel
+    // re-validates it against the user address space.
+    let ret = unsafe { syscall2(SYS_ICMP_ECHO, ip.as_ptr() as u64, timeout_ms as u64) };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as u64)
     }
 }
 

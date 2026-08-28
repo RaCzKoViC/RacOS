@@ -125,6 +125,48 @@ pub fn next_hop_mac(ip: [u8; 4]) -> Option<[u8; 6]> {
     s.arp_cache.lookup(target)
 }
 
+/// Number of ICMP echo replies seen since boot.
+pub fn echo_reply_count() -> u32 {
+    STACK.lock().echo_replies
+}
+
+/// Send one ICMP echo to `dst_ip` and wait for the reply.
+///
+/// Returns the round-trip time in PIT ticks, or None on timeout / no route.
+///
+/// Blocks with interrupts on, the same way `resolve` and `sys_connect` do:
+/// SYSCALL entry clears IF, but the PIT has to keep firing or nothing drains
+/// the NIC and the reply never arrives. The caller restores IF=0.
+///
+/// Detection is by counter rather than by matching the sequence number: the
+/// ICMP receive path only bumps `echo_replies`, and threading an identifier
+/// through it would mean reworking that path for one tool. The consequence is
+/// that a stray reply meant for the boot-time demo could be miscounted as
+/// ours; with one ping in flight at a time that is a theoretical race, and it
+/// is noted here rather than papered over.
+pub fn ping_once(dst_ip: [u8; 4], timeout_ticks: u64, payload: &[u8]) -> Option<u64> {
+    if next_hop_mac(dst_ip).is_none() {
+        return None;
+    }
+
+    let before = echo_reply_count();
+    let start = crate::interrupts::pit::ticks();
+    if !send_icmp_echo(dst_ip, payload) {
+        return None;
+    }
+
+    loop {
+        if echo_reply_count() != before {
+            return Some(crate::interrupts::pit::ticks().saturating_sub(start));
+        }
+        if crate::interrupts::pit::ticks().saturating_sub(start) > timeout_ticks {
+            return None;
+        }
+        poll();
+        core::hint::spin_loop();
+    }
+}
+
 /// Synchronous DNS A-record resolution. Blocks (with interrupts on, so the
 /// PIT keeps pumping the NIC) until a reply arrives or the deadline passes.
 /// `name` must be a valid DNS hostname; returns the first A record found.
