@@ -11,6 +11,50 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Added — v0.2 §2.3 (network tools)
+
+- **`ping`** — new `SYS_ICMP_ECHO` (81) wrapping the stack's existing
+  `send_icmp_echo`; inventing a raw-socket API for one tool was not worth it.
+  The wait runs with interrupts on, like `resolve()` and `sys_connect()`:
+  SYSCALL entry clears IF, and without the PIT firing nothing drains the NIC.
+  Replies are detected by the reply counter changing rather than by matching
+  the sequence number — the ICMP receive path only bumps `echo_replies`. With
+  one echo in flight that race is theoretical, but it is real and is recorded
+  at the call site. **Under QEMU slirp only the gateway answers ICMP**, so
+  `ping 10.0.2.2` replies while `ping example.com` resolves and then reports
+  100% loss; that is the emulated network, not the stack.
+- **`nc`** — TCP connect and listen on the existing socket syscalls. Relays
+  with `poll()` over stdin and the socket together, because userland has no
+  threads; on stdin EOF it half-closes with `shutdown(SHUT_WR)` and keeps
+  draining, so a piped body is not truncated. TCP only.
+- **`/proc/net/tcp` and `/proc/net/udp`** — `tcp::snapshot()` copies rows
+  under `try_lock`: formatting text while holding the connection table would
+  deadlock against the timer's retransmit path on a single CPU. `/proc/net/udp`
+  ships a header and no rows, because the UDP path is connectionless and keeps
+  no socket table; the file exists so a parser finds an empty table rather
+  than no file.
+- **`netstat`** `[-t] [-u]` — concatenates the kernel's already-aligned
+  tables rather than re-parsing them, and says so explicitly when they are
+  missing.
+
+With this, all three v0.2 feature sections (§2.1, §2.2, §2.3) ship. The
+`MILESTONE-V0.2-OK` marker is deliberately **not** emitted yet — see
+`docs/ROADMAP.md` §2.4 for the two acceptance criteria that still need
+settling.
+
+### Fixed
+
+- **`head -1` and `tail -1` were treated as filenames.** Both tools accepted
+  `-n 1` and `-n1` but not the bare `-N` everyone actually types; it fell
+  through to the FILE branch and was passed to `open()`, so a valid command
+  answered "cannot open file". The same code had been copied into both.
+- **`tail -N` returned nothing at all.** The backwards scan counted the
+  trailing newline as a line boundary, so for input ending `three\n` the first
+  step already satisfied the count and the emitted slice was empty. A trailing
+  newline terminates the last line rather than starting a new one; the scan
+  now skips it before counting. `tail -0` prints nothing rather than
+  everything.
+
 ### Added — v0.2 §2.1 (coreutils)
 
 `free`, `rmdir`, `du` and `clear` ship, closing all of §2.1 except `ln`.

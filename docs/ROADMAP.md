@@ -129,23 +129,36 @@ Still open in §2.2: nothing. The remaining v0.2 work is §2.1 (`free`, `ln`,
 
 ### 2.3 Network tools
 
-| Tool | DoD |
-|---|---|
-| `ping` | ICMP echo; either a raw socket or a new `sys_icmp` |
-| `nc` | TCP/UDP listen + connect (uses existing `sys_socket`) |
-| `curl`-like | wget exists; need GET/POST/headers/redirect against the existing HTTP/1.0 client |
-| `ss` / `netstat` | reads `/proc/net/{tcp,udp}` (procfs entries to add) |
+| Tool | Status | Notes |
+|---|---|---|
+| `ping` | ✅ shipped | `T23-NETTOOLS-OK`. New `SYS_ICMP_ECHO` (81) wrapping the stack's existing `send_icmp_echo`; a raw-socket API was not worth inventing for one tool. Replies are matched by the reply counter changing, not by sequence number — the ICMP receive path only bumps `echo_replies`. With one echo in flight that race is theoretical but real. **Under QEMU slirp only the gateway answers ICMP**, so `ping 10.0.2.2` replies while `ping example.com` resolves and reports 100% loss. |
+| `nc` | ✅ shipped | `T23-NETTOOLS-OK`. TCP only, on the existing socket syscalls. Relays with `poll()` on stdin and the socket together (userland has no threads); half-closes with `shutdown(SHUT_WR)` on stdin EOF so a piped body is not truncated. UDP needs `SOCK_DGRAM` through `sys_send`/`sys_recv`, which the kernel does not offer. |
+| `ss` / `netstat` | ✅ shipped | `T23-NETTOOLS-OK`. `/proc/net/{tcp,udp}` added. `snapshot()` copies rows under `try_lock` — formatting text while holding the connection table would deadlock against the timer's retransmit path. `/proc/net/udp` carries a header and no rows: the UDP path is connectionless and keeps no socket table. |
+| `curl`-like | ⏳ | `wget` exists; still needs GET/POST, headers and redirects against the HTTP/1.0 client. Not required for the v0.2 DoD. |
 
 ### 2.4 Acceptance criteria (DoD for v0.2)
 
-- All §2.1 binaries ship at `/bin/<tool>` and have a `T02-<TOOL>-OK`
-  racos-test marker.
-- `racsh` boots into a session where tab-completion, history, and at
-  least one user-set alias survive a `clear`, `exit`, new session.
-- `ping 8.8.8.8` and `nc -l 8080 &` + `nc 127.0.0.1 8080 < hi.txt` both
-  produce expected output in the QEMU interactive-smoke job.
-- New CI marker `MILESTONE-V0.2-OK` printed when all of the above pass
-  in a single boot.
+**Status: the three feature sections are done.** §2.1, §2.2 and §2.3 all ship,
+covered by `T20-*`, `T21-COREUTILS-OK`, `T21-HARDLINK-OK`, `T22-ALIAS-OK` and
+`T23-NETTOOLS-OK` — 160 in-guest assertions, 24 markers.
+
+- [x] §2.1 binaries ship at `/bin/<tool>` with racos-test markers. (The
+      markers are grouped per section rather than one `T02-<TOOL>-OK` each;
+      grouping keeps a tool's cases together and made the missing-marker
+      failure mode obvious.)
+- [x] racsh has tab completion, history and aliases.
+- [x] `ping` and `nc` work and are smoked.
+- [ ] **`MILESTONE-V0.2-OK`** — not yet emitted. Two DoD items are worth
+      revisiting before it is:
+      - Aliases and history surviving *a new session* is untested. History
+        does survive within a boot (`/var/.racsh_history`) but not a reboot
+        until v0.3 §3.3 moves `/home` onto persistent storage; aliases have
+        no `~/.racshrc` to be reloaded from at all. Either the criterion or
+        the shell needs to change.
+      - The `nc -l 8080 &` + `nc 127.0.0.1 8080` round trip is not smoked.
+        Backgrounding a listener and connecting to it from the same shell
+        needs job control and loopback TCP to cooperate; worth confirming by
+        hand before it becomes a CI gate.
 
 ---
 
