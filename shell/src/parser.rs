@@ -389,12 +389,30 @@ impl Parser {
     /// so `pre${VAR}.txt`, `"a"b`, `$x$y` and `def=${VAR}` each become a single
     /// multi-part word, matching shell word-splitting semantics.
     fn parse_word(&mut self) -> Result<Word, ParseError> {
+        self.parse_word_inner(false)
+    }
+
+    /// Like [`Self::parse_word`], but a reserved word is taken as a literal
+    /// instead of being rejected. Only valid where the grammar cannot contain
+    /// a keyword — currently `case` patterns (see [`keyword_spelling`]).
+    fn parse_pattern_word(&mut self) -> Result<Word, ParseError> {
+        self.parse_word_inner(true)
+    }
+
+    fn parse_word_inner(&mut self, allow_keywords: bool) -> Result<Word, ParseError> {
         let mut parts = Vec::new();
 
         let first = self.advance().clone();
         let word_end = first.span.offset + first.span.len;
         if !push_word_part(&first.kind, &mut parts) {
-            return Err(self.error(&alloc::format!("Expected word, got {:?}", first.kind)));
+            match keyword_spelling(&first.kind) {
+                Some(text) if allow_keywords => {
+                    parts.push(WordPart::Literal(String::from(text)));
+                }
+                _ => {
+                    return Err(self.error(&alloc::format!("Expected word, got {:?}", first.kind)));
+                }
+            }
         }
 
         // Greedily merge immediately-adjacent word-like tokens.
@@ -630,10 +648,12 @@ impl Parser {
 
         let mut items = Vec::new();
         while !matches!(self.peek(), TokenKind::Esac | TokenKind::Eof) {
-            let mut patterns = alloc::vec![self.parse_word()?];
+            // Patterns are plain words: `done`, `in`, `esac`… carry no
+            // reserved meaning here, so accept keyword tokens as literals.
+            let mut patterns = alloc::vec![self.parse_pattern_word()?];
             while matches!(self.peek(), TokenKind::Pipe) {
                 self.advance();
-                patterns.push(self.parse_word()?);
+                patterns.push(self.parse_pattern_word()?);
             }
             self.expect(&TokenKind::RParen)?;
             self.skip_newlines();
@@ -688,6 +708,32 @@ impl Parser {
 /// Append a token's word part(s) to `parts`. Returns `false` if the token is
 /// not word-like (so callers know to stop merging). An `AssignmentWord` in word
 /// position (i.e. after the command name) is a plain `name=value` literal.
+/// Spelling of a reserved-word token, or `None` if `kind` isn't a keyword.
+///
+/// POSIX only recognises reserved words in command-word position. Everywhere
+/// else — notably a `case` pattern — they are ordinary words, so
+/// `case $x in done) ...; esac` is legal and must not be parsed as the `done`
+/// that closes a loop. The lexer classifies keywords unconditionally, so the
+/// parser maps them back to literals where a plain word is what's expected.
+fn keyword_spelling(kind: &TokenKind) -> Option<&'static str> {
+    match kind {
+        TokenKind::If => Some("if"),
+        TokenKind::Then => Some("then"),
+        TokenKind::Else => Some("else"),
+        TokenKind::Elif => Some("elif"),
+        TokenKind::Fi => Some("fi"),
+        TokenKind::While => Some("while"),
+        TokenKind::Do => Some("do"),
+        TokenKind::Done => Some("done"),
+        TokenKind::For => Some("for"),
+        TokenKind::In => Some("in"),
+        TokenKind::Case => Some("case"),
+        TokenKind::Esac => Some("esac"),
+        TokenKind::Function => Some("function"),
+        _ => None,
+    }
+}
+
 fn push_word_part(kind: &TokenKind, parts: &mut Vec<WordPart>) -> bool {
     match kind {
         TokenKind::Word(s) => parts.push(WordPart::Literal(s.clone())),
