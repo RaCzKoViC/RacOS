@@ -175,11 +175,84 @@ pub fn command_candidates(prefix: &str, path: &str, builtins: &[&str]) -> Vec<St
     out
 }
 
+/// Parse `/proc/mounts` content into the mountpoints that sit directly inside
+/// `dir` and start with `prefix`, returned as bare names.
+///
+/// Mountpoints are not directory entries. The kernel creates `/proc`, `/dev`,
+/// `/tmp`, `/mnt` and friends in the mount table, while `/` in the initramfs
+/// carries only `bin`, `etc` and `sbin` — so completing `/pro` by listing `/`
+/// finds nothing. Folding the mount table in fixes that.
+///
+/// Split from the I/O so it can be tested on the host.
+pub fn mountpoints_in(mounts: &str, dir: &str, prefix: &str) -> Vec<String> {
+    // `dir` arrives with its trailing slash ("/" or "/mnt/"); normalise to the
+    // form a mountpoint's parent takes ("" for root, "/mnt" otherwise).
+    let parent = if dir == "/" {
+        ""
+    } else {
+        dir.trim_end_matches('/')
+    };
+
+    let mut out: Vec<String> = Vec::new();
+    for line in mounts.split('\n') {
+        // Field 1 is the mountpoint: "device mountpoint fstype opts 0 0".
+        let mp = match line.split_whitespace().nth(1) {
+            Some(m) => m,
+            None => continue,
+        };
+        if mp == "/" {
+            continue; // root has no parent to complete under
+        }
+        let (mp_parent, name) = match mp.rfind('/') {
+            Some(i) => (&mp[..i], &mp[i + 1..]),
+            None => continue,
+        };
+        if mp_parent == parent && name.starts_with(prefix) && !out.iter().any(|e| e == name) {
+            out.push(String::from(name));
+        }
+    }
+    out
+}
+
+fn read_proc_mounts() -> String {
+    let fd = match libc_lite::open(b"/proc/mounts\0", 0, 0) {
+        Ok(fd) => fd,
+        Err(_) => return String::new(),
+    };
+    let mut contents: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 512];
+    loop {
+        match libc_lite::read(fd, &mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                contents.extend_from_slice(&chunk[..n]);
+                if contents.len() > 8192 {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = libc_lite::close(fd);
+    match core::str::from_utf8(&contents) {
+        Ok(s) => String::from(s),
+        Err(_) => String::new(),
+    }
+}
+
 /// Candidates for a path-shaped word, each returned with its directory prefix
 /// re-attached so it can replace the word wholesale.
 pub fn path_candidates(word: &str) -> Vec<String> {
     let (dir, partial) = split_path_prefix(word);
-    dir_entries_with_prefix(dir, partial)
+
+    let mut names = dir_entries_with_prefix(dir, partial);
+    for mp in mountpoints_in(&read_proc_mounts(), dir, partial) {
+        if !names.iter().any(|n| *n == mp) {
+            names.push(mp);
+        }
+    }
+    names.sort();
+
+    names
         .into_iter()
         .map(|name| {
             let mut full = String::from(dir);
@@ -254,6 +327,36 @@ mod tests {
         assert_eq!(common_prefix(&owned(&["cat"])), "cat");
         assert_eq!(common_prefix(&owned(&["cat", "echo"])), "");
         assert_eq!(common_prefix(&[]), "");
+    }
+
+    const MOUNTS: &str = "initramfs / initramfs rw 0 0\n\
+                          devfs /dev devfs rw 0 0\n\
+                          tmpfs /tmp tmpfs rw 0 0\n\
+                          proc /proc proc rw 0 0\n\
+                          /dev/ram0 /var racfs rw 0 0\n\
+                          none /fat fat32 rw 0 0\n\
+                          /dev/sda /mnt racfs rw 0 0\n";
+
+    #[test]
+    fn mountpoints_complete_under_root() {
+        // The case that started this: `/pro` finds nothing by listing `/`,
+        // because /proc is a mount, not a directory entry.
+        assert_eq!(mountpoints_in(MOUNTS, "/", "pro"), owned(&["proc"]));
+        assert_eq!(mountpoints_in(MOUNTS, "/", "m"), owned(&["mnt"]));
+    }
+
+    #[test]
+    fn root_itself_is_never_a_candidate() {
+        // "/" has no parent directory to be completed under.
+        let all = mountpoints_in(MOUNTS, "/", "");
+        assert!(!all.iter().any(|m| m.is_empty() || m == "/"));
+        assert_eq!(all.len(), 6, "six mounts sit directly under /: {:?}", all);
+    }
+
+    #[test]
+    fn mountpoints_do_not_leak_into_other_directories() {
+        assert!(mountpoints_in(MOUNTS, "/mnt/", "").is_empty());
+        assert!(mountpoints_in(MOUNTS, "/bin/", "p").is_empty());
     }
 
     #[test]

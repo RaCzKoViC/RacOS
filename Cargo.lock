@@ -127,6 +127,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-clear"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-cp"
 version = "0.1.0"
 dependencies = [
@@ -162,6 +169,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-du"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-echo"
 version = "0.1.0"
 dependencies = [
@@ -184,6 +198,13 @@ dependencies = [
 
 [[package]]
 name = "racos-find"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-free"
 version = "0.1.0"
 dependencies = [
  "libc-lite",
@@ -297,6 +318,13 @@ dependencies = [
 
 [[package]]
 name = "racos-rm"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-rmdir"
 version = "0.1.0"
 dependencies = [
  "libc-lite",

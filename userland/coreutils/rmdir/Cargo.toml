@@ -1,0 +1,11 @@
+[package]
+name = "racos-rmdir"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rmdir"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite", features = ["alloc"] }

@@ -11,6 +11,50 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Added — v0.2 §2.1 (coreutils)
+
+`free`, `rmdir`, `du` and `clear` ship, closing all of §2.1 except `ln`.
+Smoke `T21-COREUTILS-OK`.
+
+- **`free`** — parses `/proc/meminfo`, which already existed, so no procfs
+  work was needed. `-k` (default) / `-m`. Fields are looked up **by name**
+  rather than line position: procfs is free to add fields, and a positional
+  parser would start reporting the wrong numbers the day it does.
+- **`rmdir`** — emptiness is enforced by racfs, whose `unlink` refuses a
+  directory that still has entries. Re-checking in userland would be a race
+  and a lie, so this reports what the kernel says. It does `stat` first only
+  to refuse a regular file with an accurate message.
+- **`du`** — `-s` summarise, `-b` bytes, default 1 KiB blocks rounded up.
+  Reports apparent size (`st_size`); racfs has no sparse files, so that
+  equals allocated size today. Recursion is bounded at depth 32 — a directory
+  cycle becomes possible the moment hard links exist, and a shell tool has no
+  business taking the process down.
+- **`clear`** — not in the original plan, but its absence reads as a broken
+  system even though Ctrl-L was always bound. Emits ED 2 + CUP in a single
+  write: RacTerm and the framebuffer console parse CSI per write, so a split
+  sequence prints its tail literally.
+
+`ln` is **not** shipped and is blocked on the kernel rather than userland:
+`sys_link` is a stub returning `ENOSYS`, and hard links need racfs support
+(inode link count, two dirents for one inode, unlink decrementing rather than
+freeing). That belongs in its own change with its own tests.
+
+### Fixed
+
+- **Tab completion could not see mountpoints.** Completion listed a directory
+  with `getdents`, but `/proc`, `/dev`, `/tmp`, `/mnt` and friends are entries
+  in the kernel's mount table, not directory entries — `/` in the initramfs
+  carries only `bin`, `etc`, `sbin`. So `/pro<Tab>` found nothing. Candidates
+  now fold in `/proc/mounts`, filtered to the mounts whose parent is the
+  directory being completed. Found by exercising the running guest.
+- **`build-image.sh` had drifted from `build-image.ps1`.** The bash script,
+  which CI uses on Linux, was missing `dig`, `wget`, `mount`, `df`, `umount`,
+  `sync` and both `mkfs.*` tools — so CI built a smaller image than a local
+  Windows build, and tested something subtly different from what ships. Both
+  lists are back in sync, and the bash copy gained the `src=dst` rename
+  handling its PowerShell counterpart already had (cargo cannot emit a bin
+  name containing a dot, hence `mkfs_racfs` → `mkfs.racfs`).
+
 ### Added — v0.2 §2.2 (racsh UX)
 
 The shell half of the "usable shell" milestone. `docs/ROADMAP.md` §2.2 is now
