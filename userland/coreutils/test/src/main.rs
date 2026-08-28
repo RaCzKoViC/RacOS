@@ -109,6 +109,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_signal_user_handler_reentrant_syscall();
     test_shell_control_flow();
     test_shell_aliases();
+    test_v02_coreutils();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
     test_rpkg_install_list_remove();
@@ -536,6 +537,66 @@ fn test_shell_aliases() {
 
     if a1 == Some(0) && a2 == Some(0) && a3 == Some(0) && a4 == Some(0) {
         println("T22-ALIAS-OK");
+    }
+}
+
+/// Smoke for the v0.2 §2.1 net-new tools: clear, rmdir, free, du.
+///
+/// Each is driven through racsh so redirection and exit codes are exercised
+/// alongside the binary itself.
+fn test_v02_coreutils() {
+    println("\n[test] v0.2 §2.1 coreutils: clear + rmdir + free + du");
+
+    // clear emits ED 2 + CUP and exits 0. Assert on the exit status rather
+    // than the bytes: the escape sequence would corrupt the test transcript.
+    let c1 = run_bin(b"/bin/clear\0", &[b"clear\0"]);
+    check!("clear exits 0", c1 == Some(0));
+
+    // rmdir removes an empty directory...
+    let r1 = shell_run(
+        b"mkdir /tmp/rd1; rmdir /tmp/rd1; \
+          test -d /tmp/rd1 && exit 1; exit 0\0",
+    );
+    check!("rmdir removes an empty directory", r1 == Some(0));
+
+    // ...and refuses a non-empty one, leaving it in place.
+    let r2 = shell_run(
+        b"mkdir /tmp/rd2; echo x > /tmp/rd2/f; \
+          rmdir /tmp/rd2 2>/dev/null; \
+          test -d /tmp/rd2; exit $?\0",
+    );
+    check!("rmdir refuses a non-empty directory", r2 == Some(0));
+
+    // ...and refuses a plain file.
+    let r3 = shell_run(
+        b"echo x > /tmp/rd3; rmdir /tmp/rd3 2>/dev/null; \
+          case $? in 0) exit 1;; *) exit 0;; esac\0",
+    );
+    check!("rmdir refuses a regular file", r3 == Some(0));
+
+    // free reports a Mem: row with a non-zero total.
+    let f1 = shell_run(
+        b"result=$(free | grep Mem); \
+          case $result in Mem:*) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("free prints a Mem: row", f1 == Some(0));
+
+    // du -s on a directory with known content reports a non-zero total.
+    let d1 = shell_run(
+        b"mkdir /tmp/du1; echo hello > /tmp/du1/a; \
+          result=$(du -sb /tmp/du1); \
+          case $result in 0*) exit 1;; *) exit 0;; esac\0",
+    );
+    check!("du -sb reports a non-zero size", d1 == Some(0));
+
+    if c1 == Some(0)
+        && r1 == Some(0)
+        && r2 == Some(0)
+        && r3 == Some(0)
+        && f1 == Some(0)
+        && d1 == Some(0)
+    {
+        println("T21-COREUTILS-OK");
     }
 }
 

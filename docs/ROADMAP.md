@@ -77,13 +77,14 @@ then exits. The CI smoke is much simpler that way.
 | `touch` | ✅ shipped (v0.2 §2.1) | `T20-TOUCH-OK`. MVP: O_CREAT a missing path; existing path is a no-op exit 0. `utime`/`utimensat` syscall is post-MVP, so `-a`/`-m`/`-t` flags are intentionally absent for now. |
 | `chmod` | ✅ shipped (v0.2 §2.1) | `T20-CHMOD-OK`. Octal mode only (`644`, `0644`, `0o644`). Symbolic `u+x`/`g-w`/`a=rwx` is post-MVP. |
 | `chown` | ✅ shipped (v0.2 §2.1) | `T20-CHOWN-OK`. Numeric `uid` / `uid:gid` / `:gid` only. Symbolic usernames need `/etc/passwd` + `/etc/group` lookup (post-MVP). |
-| `kill` | ⏳ | `kill -SIG pid`, default TERM; `sys_kill` exists |
+| `kill` | ⏳ | `kill -SIG pid`, default TERM; `sys_kill` exists. Also a racsh builtin already. |
 | `whoami` | ⏳ | print euid → username (needs `/etc/passwd` lookup) |
 | `uname` | ⏳ | `-a` / `-r` / `-m` / `-s`; `sys_uname` exists |
-| `free` | ⏳ | parse a new `/proc/meminfo` (procfs entry to add) |
-| `ln` | ⏳ | hard links via `sys_link`; symlinks deferred until `sys_symlink` |
-| `rmdir` | ⏳ | explicit standalone (not just `rm -d`) |
-| `du` | ⏳ | recursive walk + size aggregation |
+| `free` | ✅ shipped (v0.2 §2.1) | `T21-COREUTILS-OK`. `/proc/meminfo` already existed, so no procfs work was needed. `-k` (default) / `-m`. Fields are read **by name**, not line position — procfs may add fields, and a positional parser would silently start reporting the wrong numbers. |
+| `ln` | ⏳ | **Blocked on the kernel, not on userland.** `sys_link` is a stub returning `ENOSYS`; hard links need racfs support (inode link count, a second dirent pointing at one inode, and unlink decrementing rather than freeing). That is kernel work deserving its own change, not a coreutil. Symlinks wait on `sys_symlink`, also a stub. |
+| `rmdir` | ✅ shipped (v0.2 §2.1) | `T21-COREUTILS-OK`. Emptiness is enforced by racfs (`unlink` refuses a directory with entries), not re-checked in userland where it would be a race. Refuses a regular file after `stat` so the message names the real problem. |
+| `du` | ✅ shipped (v0.2 §2.1) | `T21-COREUTILS-OK`. `-s` summarise, `-b` bytes; default is 1 KiB blocks rounded up. Reports apparent size (`st_size`) — racfs has no sparse files, so it equals allocated size today. Recursion is depth-bounded at 32: a directory cycle (possible once hard links exist) must not take the process down. |
+| `clear` | ✅ shipped (not in the original plan) | `T21-COREUTILS-OK`. Ctrl-L was always bound, but the missing command reads as a broken system. Emits ED 2 + CUP in a **single** write — RacTerm and the framebuffer console parse CSI per write, so a split sequence prints its tail literally. |
 
 `pwd` and `cd` are already racsh builtins; standalone `/bin/pwd` is
 conventional but not required for v0.2.
