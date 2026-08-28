@@ -52,7 +52,7 @@ $env:RUSTFLAGS = "$OldRustFlags -C debug-assertions=off"
 
 # --- Step 2: Build coreutils ---
 Write-Host "`n[2/4] Building coreutils..." -ForegroundColor Yellow
-$Coreutils = @("racos-hello", "racos-echo", "racos-cat", "racos-true", "racos-false", "racos-sh", "racos-init", "racos-test", "racos-ls", "racos-wc", "racos-uptime", "racos-mkdir", "racos-rm", "racos-sleep", "racos-head", "racos-tail", "racos-env", "racos-basename", "racos-dirname", "racos-grep", "racos-cp", "racos-mv", "racos-cut", "racos-uniq", "racos-find", "racos-od", "racos-ps", "racos-sed", "racos-awk", "racos-id", "racos-sort", "racos-top", "racos-touch", "racos-chmod", "racos-chown", "racos-tee", "racos-hexdump", "racterm", "racos-dig", "racos-wget", "racos-mount", "racos-df", "racos-umount", "racos-mkfs-racfs", "racos-mkfs-fat32", "racos-sync", "racos-clear", "racos-rmdir", "racos-free", "racos-du", "rpkg-bin")
+$Coreutils = @("racos-hello", "racos-echo", "racos-cat", "racos-true", "racos-false", "racos-sh", "racos-init", "racos-test", "racos-ls", "racos-wc", "racos-uptime", "racos-mkdir", "racos-rm", "racos-sleep", "racos-head", "racos-tail", "racos-env", "racos-basename", "racos-dirname", "racos-grep", "racos-cp", "racos-mv", "racos-cut", "racos-uniq", "racos-find", "racos-od", "racos-ps", "racos-sed", "racos-awk", "racos-id", "racos-sort", "racos-top", "racos-touch", "racos-chmod", "racos-chown", "racos-tee", "racos-hexdump", "racterm", "racos-dig", "racos-wget", "racos-mount", "racos-df", "racos-umount", "racos-mkfs-racfs", "racos-mkfs-fat32", "racos-sync", "racos-clear", "racos-rmdir", "racos-free", "racos-du", "racos-ln", "rpkg-bin")
 foreach ($pkg in $Coreutils) {
     # racterm gates its [[bin]] behind a required-feature so
     # `cargo test -p racterm` on host doesn't drag libc-lite's _start in.
@@ -82,7 +82,7 @@ New-Item -ItemType Directory -Force "$InitramfsRoot\etc" | Out-Null
 # Copy binaries — bin names match the [[bin]] name in Cargo.toml.
 # Tuple form is "<cargo-bin-name>=<initramfs-name>"; plain entries map 1:1.
 # Cargo rejects '.' in crate names so mkfs_racfs is renamed to mkfs.racfs here.
-$BinList = @("hello", "echo", "cat", "true", "false", "sh", "racterm", "racos-test", "ls", "wc", "uptime", "mkdir", "rm", "sleep", "head", "tail", "env", "basename", "dirname", "grep", "cp", "mv", "cut", "uniq", "find", "od", "ps", "sed", "awk", "id", "sort", "top", "touch", "chmod", "chown", "tee", "hexdump", "dig", "wget", "mount", "df", "umount", "mkfs_racfs=mkfs.racfs", "mkfs_fat32=mkfs.fat32", "sync", "clear", "rmdir", "free", "du", "rpkg")
+$BinList = @("hello", "echo", "cat", "true", "false", "sh", "racterm", "racos-test", "ls", "wc", "uptime", "mkdir", "rm", "sleep", "head", "tail", "env", "basename", "dirname", "grep", "cp", "mv", "cut", "uniq", "find", "od", "ps", "sed", "awk", "id", "sort", "top", "touch", "chmod", "chown", "tee", "hexdump", "dig", "wget", "mount", "df", "umount", "mkfs_racfs=mkfs.racfs", "mkfs_fat32=mkfs.fat32", "sync", "clear", "rmdir", "free", "du", "ln", "rpkg")
 $SbinList = @("init")
 
 foreach ($entry in $BinList) {
