@@ -17,8 +17,11 @@ use alloc::vec::Vec;
 
 /// Maximum line length.
 const MAX_LINE: usize = 1024;
-/// Maximum history entries.
-const MAX_HISTORY: usize = 64;
+/// Maximum history entries held in memory and written back to the file.
+const MAX_HISTORY: usize = 1000;
+/// Cap on how much of a history file is read at startup. A truncated read
+/// costs the oldest entries, which is preferable to refusing to start.
+const HISTORY_READ_LIMIT: usize = 64 * 1024;
 
 /// Command history ring buffer.
 pub struct History {
@@ -56,6 +59,112 @@ impl History {
 
     pub fn get(&self, idx: usize) -> Option<&str> {
         self.entries.get(idx).map(|s| s.as_str())
+    }
+
+    /// Iterate entries oldest-first, for the `history` builtin.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|s| s.as_str())
+    }
+
+    /// Rebuild history from the contents of a history file.
+    ///
+    /// Splits on newlines, drops blanks, and keeps only the most recent
+    /// MAX_HISTORY lines. Parsing is separate from I/O so it can be tested on
+    /// the host, where there are no syscalls.
+    pub fn load_from_str(&mut self, contents: &str) {
+        self.entries.clear();
+        for line in contents.split('\n') {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                self.entries.push(String::from(trimmed));
+            }
+        }
+        if self.entries.len() > MAX_HISTORY {
+            let excess = self.entries.len() - MAX_HISTORY;
+            self.entries.drain(..excess);
+        }
+    }
+
+    /// Serialise history back to file form: one entry per line, trailing
+    /// newline so appending stays well-formed.
+    pub fn to_file_string(&self) -> String {
+        let mut out = String::new();
+        for e in &self.entries {
+            out.push_str(e);
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Read history from `path`. A missing or unreadable file is not an error:
+    /// the first session on a fresh system simply starts with none.
+    pub fn load_file(&mut self, path: &str) {
+        let mut cpath = String::from(path);
+        cpath.push('\0');
+        let fd = match libc_lite::open(cpath.as_bytes(), 0, 0) {
+            Ok(fd) => fd,
+            Err(_) => return,
+        };
+
+        let mut contents = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            match libc_lite::read(fd, &mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    contents.extend_from_slice(&chunk[..n]);
+                    if contents.len() >= HISTORY_READ_LIMIT {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = libc_lite::close(fd);
+
+        if let Ok(text) = core::str::from_utf8(&contents) {
+            self.load_from_str(text);
+        }
+    }
+
+    /// Write history to `path`, replacing whatever was there.
+    ///
+    /// Rewriting the whole file (rather than appending each line) keeps the
+    /// MAX_HISTORY cap honest and needs no seek. Failure is silent: a shell
+    /// that cannot save history should still exit cleanly.
+    pub fn save_file(&self, path: &str) {
+        let mut cpath = String::from(path);
+        cpath.push('\0');
+        // O_WRONLY (0x0001) | O_CREAT (0x0040) | O_TRUNC (0x0200) = 0x0241.
+        let fd = match libc_lite::open(cpath.as_bytes(), 0x0241, 0o644) {
+            Ok(fd) => fd,
+            Err(_) => return,
+        };
+        let data = self.to_file_string();
+        let mut written = 0usize;
+        while written < data.len() {
+            match libc_lite::write(fd, &data.as_bytes()[written..]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => written += n,
+            }
+        }
+        let _ = libc_lite::close(fd);
+    }
+}
+
+/// Where to keep the history file.
+///
+/// `$HOME/.racsh_history` when HOME is set, otherwise `/var/.racsh_history` —
+/// `/` is the read-only initramfs, so a fallback there would silently never
+/// save. /var survives the session; surviving a *reboot* waits on v0.3, which
+/// moves /home onto persistent storage.
+pub fn history_path(home: Option<&str>) -> String {
+    match home {
+        Some(h) if !h.is_empty() && h != "/" => {
+            let mut p = String::from(h.trim_end_matches('/'));
+            p.push_str("/.racsh_history");
+            p
+        }
+        _ => String::from("/var/.racsh_history"),
     }
 }
 
@@ -182,8 +291,10 @@ pub fn readline(prompt: &str, history: &History) -> Option<String> {
             0x1B => {
                 handle_escape(&mut state, history, prompt);
             }
-            // Tab — ignore for now (future: completion)
-            b'\t' => {}
+            // Tab — complete the word under the cursor
+            b'\t' => {
+                complete_at_cursor(&mut state, prompt);
+            }
             // Printable characters
             0x20..=0x7E => {
                 if state.len() < MAX_LINE - 1 {
@@ -301,6 +412,79 @@ fn replace_line(state: &mut LineState, new: &str, prompt: &str) {
 }
 
 /// Redraw the line from the prompt onward.
+/// Builtin names offered in command position. Kept here rather than imported
+/// from `builtin` so completion stays independent of the dispatch table's
+/// shape; the two lists are small and both are exercised by tests.
+const COMPLETABLE_BUILTINS: &[&str] = &[
+    "alias", "bg", "cd", "exit", "export", "false", "fg", "history", "jobs", "kill", "pwd", "read",
+    "set", "source", "test", "true", "type", "unalias", "unset", "wait",
+];
+
+/// Tab handler: complete the word under the cursor.
+///
+/// One match is inserted outright. Several extend the word by their common
+/// prefix, and if that adds nothing, the list is printed and the line redrawn
+/// beneath it. No matches leaves the line untouched.
+fn complete_at_cursor(state: &mut LineState, prompt: &str) {
+    let line = match core::str::from_utf8(&state.buf) {
+        Ok(s) => String::from(s),
+        Err(_) => return,
+    };
+    let span = crate::complete::word_span(&line, state.cursor);
+    let word = &line[span.start..span.end];
+
+    // A word with a slash is a path even in command position, so `./x` and
+    // `/bin/l` complete the way they look.
+    let matches = if span.command_position && !word.contains('/') {
+        let path = "/bin:/sbin";
+        crate::complete::command_candidates(word, path, COMPLETABLE_BUILTINS)
+    } else {
+        crate::complete::path_candidates(word)
+    };
+
+    if matches.is_empty() {
+        return;
+    }
+
+    if matches.len() == 1 {
+        let mut replacement = matches[0].clone();
+        replacement.push(' ');
+        replace_word(state, span.start, span.end, &replacement, prompt);
+        return;
+    }
+
+    let prefix = crate::complete::common_prefix(&matches);
+    if prefix.len() > word.len() {
+        replace_word(state, span.start, span.end, &prefix, prompt);
+        return;
+    }
+
+    // Ambiguous and no further prefix to add: show the options.
+    let _ = libc_lite::write(1, b"\n");
+    for m in &matches {
+        let _ = libc_lite::write(1, m.as_bytes());
+        let _ = libc_lite::write(1, b"  ");
+    }
+    let _ = libc_lite::write(1, b"\n");
+    refresh_line(state, prompt);
+}
+
+/// Replace bytes [start, end) of the line with `replacement`, leaving the
+/// cursor just past it.
+fn replace_word(state: &mut LineState, start: usize, end: usize, replacement: &str, prompt: &str) {
+    let mut next: Vec<u8> = Vec::with_capacity(state.buf.len() + replacement.len());
+    next.extend_from_slice(&state.buf[..start]);
+    next.extend_from_slice(replacement.as_bytes());
+    next.extend_from_slice(&state.buf[end..]);
+
+    if next.len() >= MAX_LINE {
+        return;
+    }
+    state.buf = next;
+    state.cursor = start + replacement.len();
+    refresh_line(state, prompt);
+}
+
 fn refresh_line(state: &LineState, prompt: &str) {
     // Move cursor to start of line (after prompt)
     // \r → beginning of line, then print prompt + buffer + clear to EOL
