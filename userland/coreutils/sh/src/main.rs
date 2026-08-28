@@ -20,6 +20,7 @@ use racsh::exec;
 use racsh::expand::Env;
 use racsh::lexer::Lexer;
 use racsh::parser::Parser;
+use racsh::prompt::{expand_prompt, PromptContext};
 use racsh::readline::{self, History};
 
 /// Decode argv bytes into an owned String (lossy: invalid UTF-8 → empty).
@@ -148,15 +149,17 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     }
 
     // No operands → interactive REPL.
+    let hist_path = readline::history_path(env.get("HOME"));
     let mut history = History::new();
+    history.load_file(&hist_path);
 
     let _ = libc_lite::write(1, b"racsh ");
     let _ = libc_lite::write(1, racsh::VERSION.as_bytes());
     let _ = libc_lite::write(1, b"\n");
 
     loop {
-        let prompt = env.get("PS1").unwrap_or("$ ");
-        let line = match readline::readline(prompt, &history) {
+        let prompt = prompt_for(&env);
+        let line = match readline::readline(&prompt, &history) {
             Some(line) => line,
             None => {
                 let _ = libc_lite::write(1, b"\nexit\n");
@@ -170,8 +173,82 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         }
 
         history.push(trimmed);
+        // Save per line rather than at exit: an interactive shell is usually
+        // ended by closing the terminal or a reboot, neither of which unwinds
+        // to the bottom of this loop.
+        history.save_file(&hist_path);
+
+        // `history` is handled here rather than in racsh::builtin because the
+        // list is REPL state, not process state -- exec_simple has no access
+        // to it. The cost is that it only works as a whole command typed at
+        // the prompt, not inside a pipeline.
+        if trimmed == "history" || trimmed == "history -c" {
+            if trimmed.ends_with("-c") {
+                history = History::new();
+                history.save_file(&hist_path);
+            } else {
+                print_history(&history);
+            }
+            env.last_status = 0;
+            continue;
+        }
+
         run_source(trimmed, &mut env);
     }
 
+    history.save_file(&hist_path);
     env.last_status
+}
+
+/// Print history one entry per line, numbered from 1, the way `history` does.
+fn print_history(history: &History) {
+    for (i, entry) in history.iter().enumerate() {
+        let mut line = String::new();
+        push_num(&mut line, i + 1);
+        line.push(' ');
+        line.push(' ');
+        line.push_str(entry);
+        line.push('\n');
+        let _ = libc_lite::write(1, line.as_bytes());
+    }
+}
+
+fn push_num(out: &mut String, mut n: usize) {
+    if n == 0 {
+        out.push('0');
+        return;
+    }
+    let mut digits = [0u8; 20];
+    let mut i = 0;
+    while n > 0 {
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        out.push(digits[i] as char);
+    }
+}
+
+/// Build the prompt: PS1 with its backslash escapes expanded against the live
+/// session (uid, cwd, ...). Falls back to a plain "$ " if PS1 is unset.
+fn prompt_for(env: &Env) -> String {
+    let template = env.get("PS1").unwrap_or("$ ");
+    let uid = libc_lite::getuid() as u32;
+
+    let mut cwd_buf = [0u8; 256];
+    let cwd = match libc_lite::getcwd(&mut cwd_buf) {
+        Ok(n) => core::str::from_utf8(&cwd_buf[..n]).unwrap_or("/"),
+        Err(_) => "/",
+    };
+
+    let ctx = PromptContext {
+        user: env.get("USER").unwrap_or("root"),
+        host: env.get("HOSTNAME").unwrap_or("racos"),
+        cwd,
+        home: env.get("HOME").unwrap_or("/"),
+        uid,
+    };
+    expand_prompt(template, &ctx)
 }
