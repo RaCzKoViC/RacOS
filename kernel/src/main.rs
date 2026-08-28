@@ -336,6 +336,40 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     if let Some(sda) = drivers::block::find("sda") {
         match vfs::racfs::Racfs::open_or_format(sda) {
             Ok(racfs) => {
+                // Consistency check before anything writes to it (v0.3 §3.2).
+                // Read-only: it reports and lets the boot continue. Refusing
+                // to mount a damaged disk would strand the one shell that
+                // could repair it, and the damage classes differ enough in
+                // severity that a blanket refusal would be wrong.
+                match racfs.check() {
+                    Ok(r) if r.is_clean() => {
+                        serial::serial_println!("[  0.000368] RACFS sda: fsck clean")
+                    }
+                    Ok(r) => {
+                        serial::serial_println!(
+                            "[  0.000368] RACFS sda: fsck found leaked={} unallocated_in_use={} doubly_claimed={} dangling={} out_of_range={} sb_drift={}",
+                            r.leaked_blocks,
+                            r.unallocated_in_use,
+                            r.doubly_claimed,
+                            r.dangling_entries,
+                            r.out_of_range_entries,
+                            r.superblock_free_blocks_drift,
+                        );
+                        if r.is_dangerous() {
+                            // ASCII only: the serial console and the
+                            // framebuffer both emit bytes verbatim, so a
+                            // multi-byte dash arrives as mojibake.
+                            serial::serial_println!(
+                                "[  0.000368] RACFS sda: WARNING - blocks are shared or unallocated-but-used; writes may corrupt existing files. Consider `umount /mnt` then `mkfs.racfs sda`."
+                            );
+                        }
+                    }
+                    Err(e) => serial::serial_println!(
+                        "[  0.000368] RACFS sda: fsck could not run: {:?}",
+                        e
+                    ),
+                }
+
                 // Run persistence test against the on-disk FS before handing
                 // it off to the mount table.
                 vfs::racfs::persistence_test(&racfs, "sda");
