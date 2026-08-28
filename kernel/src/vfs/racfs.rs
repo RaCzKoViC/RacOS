@@ -68,6 +68,52 @@ struct Superblock {
     _pad: [u8; 512 - 40],
 }
 
+/// What a consistency check found. Counts rather than a verdict, so the
+/// caller decides whether to warn, repair, or refuse to mount.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct FsckReport {
+    /// Blocks marked used in the bitmap that no live inode references.
+    /// Wasted space, but safe: nothing will overwrite live data.
+    pub leaked_blocks: u32,
+    /// Blocks a live inode references but the bitmap calls free. Dangerous —
+    /// the allocator will hand them out again and corrupt the file that
+    /// already owns them.
+    pub unallocated_in_use: u32,
+    /// Blocks claimed by more than one inode. Also dangerous, and not
+    /// repairable without deciding which owner is right.
+    pub doubly_claimed: u32,
+    /// Directory entries pointing at a free inode slot.
+    pub dangling_entries: u32,
+    /// Directory entries whose inode number is out of range.
+    pub out_of_range_entries: u32,
+    /// Superblock `free_blocks` minus what the bitmap actually says.
+    ///
+    /// Note this counts only blocks the bitmap can describe. The bitmap is a
+    /// single sector, so on a device with more than `SECTOR_SIZE * 8` data
+    /// blocks the superblock's figure legitimately exceeds it — on a 16 MiB
+    /// disk that is 4096 usable blocks out of 32734. Reaching the rest needs
+    /// the multi-sector bitmap from ROADMAP §3.2's allocator item.
+    pub superblock_free_blocks_drift: i64,
+}
+
+impl FsckReport {
+    /// Nothing at all was wrong.
+    pub fn is_clean(&self) -> bool {
+        self.leaked_blocks == 0
+            && self.unallocated_in_use == 0
+            && self.doubly_claimed == 0
+            && self.dangling_entries == 0
+            && self.out_of_range_entries == 0
+            && self.superblock_free_blocks_drift == 0
+    }
+
+    /// Damage that can corrupt live data if the filesystem is used as-is.
+    /// Leaked blocks and superblock drift are untidy but safe; these are not.
+    pub fn is_dangerous(&self) -> bool {
+        self.unallocated_in_use > 0 || self.doubly_claimed > 0
+    }
+}
+
 /// On-disk inode (128 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -417,6 +463,125 @@ impl Racfs {
         self.cache_mut()
             .write_sector(sector, &buf)
             .map_err(|_| VfsError::IoError)
+    }
+
+    /// Walk the filesystem and compare what the inodes claim against what the
+    /// bitmap and superblock say (ROADMAP v0.3 §3.2).
+    ///
+    /// Read-only: it reports, it does not repair. Repair means choosing an
+    /// owner for a doubly-claimed block, and that choice belongs to whoever
+    /// can see which file matters — not to a boot-time routine.
+    ///
+    /// The block allocator is a linear bitmap scan, so an inconsistency here
+    /// is not academic: a block the bitmap calls free while an inode still
+    /// uses it *will* be handed out again, and the two files will scribble
+    /// over each other.
+    pub fn check(&self) -> VfsResult<FsckReport> {
+        let sb = *self.sb();
+        let total_blocks = sb.data_block_count as usize;
+        let mut report = FsckReport::default();
+
+        // Per-block reference count from the inode side. u8 saturating: any
+        // count above 1 is already "doubly claimed", the exact number does
+        // not change the verdict.
+        let mut refs: Vec<u8> = alloc::vec![0u8; total_blocks];
+
+        for ino in 0..sb.inode_count {
+            let di = self.read_inode(ino)?;
+            if di.itype == ITYPE_FREE {
+                continue;
+            }
+
+            for slot in 0..DIRECT_BLOCKS {
+                let block = di.direct[slot];
+                if block == 0 {
+                    continue; // 0 is the "no block" sentinel, not block zero
+                }
+                // Data blocks are 1-based on disk.
+                let idx = (block - 1) as usize;
+                if idx >= total_blocks {
+                    // A block pointer past the end of the device: count it
+                    // with the doubly-claimed group, since it is the same
+                    // class of "this inode's block list is not trustworthy".
+                    report.doubly_claimed += 1;
+                    continue;
+                }
+                refs[idx] = refs[idx].saturating_add(1);
+                if refs[idx] == 2 {
+                    report.doubly_claimed += 1;
+                }
+            }
+
+            // Directory entries must point at inodes that are in range and
+            // actually allocated.
+            if di.itype == ITYPE_DIR {
+                for i in 0..di.dir_entry_count {
+                    let de = match self.read_direntry(&di, i) {
+                        Ok(d) => d,
+                        // An unreadable entry means the directory's block
+                        // list is already broken; the block-level counts
+                        // above have recorded that.
+                        Err(_) => break,
+                    };
+                    if de.name_len == 0 {
+                        continue;
+                    }
+                    if de.ino >= sb.inode_count {
+                        report.out_of_range_entries += 1;
+                        continue;
+                    }
+                    if self.read_inode(de.ino)?.itype == ITYPE_FREE {
+                        report.dangling_entries += 1;
+                    }
+                }
+            }
+        }
+
+        // Now the bitmap side.
+        let mut bitmap = [0u8; SECTOR_SIZE];
+        self.cache_mut()
+            .read_sector(sb.bitmap_start as u64, &mut bitmap)
+            .map_err(|_| VfsError::IoError)?;
+
+        // The allocation bitmap is a single sector, so it can only describe
+        // SECTOR_SIZE * 8 blocks however large the device is. `alloc_block`
+        // scans exactly that range, so blocks beyond it are simply never
+        // handed out — see FsckReport's docs and ROADMAP §3.2's allocator
+        // item. Comparing past this point would read off the end of `bitmap`.
+        let bitmap_capacity = SECTOR_SIZE * 8;
+        let tracked = total_blocks.min(bitmap_capacity);
+
+        let mut used_per_bitmap: i64 = 0;
+        for idx in 0..tracked {
+            let marked_used = bitmap[idx / 8] & (1 << (idx % 8)) != 0;
+            let referenced = refs[idx] > 0;
+            match (marked_used, referenced) {
+                (true, false) => report.leaked_blocks += 1,
+                (false, true) => report.unallocated_in_use += 1,
+                _ => {}
+            }
+            if marked_used {
+                used_per_bitmap += 1;
+            }
+        }
+
+        // A reference to a block the bitmap cannot even describe means the
+        // inode points somewhere the allocator could never have given it.
+        for idx in tracked..total_blocks {
+            if refs[idx] > 0 {
+                report.unallocated_in_use += 1;
+            }
+        }
+
+        // Compare *used* counts, not free ones. The superblock's free_blocks
+        // covers the whole device including blocks the single-sector bitmap
+        // cannot describe, so subtracting the two free figures would report a
+        // huge drift on a perfectly healthy disk. Allocation only ever happens
+        // inside the tracked range, so the used counts are directly
+        // comparable.
+        let used_per_superblock = total_blocks as i64 - sb.free_blocks as i64;
+        report.superblock_free_blocks_drift = used_per_superblock - used_per_bitmap;
+        Ok(report)
     }
 
     /// Allocate a free inode. Returns inode number.
