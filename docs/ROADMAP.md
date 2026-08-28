@@ -282,9 +282,12 @@ The next "system becomes a platform" milestone:
 
 Small, known issues that don't fit a milestone but should stay visible:
 
-- **racsh `$(...)` edge case** — script with leading keyword (`END`, …)
-  inside `$(...)` substitution fails with `sh: cannot open script:`
-  status 127. Re-enables the dropped awk END smoke once fixed.
+- ~~**racsh `$(...)` edge case**~~ — **FIXED**. Was never a racsh bug:
+  `prepare_user_stack` wrote the envp NULL terminator one slot past the
+  reserved argc/argv/envp block, clobbering the argv string data directly
+  above it. Whether it corrupted anything depended on total argv length,
+  which is why it looked like "only scripts with a leading `END`". The
+  dropped awk END smoke is re-enabled in `racos-test`.
 - **`try_deliver_user_handler:510` flaky panic** — `gs:[0x10]` syscall-
   frame pointer is occasionally unaligned. Documented in the
   `racos-ci-flakiness` memory. Fix the alignment invariant in

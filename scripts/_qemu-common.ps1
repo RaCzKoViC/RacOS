@@ -46,19 +46,36 @@ function Resolve-SpacelessPath {
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($Path.ToLowerInvariant())
     $hash = ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').Substring(0, 8)
     $volume = [System.IO.Path]::GetPathRoot($Path).TrimEnd('\')   # e.g. "D:"
-    $link = "$volume\racos_qemu_$hash"
 
-    if (Test-Path -LiteralPath $link) {
-        $item = Get-Item -LiteralPath $link -Force
-        $isReparse = ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
-        if (-not $isReparse) {
-            throw "Resolve-SpacelessPath: '$link' exists but is not a junction; refusing to touch it."
+    # Candidate junction locations, in preference order. The volume root keeps
+    # the path shortest, but a drive root is frequently not user-writable (a
+    # default Windows ACL grants plain users read+execute only), so fall back
+    # to TEMP, which always is. Without the fallback every QEMU script dies
+    # with "Odmowa dostepu / Access denied" on such a machine.
+    $candidates = @("$volume\racos_qemu_$hash")
+    if ($env:TEMP) { $candidates += (Join-Path $env:TEMP "racos_qemu_$hash") }
+
+    $lastError = $null
+    foreach ($link in $candidates) {
+        if (Test-Path -LiteralPath $link) {
+            $item = Get-Item -LiteralPath $link -Force
+            $isReparse = ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+            if (-not $isReparse) {
+                throw "Resolve-SpacelessPath: '$link' exists but is not a junction; refusing to touch it."
+            }
+            # Same hash => same target, safe to reuse as-is.
+            return $link
         }
-        # Same hash => same target, safe to reuse as-is.
-    } else {
-        New-Item -ItemType Junction -Path $link -Target $Path | Out-Null
+        try {
+            New-Item -ItemType Junction -Path $link -Target $Path -ErrorAction Stop | Out-Null
+            return $link
+        } catch {
+            $lastError = $_
+        }
     }
-    return $link
+
+    throw ("Resolve-SpacelessPath: could not create a space-free junction for '$Path'. " +
+           "Tried: " + ($candidates -join ', ') + ". Last error: $lastError")
 }
 
 function Find-QemuPaths {

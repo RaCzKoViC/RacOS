@@ -76,6 +76,15 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         }
     }
 
+    // A final line with no trailing newline never hit the `\n` branch above,
+    // so it is still sitting in `line`. Without this it is silently dropped —
+    // invisible with `echo` (which appends \n) but wrong for any file whose
+    // last line is unterminated.
+    if line_len > 0 && buf_contains(&line[..line_len], pattern, case_insensitive) {
+        let _ = libc_lite::write(1, &line[..line_len]);
+        let _ = libc_lite::write(1, b"\n");
+    }
+
     if fd != 0 {
         let _ = libc_lite::close(fd);
     }
@@ -83,11 +92,30 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 }
 
 fn buf_contains(haystack: &[u8], needle: &[u8], case_insensitive: bool) -> bool {
-    // Simple regex matching: * matches any sequence, ? matches any char
-    simple_regex_match(haystack, needle, case_insensitive)
+    // grep selects a line when the pattern occurs ANYWHERE in it, so try the
+    // matcher at every starting offset. `match_at` alone is anchored at the
+    // offset it is given: it bails out on the first literal mismatch and never
+    // retries further along, which made `grep ma` miss "ala ma kota" while
+    // `grep ala` matched — a prefix search, not a substring search.
+    if needle.is_empty() {
+        return true;
+    }
+    // `..=len` (not `..len`) so a pattern that can match empty — e.g. "*" —
+    // still matches at the end of the line, and empty haystacks are covered.
+    for start in 0..=haystack.len() {
+        if match_at(&haystack[start..], needle, case_insensitive) {
+            return true;
+        }
+    }
+    false
 }
 
-fn simple_regex_match(haystack: &[u8], pattern: &[u8], case_insensitive: bool) -> bool {
+/// Match `pattern` against the *beginning* of `haystack`.
+///
+/// Supports the two wildcards grep's MVP understands: `*` (zero or more of any
+/// char) and `?` (exactly one char). The pattern must be fully consumed; the
+/// haystack need not be.
+fn match_at(haystack: &[u8], pattern: &[u8], case_insensitive: bool) -> bool {
     if pattern.is_empty() {
         return true;
     }

@@ -12,7 +12,92 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 ## [Unreleased]
 
 ### Added
-- Nothing yet.
+
+- **SIGUSR1 (10) / SIGUSR2 (12)** in the kernel's `Signal` enum and
+  `Signal::from_u8`. They carry no kernel semantics (default action is
+  Terminate, via the existing catch-all) but must exist so `sys_kill`
+  accepts what `sys_sigaction` already allowed.
+- **awk END-block smoke** re-enabled in `racos-test` (`T33-AWK-OK` now
+  covers five cases instead of four). It was dropped while the argv
+  corruption below made any `$(...)` script fail intermittently.
+
+### Fixed
+
+- **A corrupt racfs directory entry halted the kernel.**
+  `direntry_from_bytes` clamped how many name bytes it *copied* out of a disk
+  sector but stored the raw, unclamped `name_len` in the returned struct. Disk
+  content is untrusted — a torn write or stale slot can put anything in that
+  byte — so all three consumers (`dir_lookup`, `dir_remove_entry`, `readdir`)
+  could slice `name[..name_len]` past the 56-byte array and take the whole
+  system down: `KERNEL PANIC at racfs.rs:687, range end index 111 out of range
+  for slice of length 56`, triggered by nothing more exotic than
+  `test -f /mnt/notes.txt`. The decoder now clamps `name_len` itself, so the
+  invariant `name_len <= name.len()` holds for every in-memory entry and all
+  consumers are safe by construction. `dir_add_entry` likewise records what
+  actually fits instead of `name.len() as u8`, which wrapped past 255.
+  Verified by replaying the exact failing sequence against the damaged image:
+  the guest now boots, reports the bad entries as filesystem errors, and stays
+  alive.
+- **`readdir` listed unusable directory slots.** An entry with a zero-length
+  name, or one whose inode cannot be read, is now skipped instead of being
+  emitted as a blank row or aborting the whole listing on `?`.
+- **LAPIC timer IRQ corrupted the syscall frame pointer (GS-base aliasing).**
+  `lapic_timer_handler` did `inc qword ptr gs:[16]` to bump its per-CPU
+  `tick_count`. But `IA32_GS_BASE` only points at a `PerCpu` slot on the
+  idle/boot path — during a syscall `swapgs` makes it
+  `&syscall::entry::PER_CPU`, whose offset 16 is `syscall_frame_ptr`, and in
+  user mode `enter_ring3` sets it to 0. So a timer tick taken mid-syscall
+  incremented the saved syscall-frame pointer, and a tick taken in user mode
+  wrote to absolute address `0x10`.
+  This is the root cause of the long-standing flaky
+  `try_deliver_user_handler:510` "misaligned pointer dereference" panic
+  tracked in ROADMAP §6 — the pointer wasn't *unaligned*, it was a tick
+  counter. When the corrupted value happened to be 8-aligned the panic did
+  not fire and the kernel patched an arbitrary address instead.
+  The handler now finds its slot with `percpu::peek(lapic::current_apic_id())`,
+  which is correct in all three GS states, and `OFFSET_TICK_COUNT` is gone so
+  the pattern can't be reintroduced. Both `try_deliver_user_handler` and
+  `sys_sigreturn` additionally reject a non-8-aligned frame pointer instead
+  of dereferencing it.
+- **argv/envp corruption in `prepare_user_stack`** (`kernel/src/task/
+  process.rs`). The envp pointer array was written one slot too high:
+  entries went to `rsp + 8 + 8*(argc+1+i+1)` and the NULL terminator to
+  `rsp + 8 + 8*(argc+1+envc+1)`, while libc-lite's `_start` reads
+  `envp = argv + (argc+1)*8`. Two consequences:
+  - userland saw an uninitialised slot as `envp[0]`, so no process ever
+    received an environment (`/bin/env` printed nothing, `T33-ENV-OK`
+    never fired);
+  - the NULL write landed one slot *past* the reserved block, on top of
+    the argv string data stacked directly above it. Whether it corrupted
+    anything depended on the 16-byte alignment gap, i.e. on total argv
+    length — which is what made `sh -c` fail as `sh: cannot open script:`
+    for some scripts and not others. This was the long-standing
+    ROADMAP §6 "racsh `$(...)` edge case"; it was never a racsh bug.
+- **`sys_kill` rejected SIGUSR1/SIGUSR2 that `sys_sigaction` accepted.**
+  `sys_sigaction` validates only `1..=31` minus SIGKILL/SIGSTOP, so a
+  handler could be installed for signal 10, but `Signal::from_u8(10)`
+  returned `None` and `sys_kill` answered `EINVAL`. Unblocks
+  `PHASE21-USER-HANDLER-REENTRANT-OK`.
+- **`grep` matched a prefix, not a substring.** `simple_regex_match`
+  (renamed `match_at`) anchors at offset 0 and returns on the first
+  literal mismatch without retrying later offsets, so `grep ma` missed
+  `ala ma kota` while `grep ala` matched. `buf_contains` now scans every
+  starting offset, which is what its name always promised.
+- **`grep` dropped a final line with no trailing newline.** The line was
+  only tested when a `\n` arrived, so an unterminated last line was
+  silently discarded.
+- **racsh rejected reserved words used as `case` patterns.**
+  `case $x in done) ...;; esac` failed with `parse error: Expected word, got
+  Done`. POSIX only recognises reserved words in command-word position;
+  elsewhere — notably a case pattern — they are ordinary words. The parser
+  now maps keyword tokens back to literals via a dedicated
+  `parse_pattern_word`, kept deliberately narrow so a `for` word list still
+  terminates at `do`. Covered by two new host tests
+  (`case_patterns_accept_reserved_words`,
+  `reserved_words_still_reserved_in_command_position`).
+
+With these, in-guest `racos-test` goes from **120 passed / 9 failed** to
+**130 passed / 0 failed**, and all 20 smoke markers fire.
 
 ## [0.1.0] — 2026-06-16
 

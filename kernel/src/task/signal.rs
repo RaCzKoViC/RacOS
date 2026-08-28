@@ -12,6 +12,11 @@
 //   SIGKILL (15) — unconditional kill (cannot be caught)
 //   SIGCHLD (17) — child process state change
 //   SIGWINCH(28) — terminal window resize
+//
+// SIGUSR1 (10) / SIGUSR2 (12) carry no kernel meaning but must exist here:
+// `sys_sigaction` accepts any number in 1..=31 (minus SIGKILL/SIGSTOP), so a
+// process can install a handler for them. If `from_u8` doesn't know them,
+// `sys_kill` rejects the very signal whose handler was just accepted.
 
 /// Signal numbers (POSIX-compatible).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +30,9 @@ pub enum Signal {
     SIGABRT = 6,
     SIGFPE = 8,
     SIGKILL = 9,
+    SIGUSR1 = 10,
     SIGSEGV = 11,
+    SIGUSR2 = 12,
     SIGPIPE = 13,
     SIGALRM = 14,
     SIGTERM = 15,
@@ -50,7 +57,9 @@ impl Signal {
             6 => Some(Self::SIGABRT),
             8 => Some(Self::SIGFPE),
             9 => Some(Self::SIGKILL),
+            10 => Some(Self::SIGUSR1),
             11 => Some(Self::SIGSEGV),
+            12 => Some(Self::SIGUSR2),
             13 => Some(Self::SIGPIPE),
             14 => Some(Self::SIGALRM),
             15 => Some(Self::SIGTERM),

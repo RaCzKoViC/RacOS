@@ -52,10 +52,14 @@ impl PerCpu {
     }
 }
 
-/// Byte offset of `tick_count` inside `PerCpu` for the LAPIC timer IRQ
-/// handler. We rely on `#[repr(C)]` ordering: self_ptr (8) + apic_id (4) +
-/// self_check (4) = 16. AtomicU64 is naturally 8-aligned so no padding.
-pub const OFFSET_TICK_COUNT: usize = 16;
+// NOTE: there used to be a `pub const OFFSET_TICK_COUNT: usize = 16` here so
+// the LAPIC timer IRQ could do `inc qword ptr gs:[16]`. That was unsound:
+// `IA32_GS_BASE` only points at a `PerCpu` slot on the idle/boot path. During
+// a syscall it points at `syscall::entry::PerCpuData` (whose offset 16 is
+// `syscall_frame_ptr`), and in user mode `enter_ring3` sets it to 0. The IRQ
+// handler now locates its slot with `peek(lapic::current_apic_id())`, which is
+// valid in every context. Do not reintroduce a GS-relative offset for fields
+// that IRQ handlers touch — see `idt::lapic_timer_handler`.
 
 /// One slot per supported CPU. Wrapped in UnsafeCell because each CPU
 /// writes *only* its own slot, and only after init has placed the address

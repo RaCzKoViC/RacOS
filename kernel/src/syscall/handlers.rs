@@ -505,8 +505,22 @@ fn try_deliver_user_handler(
     if frame_ptr == 0 {
         return false;
     }
+    // Defence in depth: syscall_entry always stores an 8-aligned kernel-stack
+    // address here, so anything else means the slot was clobbered. Skipping
+    // delivery degrades gracefully; dereferencing would either panic on the
+    // alignment check or, when the bad value happened to be 8-aligned,
+    // silently scribble over unrelated kernel memory. A GS-base aliasing bug
+    // used to corrupt exactly this slot — see `idt::lapic_timer_handler`.
+    if frame_ptr % core::mem::align_of::<SyscallFrame>() as u64 != 0 {
+        crate::serial::serial_println!(
+            "[ SIGNAL ] refusing misaligned syscall frame ptr 0x{:X}",
+            frame_ptr
+        );
+        return false;
+    }
     // SAFETY: frame_ptr points at the saved SyscallFrame on the kernel stack;
-    // we're the only writer because the dispatcher hasn't returned yet.
+    // we're the only writer because the dispatcher hasn't returned yet. The
+    // alignment guard above rejects a clobbered slot.
     let frame = unsafe { &mut *(frame_ptr as *mut SyscallFrame) };
 
     let user_rsp = frame.user_rsp;
@@ -2313,9 +2327,16 @@ pub fn sys_sigreturn() -> SyscallResult {
     if frame_ptr == 0 {
         return Err(SyscallError::EFAULT);
     }
+    // Same guard as try_deliver_user_handler: the entry stub only ever stores
+    // an 8-aligned kernel-stack address, so a misaligned value means the slot
+    // was clobbered and dereferencing it would corrupt kernel memory.
+    if frame_ptr % core::mem::align_of::<SyscallFrame>() as u64 != 0 {
+        return Err(SyscallError::EFAULT);
+    }
     // SAFETY: frame_ptr came from PER_CPU gs:[0x10] and is the kernel-side
     // SyscallFrame the entry stub pushed; the lifetime is the rest of this
-    // call, which still runs inside the syscall context.
+    // call, which still runs inside the syscall context. The alignment guard
+    // above rejects a clobbered slot.
     let frame = unsafe { &mut *(frame_ptr as *mut SyscallFrame) };
 
     let usf_addr = frame.user_rsp;

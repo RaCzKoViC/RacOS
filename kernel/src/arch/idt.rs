@@ -235,22 +235,31 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: &InterruptStackFrame) {
 
 /// Per-CPU LAPIC timer IRQ handler (vector 0x40, see G.4.1).
 ///
-/// Bumps the running CPU's `tick_count` via its own GS base — single
-/// memory bus operation, no scheduler call, no shared lock. Every CPU
-/// runs this same handler against its own PerCpu slot, so there's no
-/// cross-CPU contention even when N CPUs all fire the timer at once.
+/// Bumps the running CPU's `tick_count`, located by LAPIC ID.
+///
+/// This deliberately does NOT go through the GS base. A timer IRQ can
+/// interrupt kernel code in three different GS states, and only one of them
+/// has `IA32_GS_BASE` pointing at this CPU's `PerCpu` slot:
+///
+///   - idle/boot path: GS_BASE = &AREAS[cpu]        — the intended target
+///   - mid-syscall (after `swapgs`): GS_BASE = &syscall::entry::PER_CPU
+///   - user mode: GS_BASE = 0, set by `enter_ring3`
+///
+/// The old implementation did `inc qword ptr gs:[16]` unconditionally.
+/// `PerCpuData::syscall_frame_ptr` also lives at offset 16, so a tick that
+/// landed mid-syscall incremented the saved syscall-frame pointer instead —
+/// which `try_deliver_user_handler` then dereferenced, producing the
+/// long-standing flaky "misaligned pointer dereference" panic at
+/// `handlers.rs:510` (ROADMAP §6). A tick taken in user mode wrote to
+/// absolute address 0x10 instead. Looking the slot up by LAPIC ID is
+/// correct in all three states.
 extern "x86-interrupt" fn lapic_timer_handler(_stack_frame: &InterruptStackFrame) {
-    // Bump this CPU's own counter via GS base. No `lock` prefix: only the
-    // owning CPU writes its tick_count, so an atomic RMW is overkill and
-    // we want a single non-locked memory op in the IRQ fast path.
-    // SAFETY: GS base was set by arch::percpu::init_for_this_cpu to point
-    // at this CPU's PerCpu slot; OFFSET_TICK_COUNT is within that slot.
-    unsafe {
-        core::arch::asm!(
-            "inc qword ptr gs:[{off}]",
-            off = const crate::arch::percpu::OFFSET_TICK_COUNT,
-            options(nostack, preserves_flags),
-        );
+    let apic_id = crate::arch::lapic::current_apic_id();
+    if let Some(slot) = crate::arch::percpu::peek(apic_id) {
+        // Relaxed: only the owning CPU ever increments its own counter;
+        // readers (smoke, /proc/cpuinfo) just need eventual visibility.
+        slot.tick_count
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
     crate::arch::lapic::eoi();
 }

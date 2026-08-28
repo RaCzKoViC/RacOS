@@ -76,6 +76,49 @@ fn parser_builds_case_ast_with_multiple_arms() {
 }
 
 #[test]
+fn case_patterns_accept_reserved_words() {
+    // POSIX only treats `done`/`in`/`do`/... as reserved in command-word
+    // position. In a case pattern they are ordinary words. racsh used to
+    // reject this with "Expected word, got Done".
+    fn lit(word: &Word) -> &str {
+        match word.parts.as_slice() {
+            [WordPart::Literal(value)] => value.as_str(),
+            other => panic!("expected literal word, got {:?}", other),
+        }
+    }
+
+    match parse("case $x in done) echo d;; in|do) echo k;; *) echo other;; esac") {
+        AstNode::Program { commands } => match &commands[0] {
+            AstNode::Case { items, .. } => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(lit(&items[0].patterns[0]), "done");
+                assert_eq!(items[1].patterns.len(), 2, "in|do is two patterns");
+                assert_eq!(lit(&items[1].patterns[0]), "in");
+                assert_eq!(lit(&items[1].patterns[1]), "do");
+            }
+            other => panic!("expected Case, got {:?}", other),
+        },
+        other => panic!("expected Program, got {:?}", other),
+    }
+}
+
+#[test]
+fn reserved_words_still_reserved_in_command_position() {
+    // The keyword relaxation must stay confined to case patterns: a `for`
+    // word list must still stop at `do`, not swallow it as a list element.
+    match parse("for x in a b c; do echo $x; done") {
+        AstNode::Program { commands } => match &commands[0] {
+            AstNode::For { words, .. } => {
+                let words = words.as_ref().expect("explicit `in` word list");
+                assert_eq!(words.len(), 3, "do must terminate the word list");
+            }
+            other => panic!("expected For, got {:?}", other),
+        },
+        other => panic!("expected Program, got {:?}", other),
+    }
+}
+
+#[test]
 fn parser_builds_function_def() {
     match parse("greet() { echo hi; }") {
         AstNode::Program { commands } => {
