@@ -11,6 +11,42 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Added — v0.2 §2.2 (racsh UX)
+
+The shell half of the "usable shell" milestone. `docs/ROADMAP.md` §2.2 is now
+closed; §2.1 (`free`, `ln`, `rmdir`, `du`) and §2.3 (network tools) remain.
+
+- **Aliases.** `alias`, `alias NAME`, `alias NAME=VALUE`, `unalias NAME...`
+  and `unalias -a`, stored sorted in `Env::aliases` and carried into command
+  substitution. Expansion happens at execution time in `exec_simple` rather
+  than at parse time as originally sketched — the parser has no `Env`, and
+  the command word is already resolved by then. A name expands at most once
+  per command, so the idiomatic `alias ls='ls --color'` terminates instead of
+  looping. Replacements split on whitespace, so quoting inside an alias body
+  does not survive; use a shell function for that. Smoke `T22-ALIAS-OK`.
+- **Tab completion** (`shell/src/complete.rs`). Command position offers
+  builtins plus every executable on `$PATH`; elsewhere it completes paths. A
+  word containing `/` is always path-completed, so `./x` and `/bin/l` behave
+  as they read. One match is inserted with a trailing space; several extend
+  the word by their common prefix; an ambiguous word that gains no prefix
+  prints the candidates and redraws the line. The decision logic and prefix
+  arithmetic are pure functions, host-tested; only candidate gathering
+  touches the filesystem.
+- **Persistent history.** `History::load_file` / `save_file`, capped at 1000
+  entries and rewritten in full after each line so the cap holds without a
+  seek. Path is `$HOME/.racsh_history`, falling back to
+  `/var/.racsh_history` because `/` is the read-only initramfs. Surviving a
+  reboot still waits on v0.3 §3.3. `history` and `history -c` are handled in
+  the REPL loop, not `racsh::builtin`, because the list is session state
+  `exec_simple` cannot reach — so they do not work inside a pipeline.
+- **Prompt escapes** (`shell/src/prompt.rs`). `\u`, `\h`, `\w`, `\W`, `\$`,
+  `\n`, `\\`. `\w` abbreviates `$HOME` to `~` on whole path components only,
+  so `/home/adam` is not mangled when HOME is `/home/ada`. An unknown escape
+  is emitted verbatim rather than swallowed, so a typo in PS1 is visible.
+
+26 new host tests — racsh 28 → 54, workspace 81 → 107 — plus the in-guest
+`T22-ALIAS-OK` smoke.
+
 ### Added
 
 - **SIGUSR1 (10) / SIGUSR2 (12)** in the kernel's `Signal` enum and

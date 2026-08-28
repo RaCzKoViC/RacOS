@@ -108,6 +108,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_signal_user_handler();
     test_signal_user_handler_reentrant_syscall();
     test_shell_control_flow();
+    test_shell_aliases();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
     test_rpkg_install_list_remove();
@@ -501,6 +502,43 @@ fn test_shell_control_flow() {
 /// the parent chain goes `racos-test → racsh (shell.service) → init (PID
 /// 1)`. The fallback bare-shell init also produces the same chain, but
 /// CI's unit-files-present initramfs ensures the engine path is taken.
+/// Smoke for racsh aliases (v0.2 §2.2). Covers definition, expansion with
+/// arguments appended, single-expansion of a self-referential alias, and
+/// removal via unalias.
+fn test_shell_aliases() {
+    println("\n[test] racsh aliases");
+
+    // A defined alias expands, and the caller's arguments follow it.
+    let a1 = shell_run(
+        b"alias greet='echo hello'; result=$(greet world); \
+          case $result in 'hello world') exit 0;; *) exit 1;; esac\0",
+    );
+    check!("alias expands with arguments appended", a1 == Some(0));
+
+    // A self-referential alias must expand exactly once, not loop.
+    let a2 = shell_run(b"alias echo='echo'; echo ok; exit 0\0");
+    check!("self-referential alias terminates", a2 == Some(0));
+
+    // unalias removes it: the name then resolves as an ordinary command,
+    // and a bogus one exits non-zero rather than expanding.
+    let a3 = shell_run(
+        b"alias tmpname='echo aliased'; unalias tmpname; \
+          tmpname 2>/dev/null; case $? in 0) exit 1;; *) exit 0;; esac\0",
+    );
+    check!("unalias removes the definition", a3 == Some(0));
+
+    // `alias` with no operands lists definitions in NAME='VALUE' form.
+    let a4 = shell_run(
+        b"alias zz='echo z'; result=$(alias); \
+          case $result in *\"zz='echo z'\"*) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("bare alias lists definitions", a4 == Some(0));
+
+    if a1 == Some(0) && a2 == Some(0) && a3 == Some(0) && a4 == Some(0) {
+        println("T22-ALIAS-OK");
+    }
+}
+
 fn test_init_engine_supervises_shell() {
     println("\n[test] init engine supervises shell");
 
