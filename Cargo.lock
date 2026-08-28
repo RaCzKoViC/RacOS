@@ -303,6 +303,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-nc"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-netloop"
 version = "0.1.0"
 dependencies = [
@@ -310,7 +317,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "racos-netstat"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
 name = "racos-od"
+version = "0.1.0"
+dependencies = [
+ "libc-lite",
+]
+
+[[package]]
+name = "racos-ping"
 version = "0.1.0"
 dependencies = [
  "libc-lite",

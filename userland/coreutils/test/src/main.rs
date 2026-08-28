@@ -111,6 +111,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_shell_aliases();
     test_v02_coreutils();
     test_hard_links();
+    test_network_tools();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
     test_rpkg_install_list_remove();
@@ -668,6 +669,119 @@ fn test_hard_links() {
         && l6 == Some(0)
     {
         println("T21-HARDLINK-OK");
+    }
+}
+
+/// Smoke for the v0.2 §2.3 network tools: ping (SYS_ICMP_ECHO) and nc.
+///
+/// Only the gateway is pinged. QEMU's slirp answers ICMP for itself but does
+/// not forward echo requests to the internet, so pinging an external host
+/// would assert on the emulator's limits rather than on RacOS.
+fn test_network_tools() {
+    println("\n[test] network tools: ping + nc");
+
+    // A reply from the gateway, with the conventional output shape.
+    let p1 = shell_run(
+        b"result=$(ping -c 1 -W 2000 10.0.2.2 | grep 'bytes from'); \
+          case $result in *'10.0.2.2'*) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("ping reports a reply from the gateway", p1 == Some(0));
+
+    // The statistics block is what scripts parse; keep its shape pinned.
+    let p2 = shell_run(
+        b"result=$(ping -c 2 -W 2000 10.0.2.2 | grep transmitted); \
+          case $result in *'2 packets transmitted, 2 received'*) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("ping summarises transmitted/received", p2 == Some(0));
+
+    // An address nothing answers for must time out and exit non-zero rather
+    // than hang -- the wait runs in the kernel with interrupts on, so a
+    // missing deadline would wedge the whole system.
+    let p3 = shell_run(
+        b"ping -c 1 -W 500 10.0.2.99 >/dev/null 2>/dev/null; \
+          case $? in 0) exit 1;; *) exit 0;; esac\0",
+    );
+    check!("unreachable ping times out and fails", p3 == Some(0));
+
+    // Bad usage is rejected, not silently accepted.
+    let p4 = shell_run(b"ping >/dev/null 2>/dev/null; case $? in 0) exit 1;; *) exit 0;; esac\0");
+    check!("ping with no host exits non-zero", p4 == Some(0));
+
+    let n1 = shell_run(b"nc >/dev/null 2>/dev/null; case $? in 0) exit 1;; *) exit 0;; esac\0");
+    check!("nc with no arguments exits non-zero", n1 == Some(0));
+
+    // /proc/net/tcp must exist and carry its header even with no connections.
+    let s1 = shell_run(
+        b"result=$(cat /proc/net/tcp | head -1); \
+          case $result in *proto*) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("/proc/net/tcp is readable", s1 == Some(0));
+
+    // netstat prints its own header and a count, and succeeds with no
+    // connections open.
+    let s2 = shell_run(
+        b"result=$(netstat -t | head -1); \
+          case $result in Proto*) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("netstat prints a header", s2 == Some(0));
+
+    let s3 = shell_run(
+        b"result=$(netstat | grep connection); \
+          case $result in *connection*) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("netstat summarises a connection count", s3 == Some(0));
+
+    // `head -1` / `tail -1` are the forms people actually type. They used to
+    // fall through to the FILE branch and be opened as a path.
+    let s4 = shell_run(
+        b"result=$(ls /bin | head -1); \
+          case $result in '') exit 1;; *) exit 0;; esac\0",
+    );
+    check!("head -N reads stdin instead of opening '-N'", s4 == Some(0));
+
+    let s5 = shell_run(
+        b"result=$(ls /bin | tail -1); \
+          case $result in '') exit 1;; *) exit 0;; esac\0",
+    );
+    check!("tail -N reads stdin instead of opening '-N'", s5 == Some(0));
+
+    // tail must return the LAST line, not the first: a backwards scan that
+    // counted the trailing newline used to emit nothing at all.
+    let s6 = shell_run(
+        b"result=$(echo one > /tmp/t3; echo two >> /tmp/t3; echo three >> /tmp/t3; \
+          tail -1 /tmp/t3); \
+          case $result in three) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("tail -1 returns the last line", s6 == Some(0));
+
+    let s7 = shell_run(
+        b"result=$(tail -2 /tmp/t3 | head -1); \
+          case $result in two) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("tail -2 returns the last two lines", s7 == Some(0));
+
+    // Connecting to a closed local port must fail cleanly.
+    let n2 = shell_run(
+        b"nc 127.0.0.1 9 >/dev/null 2>/dev/null; \
+          case $? in 0) exit 1;; *) exit 0;; esac\0",
+    );
+    check!("nc reports a refused connection", n2 == Some(0));
+
+    if p1 == Some(0)
+        && p2 == Some(0)
+        && p3 == Some(0)
+        && p4 == Some(0)
+        && n1 == Some(0)
+        && n2 == Some(0)
+        && s1 == Some(0)
+        && s2 == Some(0)
+        && s3 == Some(0)
+        && s4 == Some(0)
+        && s5 == Some(0)
+        && s6 == Some(0)
+        && s7 == Some(0)
+    {
+        println("T23-NETTOOLS-OK");
     }
 }
 

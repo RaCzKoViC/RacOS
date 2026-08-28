@@ -49,6 +49,11 @@ const INO_SELF: InodeNum = 7;
 const INO_MOUNTS: InodeNum = 8;
 const INO_DISKSTATS: InodeNum = 9;
 const INO_CACHESTATS: InodeNum = 10;
+/// `/proc/net` and its contents. Kept in the fixed low range with the other
+/// well-known inodes; PID inodes start well above it (see `pid_dir_ino`).
+const INO_NET: InodeNum = 11;
+const INO_NET_TCP: InodeNum = 12;
+const INO_NET_UDP: InodeNum = 13;
 
 fn pid_dir_ino(pid: u32) -> InodeNum {
     1000 + pid as u64 * 10
@@ -113,6 +118,7 @@ impl InodeOps for ProcRootInode {
             "mounts" => Ok(INO_MOUNTS),
             "diskstats" => Ok(INO_DISKSTATS),
             "cachestats" => Ok(INO_CACHESTATS),
+            "net" => Ok(INO_NET),
             _ => {
                 // Try to parse as PID
                 if let Ok(pid) = name.parse::<u32>() {
@@ -171,6 +177,11 @@ impl InodeOps for ProcRootInode {
             file_type: FileType::Regular,
         });
         entries.push(DirEntry {
+            name: String::from("net"),
+            ino: INO_NET,
+            file_type: FileType::Directory,
+        });
+        entries.push(DirEntry {
             name: String::from("cachestats"),
             ino: INO_CACHESTATS,
             file_type: FileType::Regular,
@@ -179,6 +190,51 @@ impl InodeOps for ProcRootInode {
         // We scan the scheduler for live tasks
         Ok(entries)
     }
+}
+
+// ── /proc/net ──────────────────────────────────────────
+
+/// Directory holding the per-protocol connection tables.
+struct ProcNetDirInode;
+
+impl InodeOps for ProcNetDirInode {
+    fn read(&self, _offset: u64, _buf: &mut [u8]) -> VfsResult<usize> {
+        Err(VfsError::IsADirectory)
+    }
+    fn write(&self, _offset: u64, _buf: &[u8]) -> VfsResult<usize> {
+        Err(VfsError::IsADirectory)
+    }
+    fn metadata(&self) -> VfsResult<InodeMetadata> {
+        let mut m = InodeMetadata::new(INO_NET, FileType::Directory);
+        m.mode = FileMode::new(0o555);
+        Ok(m)
+    }
+    fn lookup(&self, name: &str) -> VfsResult<InodeNum> {
+        match name {
+            "tcp" => Ok(INO_NET_TCP),
+            "udp" => Ok(INO_NET_UDP),
+            _ => Err(VfsError::NotFound),
+        }
+    }
+    fn readdir(&self) -> VfsResult<Vec<DirEntry>> {
+        Ok(alloc::vec![
+            DirEntry {
+                name: String::from("tcp"),
+                ino: INO_NET_TCP,
+                file_type: FileType::Regular,
+            },
+            DirEntry {
+                name: String::from("udp"),
+                ino: INO_NET_UDP,
+                file_type: FileType::Regular,
+            },
+        ])
+    }
+}
+
+/// `a.b.c.d:port`, the form netstat prints.
+fn fmt_endpoint(ip: &[u8; 4], port: u16) -> String {
+    format!("{}.{}.{}.{}:{}", ip[0], ip[1], ip[2], ip[3], port)
 }
 
 // ── System-wide files ──────────────────────────────────
@@ -285,6 +341,31 @@ impl ProcFileInode {
                     }
                 }
                 out
+            }
+            INO_NET_TCP => {
+                let mut out = String::from(
+                    "# proto local_address           remote_address          state        rx_queue\n",
+                );
+                for c in crate::net::tcp::snapshot() {
+                    out.push_str(&format!(
+                        "tcp   {:<23} {:<23} {:<12} {}\n",
+                        fmt_endpoint(&c.local_ip, c.local_port),
+                        fmt_endpoint(&c.remote_ip, c.remote_port),
+                        c.state.as_str(),
+                        c.rx_queued,
+                    ));
+                }
+                out
+            }
+            INO_NET_UDP => {
+                // UDP is connectionless here: the stack sends and matches
+                // replies by source port without keeping a socket table, so
+                // there is nothing per-connection to list. The header ships
+                // anyway, because a parser finding an empty file is clearer
+                // than one finding no file at all.
+                String::from(
+                    "# proto local_address           remote_address          state        rx_queue\n",
+                )
             }
             INO_CACHESTATS => {
                 let mut out =
@@ -502,7 +583,10 @@ impl Filesystem for ProcFilesystem {
         match ino {
             INO_ROOT => Ok(Arc::new(ProcRootInode)),
             INO_UPTIME | INO_MEMINFO | INO_VERSION | INO_CPUINFO | INO_STAT | INO_LOADAVG
-            | INO_MOUNTS | INO_DISKSTATS | INO_CACHESTATS => Ok(Arc::new(ProcFileInode { ino })),
+            | INO_MOUNTS | INO_DISKSTATS | INO_CACHESTATS | INO_NET_TCP | INO_NET_UDP => {
+                Ok(Arc::new(ProcFileInode { ino }))
+            }
+            INO_NET => Ok(Arc::new(ProcNetDirInode)),
             INO_SELF => {
                 let pid = crate::task::scheduler::current_pid();
                 Ok(Arc::new(ProcPidDirInode { pid }))

@@ -87,6 +87,7 @@ pub const SYS_CLONE: u64 = 77;
 pub const SYS_GETHOSTBYNAME: u64 = 78;
 pub const SYS_MKFS: u64 = 79;
 pub const SYS_SYNC: u64 = 80;
+pub const SYS_ICMP_ECHO: u64 = 81;
 pub const SYS_PTHREAD_CREATE: u64 = 0x400;
 
 /// Main syscall dispatcher called from the assembly entry stub.
@@ -236,6 +237,7 @@ pub extern "C" fn syscall_dispatch(
             arg4 as usize,
         ),
         SYS_SYNC => handlers::sys_sync(),
+        SYS_ICMP_ECHO => handlers::sys_icmp_echo(arg1 as *const u8, arg2 as u32),
         SYS_PTHREAD_CREATE => handlers::sys_pthread_create(arg1, arg2),
         _ => Err(SyscallError::ENOSYS),
     };

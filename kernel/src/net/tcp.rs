@@ -956,6 +956,58 @@ pub fn state(id: ConnId) -> Option<State> {
     t.conns.get(id).and_then(|s| s.as_ref()).map(|c| c.state)
 }
 
+/// One row of the connection table, flattened for `/proc/net/tcp`.
+///
+/// A copied snapshot rather than a borrow: the caller (procfs) formats text
+/// and must not hold the table lock while doing it, or a timer-driven
+/// retransmit would deadlock against it on a single CPU.
+pub struct ConnInfo {
+    pub local_ip: [u8; 4],
+    pub local_port: u16,
+    pub remote_ip: [u8; 4],
+    pub remote_port: u16,
+    pub state: State,
+    pub rx_queued: usize,
+}
+
+impl State {
+    /// Short name, matching the vocabulary `netstat` prints.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            State::Closed => "CLOSED",
+            State::SynSent => "SYN_SENT",
+            State::Established => "ESTABLISHED",
+            State::FinWait1 => "FIN_WAIT1",
+            State::FinWait2 => "FIN_WAIT2",
+            State::CloseWait => "CLOSE_WAIT",
+            State::LastAck => "LAST_ACK",
+            State::TimeWait => "TIME_WAIT",
+        }
+    }
+}
+
+/// Snapshot every live connection. Empty when the table is momentarily busy:
+/// `/proc/net/tcp` showing nothing for one read is better than blocking a
+/// reader behind the network stack.
+pub fn snapshot() -> Vec<ConnInfo> {
+    let Some(t) = TABLE.try_lock() else {
+        return Vec::new();
+    };
+    let our_ip = t.our_ip;
+    t.conns
+        .iter()
+        .flatten()
+        .map(|c| ConnInfo {
+            local_ip: our_ip,
+            local_port: c.local_port,
+            remote_ip: c.remote_ip,
+            remote_port: c.remote_port,
+            state: c.state,
+            rx_queued: c.recv_buf.len(),
+        })
+        .collect()
+}
+
 /// Called from the timer IRQ to drive retransmissions and TIME_WAIT cleanup.
 /// Uses try_lock; if the table is busy we just skip — segments will be
 /// retransmitted on the next tick.

@@ -2878,6 +2878,42 @@ pub fn sys_link(old: *const u8, new: *const u8) -> SyscallResult {
     Ok(0)
 }
 
+/// Send one ICMP echo request to a 4-byte IPv4 address and wait for the reply.
+///
+/// `ip` points at exactly four bytes in network order. Returns the round-trip
+/// time in PIT ticks (1 tick = 1 ms), or ETIMEDOUT if no reply arrives inside
+/// `timeout_ms`, or EHOSTUNREACH when there is no route (no ARP entry for the
+/// destination or the gateway).
+///
+/// Interrupts are re-enabled for the wait: SYSCALL entry clears IF, but the
+/// PIT has to keep firing or nothing drains the NIC and the reply never
+/// arrives. Same pattern as sys_connect.
+pub fn sys_icmp_echo(ip: *const u8, timeout_ms: u32) -> SyscallResult {
+    validate_user_ptr(ip as u64, 4)?;
+    // SAFETY: validate_user_ptr bounded [ip, ip+4) to user space.
+    let addr = unsafe { core::slice::from_raw_parts(ip, 4) };
+    let dst = [addr[0], addr[1], addr[2], addr[3]];
+
+    // 32 bytes, the conventional ping payload size.
+    let payload = [0x61u8; 32];
+
+    // SAFETY: bare sti — the wait below needs the PIT to drain the NIC.
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
+    let result = crate::net::stack::ping_once(dst, timeout_ms as u64, &payload);
+    // SAFETY: bare cli — restores the SYSCALL-entry invariant (IF=0) before
+    // returning to user via SYSRETQ.
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+    }
+
+    match result {
+        Some(rtt) => Ok(rtt as i64),
+        None => Err(SyscallError::ETIMEDOUT),
+    }
+}
+
 pub fn sys_symlink(_target: *const u8, _linkpath: *const u8) -> SyscallResult {
     crate::serial::serial_println!("[ SYSC ] symlink() not implemented yet");
     Err(SyscallError::ENOSYS)
