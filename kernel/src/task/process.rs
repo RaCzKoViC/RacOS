@@ -237,7 +237,9 @@ impl UserProcess {
         //   count needed for `argc, argv[0..N-1], NULL, envp[0..M-1], NULL`
         //   plus 16-byte alignment padding. Every offset computed below
         //   (`user_rsp + 8 + 8 * k`) falls within that carved region for
-        //   k in 0..=argc + 1 + envc + 1, which is the loop range used.
+        //   k in 0..=argc + 1 + envc, which is the loop range used. The
+        //   highest write is the envp NULL at k = argc + 1 + envc, landing on
+        //   `block_bytes - 8` — the last slot of the block, never past it.
         // FAILURE: a wrong offset arithmetic here would either corrupt the
         //   string data sitting just above the block (off-by-too-much) or
         //   leak unrelated stack content into the argc/argv view
@@ -255,13 +257,17 @@ impl UserProcess {
             // argv NULL terminator at [rsp + 8*(argc+1)]
             let argv_null = user_rsp + 8 + 8 * argc as u64;
             *(virt_to_phys(argv_null) as *mut u64) = 0;
-            // envp[i] at [rsp + 8*(argc+2+i)]
+            // envp[i] directly after argv's NULL, at [rsp + 8 + 8*(argc+1+i)].
+            // This must match libc-lite's `_start`, which computes
+            // `envp = argv + (argc + 1) * 8` — i.e. the first envp slot is the
+            // one immediately following the argv NULL terminator, with no gap.
             for (i, vaddr) in envp_vaddrs.iter().enumerate() {
-                let slot = user_rsp + 8 + 8 * (argc as u64 + 1 + i as u64 + 1);
+                let slot = user_rsp + 8 + 8 * (argc as u64 + 1 + i as u64);
                 *(virt_to_phys(slot) as *mut u64) = *vaddr;
             }
-            // envp NULL terminator at [rsp + 8*(argc+2+M)]
-            let envp_null = user_rsp + 8 + 8 * (argc as u64 + 1 + envc as u64 + 1);
+            // envp NULL terminator at [rsp + 8 + 8*(argc+1+M)], the last slot
+            // inside the reserved block (block_bytes - 8).
+            let envp_null = user_rsp + 8 + 8 * (argc as u64 + 1 + envc as u64);
             *(virt_to_phys(envp_null) as *mut u64) = 0;
         }
 
