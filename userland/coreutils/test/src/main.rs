@@ -110,6 +110,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_shell_control_flow();
     test_shell_aliases();
     test_v02_coreutils();
+    test_hard_links();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
     test_rpkg_install_list_remove();
@@ -597,6 +598,76 @@ fn test_v02_coreutils() {
         && d1 == Some(0)
     {
         println("T21-COREUTILS-OK");
+    }
+}
+
+/// Smoke for hard links: sys_link plus racfs link-count bookkeeping.
+///
+/// Runs on /mnt because racfs is the only filesystem that supports links —
+/// tmpfs and FAT32 answer EPERM by design, which the last case checks.
+fn test_hard_links() {
+    println("\n[test] hard links (ln + sys_link)");
+
+    // A link reads back the original's contents.
+    let l1 = shell_run(
+        b"echo linked > /mnt/hl_a; ln /mnt/hl_a /mnt/hl_b; \
+          result=$(cat /mnt/hl_b); \
+          case $result in linked) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("ln creates a second readable name", l1 == Some(0));
+
+    // THE point of hard links: removing one name must not destroy the data.
+    let l2 = shell_run(
+        b"echo survive > /mnt/hl_c; ln /mnt/hl_c /mnt/hl_d; rm /mnt/hl_c; \
+          result=$(cat /mnt/hl_d); \
+          case $result in survive) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("data survives unlinking the first name", l2 == Some(0));
+
+    // Removing the last name does free it. Checked via `ls | grep` rather
+    // than `cat`, so the assertion tests unlink rather than cat's exit status.
+    let l3 = shell_run(
+        b"rm /mnt/hl_d; result=$(ls /mnt | grep hl_d); \
+          case $result in '') exit 0;; *) exit 1;; esac\0",
+    );
+    check!("removing the last name frees the file", l3 == Some(0));
+
+    // cat must report failure in its exit status, not only on stderr.
+    let l3b = shell_run(b"cat /mnt/hl_d 2>/dev/null && exit 1; exit 0\0");
+    check!("cat exits non-zero for a missing file", l3b == Some(0));
+
+    // Linking a directory is refused (EPERM) rather than corrupting the tree.
+    let l4 = shell_run(
+        b"mkdir /mnt/hl_dir 2>/dev/null; \
+          ln /mnt/hl_dir /mnt/hl_dirlink 2>/dev/null; \
+          case $? in 0) exit 1;; *) exit 0;; esac\0",
+    );
+    check!("linking a directory is refused", l4 == Some(0));
+
+    // An existing destination is refused rather than silently replaced.
+    let l5 = shell_run(
+        b"echo one > /mnt/hl_e; echo two > /mnt/hl_f; \
+          ln /mnt/hl_e /mnt/hl_f 2>/dev/null; \
+          case $? in 0) exit 1;; *) exit 0;; esac\0",
+    );
+    check!("existing destination is refused", l5 == Some(0));
+
+    // tmpfs cannot hard-link; the error must be reported, not ignored.
+    let l6 = shell_run(
+        b"echo x > /tmp/hl_g; ln /tmp/hl_g /tmp/hl_h 2>/dev/null; \
+          case $? in 0) exit 1;; *) exit 0;; esac\0",
+    );
+    check!("tmpfs reports that it cannot hard-link", l6 == Some(0));
+
+    if l1 == Some(0)
+        && l2 == Some(0)
+        && l3 == Some(0)
+        && l3b == Some(0)
+        && l4 == Some(0)
+        && l5 == Some(0)
+        && l6 == Some(0)
+    {
+        println("T21-HARDLINK-OK");
     }
 }
 

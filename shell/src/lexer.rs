@@ -44,6 +44,20 @@ impl<'a> Lexer<'a> {
         self.src.get(self.pos + offset).copied()
     }
 
+    /// True when the digits starting at `pos` are an IO number: a run of
+    /// digits followed immediately by `<` or `>` with no blank between.
+    ///
+    /// The lookahead matters. `2>file` is a redirect of fd 2, but `2 > file`
+    /// is the word "2" with a redirect, and `22foo` is just a word — so this
+    /// must scan past all the digits before deciding.
+    fn io_number_ahead(&self) -> bool {
+        let mut i = 0;
+        while matches!(self.peek_at(i), Some(c) if c.is_ascii_digit()) {
+            i += 1;
+        }
+        i > 0 && matches!(self.peek_at(i), Some(b'<') | Some(b'>'))
+    }
+
     fn advance(&mut self) -> Option<u8> {
         let ch = self.src.get(self.pos).copied()?;
         self.pos += 1;
@@ -153,6 +167,28 @@ impl<'a> Lexer<'a> {
                 b')' => {
                     self.advance();
                     TokenKind::RParen
+                }
+
+                // A run of digits immediately followed by '<' or '>' with no
+                // blank between them is an IO number, not a word: `2>file`
+                // redirects fd 2. The parser and AST have always modelled this
+                // (Redirect::fd), but nothing ever emitted the token, so `2>`
+                // lexed as the word "2" plus a redirect — silently passing "2"
+                // to the command and redirecting stdout instead of stderr.
+                b'0'..=b'9' if self.io_number_ahead() => {
+                    let start = self.pos;
+                    while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+                        self.advance();
+                    }
+                    let digits = &self.src[start..self.pos];
+                    let text = core::str::from_utf8(digits).unwrap_or("");
+                    match text.parse::<u32>() {
+                        Ok(n) => TokenKind::IoNumber(n),
+                        // Too many digits to be a real fd; treat it as a word
+                        // so the shell reports a sane error instead of failing
+                        // to lex.
+                        Err(_) => TokenKind::Word(String::from(text)),
+                    }
                 }
 
                 b'<' => {

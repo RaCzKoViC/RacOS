@@ -89,6 +89,25 @@ impl WritableStore {
             WritableStore::Fat32(f) => f.unlink(parent_ino as u32, name),
         }
     }
+
+    /// Add `name` in `parent_ino` as another name for `target_ino`.
+    ///
+    /// Only racfs supports this. tmpfs stores one owner per inode and FAT32
+    /// has no concept of link counts at all — both report EPERM, which is what
+    /// POSIX prescribes for a filesystem that cannot hard-link.
+    fn link(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        target_ino: u64,
+    ) -> crate::vfs::inode::VfsResult<()> {
+        match self {
+            WritableStore::Racfs(r) => r.link(parent_ino as u32, name, target_ino as u32),
+            WritableStore::Tmpfs(_) | WritableStore::Fat32(_) => {
+                Err(crate::vfs::inode::VfsError::PermissionDenied)
+            }
+        }
+    }
 }
 
 fn current_creds() -> crate::task::task::Credentials {
@@ -2799,9 +2818,64 @@ pub fn sys_umask(mask: u32) -> SyscallResult {
 // Syscalls 45-48: link, symlink, readlink, rename (stubs/minimal)
 // ─────────────────────────────────────────────────
 
-pub fn sys_link(_old: *const u8, _new: *const u8) -> SyscallResult {
-    crate::serial::serial_println!("[ SYSC ] link() not implemented yet");
-    Err(SyscallError::ENOSYS)
+/// Create `new` as another name for the file `old` already names.
+///
+/// Both paths must land on the same mount: a hard link is a second directory
+/// entry pointing at one inode, and inode numbers are only meaningful within
+/// the filesystem that issued them. Crossing mounts returns EXDEV, which is
+/// what callers expect and what makes `ln` fall back to a copy on real
+/// systems.
+pub fn sys_link(old: *const u8, new: *const u8) -> SyscallResult {
+    let old_len = validate_user_string(old as u64)?;
+    let new_len = validate_user_string(new as u64)?;
+    // SAFETY: validate_user_string confirmed both ranges are user-mapped and
+    // NUL-terminated.
+    let (old_str, new_str) = unsafe {
+        (
+            core::str::from_utf8(core::slice::from_raw_parts(old, old_len))
+                .map_err(|_| SyscallError::EINVAL)?,
+            core::str::from_utf8(core::slice::from_raw_parts(new, new_len))
+                .map_err(|_| SyscallError::EINVAL)?,
+        )
+    };
+
+    // SAFETY: mount_table is a kernel singleton initialised once at boot.
+    let mt = unsafe { crate::vfs::mount::mount_table() };
+    let (old_mount, _old_rem) = mt.resolve(old_str).ok_or(SyscallError::ENOENT)?;
+    let (new_mount, new_rem) = mt.resolve(new_str).ok_or(SyscallError::ENOENT)?;
+
+    // Same-mount check before anything else: comparing mountpoints is cheaper
+    // than resolving inodes we would then have to discard.
+    if old_mount.path != new_mount.path {
+        return Err(SyscallError::EXDEV);
+    }
+
+    let store = writable_store_from_mount(new_mount).ok_or(SyscallError::EACCES)?;
+
+    // Existing file the link will point at. Resolving it also proves it exists
+    // before we touch the destination directory.
+    // SAFETY: mount_table singleton — same as sys_stat.
+    let (target_fs, target_ino) = unsafe {
+        crate::vfs::mount::mount_table()
+            .lookup_path(old_str)
+            .map_err(|_| SyscallError::ENOENT)?
+    };
+    let target_inode = target_fs.get_inode(target_ino).map_err(map_vfs_error)?;
+    let target_meta = target_inode.metadata().map_err(map_vfs_error)?;
+    if target_meta.file_type == crate::vfs::inode::FileType::Directory {
+        return Err(SyscallError::EPERM);
+    }
+
+    let (parent_ino, leaf) = store.split_parent_leaf(new_rem).map_err(map_vfs_error)?;
+    let parent_inode = new_mount.fs.get_inode(parent_ino).map_err(map_vfs_error)?;
+    let parent_meta = parent_inode.metadata().map_err(map_vfs_error)?;
+    require_dac_access(&parent_meta, crate::security::dac::Access::Write)?;
+    require_dac_access(&parent_meta, crate::security::dac::Access::Execute)?;
+
+    store
+        .link(parent_ino, leaf, target_ino)
+        .map_err(map_vfs_error)?;
+    Ok(0)
 }
 
 pub fn sys_symlink(_target: *const u8, _linkpath: *const u8) -> SyscallResult {
