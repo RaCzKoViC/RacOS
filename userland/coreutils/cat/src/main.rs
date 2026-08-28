@@ -5,8 +5,15 @@ use libc_lite;
 
 /// cat — kopiuj pliki (lub stdin) na stdout.
 /// Bez argumentów czyta stdin. Z argumentami czyta podane pliki.
+///
+/// Zwraca 1, jeśli którykolwiek operand zawiódł. Wcześniej `cat` zawsze
+/// kończył się zerem — wypisywał "No such file or directory" na stderr, a
+/// mimo to `cat missing && echo ok` drukowało `ok`, przez co każdy skrypt
+/// rozgałęziający się na powodzeniu `cat` cicho brał złą gałąź.
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
+    let mut status = 0;
+
     if argc <= 1 {
         // No arguments — copy stdin to stdout
         cat_fd(0);
@@ -37,12 +44,13 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
                         let _ = libc_lite::write(2, b"cat: ");
                         let _ = libc_lite::write(2, &path[..len]);
                         let _ = libc_lite::write(2, b": No such file or directory\n");
+                        status = 1;
                     }
                 }
             }
         }
     }
-    0
+    status
 }
 
 fn cat_fd(fd: i32) {
