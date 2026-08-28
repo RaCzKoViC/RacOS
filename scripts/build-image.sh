@@ -78,7 +78,7 @@ COREUTILS=(
     racos-top racos-touch racos-chmod racos-chown racos-tee racos-hexdump
     racterm racos-dig racos-wget racos-mount racos-df racos-umount
     racos-mkfs-racfs racos-mkfs-fat32 racos-sync
-    racos-clear racos-rmdir racos-free racos-du racos-ln
+    racos-clear racos-rmdir racos-free racos-du racos-ln racos-nc racos-ping
     rpkg-bin
 )
 for pkg in "${COREUTILS[@]}"; do
@@ -114,7 +114,7 @@ BIN_LIST=(
     hello echo cat true false sh racterm racos-test ls wc uptime mkdir
     rm sleep head tail env basename dirname grep cp mv cut uniq find od ps
     sed awk id sort top touch chmod chown tee hexdump rpkg
-    dig wget mount df umount sync clear rmdir free du ln
+    dig wget mount df umount sync clear rmdir free du ln nc ping
     mkfs_racfs=mkfs.racfs mkfs_fat32=mkfs.fat32
 )
 SBIN_LIST=(init)
