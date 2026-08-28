@@ -76,7 +76,10 @@ COREUTILS=(
     racos-dirname racos-grep racos-cp racos-mv racos-cut racos-uniq
     racos-find racos-od racos-ps racos-sed racos-awk racos-id racos-sort
     racos-top racos-touch racos-chmod racos-chown racos-tee racos-hexdump
-    racterm rpkg-bin
+    racterm racos-dig racos-wget racos-mount racos-df racos-umount
+    racos-mkfs-racfs racos-mkfs-fat32 racos-sync
+    racos-clear racos-rmdir racos-free racos-du
+    rpkg-bin
 )
 for pkg in "${COREUTILS[@]}"; do
     # racterm gates its [[bin]] behind a required-feature so
@@ -111,19 +114,26 @@ BIN_LIST=(
     hello echo cat true false sh racterm racos-test ls wc uptime mkdir
     rm sleep head tail env basename dirname grep cp mv cut uniq find od ps
     sed awk id sort top touch chmod chown tee hexdump rpkg
+    dig wget mount df umount sync clear rmdir free du
+    mkfs_racfs=mkfs.racfs mkfs_fat32=mkfs.fat32
 )
 SBIN_LIST=(init)
 
 for bin in "${BIN_LIST[@]}"; do
-    src="$BIN_DIR/$bin"
+    # Entries may be "src=dst": cargo cannot produce a bin name containing a
+    # dot, so mkfs_racfs is built and shipped as mkfs.racfs. Matches the
+    # BinList convention in build-image.ps1.
+    src_name="${bin%%=*}"
+    dst_name="${bin#*=}"
+    src="$BIN_DIR/$src_name"
     if [[ ! -f "$src" ]]; then
-        echo "WARNING: Binary not found: $bin - skipping" >&2
+        echo "WARNING: Binary not found: $src_name - skipping" >&2
         continue
     fi
-    dst="$INITRAMFS_ROOT/bin/$bin"
+    dst="$INITRAMFS_ROOT/bin/$dst_name"
     cp -f "$src" "$dst"
     size=$(wc -c < "$dst")
-    echo "  bin/$bin [$size bytes]"
+    echo "  bin/$dst_name [$size bytes]"
 done
 
 for bin in "${SBIN_LIST[@]}"; do
