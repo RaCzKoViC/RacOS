@@ -11,6 +11,39 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Added — v0.3 §3.2 (racfs consistency check)
+
+- **`Racfs::check()` runs when the persistent disk is mounted.** It walks
+  every live inode, builds a per-block reference count, and compares it
+  against the allocation bitmap and the superblock.
+
+  Findings are separated by whether they can destroy data, because the
+  answers differ. Leaked blocks and superblock drift are untidy but safe.
+  Blocks a live inode uses while the bitmap calls them free, or blocks two
+  inodes both claim, are not: the allocator is a linear bitmap scan, so it
+  will hand those blocks out again and the two files will overwrite each
+  other. That is precisely the damage that once made a disk in this project
+  report `name_len = 111` — ASCII `'o'`, file text sitting in a directory
+  block — and take the kernel down with it.
+
+  It reports and does not repair. Repairing a doubly-claimed block means
+  choosing which inode owns it, and that belongs to whoever can see which
+  file matters, not to a boot-time routine. It also does not refuse to
+  mount: that would strand the one shell able to fix the disk. When the
+  findings are dangerous the warning says what to do.
+
+  Verified against a genuinely damaged image kept from earlier in this
+  project's history, which it diagnosed as `leaked=52 unallocated_in_use=4
+  doubly_claimed=1 out_of_range=1 sb_drift=-49` — while still booting to a
+  usable shell. A fresh disk reports clean.
+
+- **Documented a real limit it exposed:** the allocation bitmap is a single
+  sector, so it can only describe 4096 blocks. `alloc_block` scans exactly
+  that range, so on a 16 MiB disk 4096 of 32734 data blocks are reachable
+  and the rest is dead space. Not a regression — it has always been so — but
+  ROADMAP §3.2's allocator item did not say it, and now both it and the code
+  do.
+
 ### Added — v0.2 §2.3 (network tools)
 
 - **`ping`** — new `SYS_ICMP_ECHO` (81) wrapping the stack's existing

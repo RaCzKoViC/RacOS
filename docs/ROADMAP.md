@@ -181,9 +181,22 @@ covered by `T20-*`, `T21-COREUTILS-OK`, `T21-HARDLINK-OK`, `T22-ALIAS-OK` and
   (create / unlink / rename / set_metadata). Avoids torn superblock
   states on crash.
 - **Allocator** — switch from linear scan to bitmap-based + free-block
-  hint to make large-file growth cheaper.
-- **fsck-like consistency check** at mount — confirm every allocated
-  block is reachable from a live inode.
+  hint to make large-file growth cheaper. **Bigger than it reads:** the
+  allocation bitmap is a single sector, so it can only describe
+  `SECTOR_SIZE * 8` = 4096 blocks, and `alloc_block` scans exactly that
+  range. On a 16 MiB disk that leaves 4096 of 32734 data blocks reachable
+  and the other 87% dead space. A multi-sector bitmap is the prerequisite,
+  not the optimisation.
+- ✅ **fsck-like consistency check** at mount — shipped. `Racfs::check()`
+  walks live inodes, builds a per-block reference count, and compares it
+  against the bitmap and superblock. Findings are split by whether they can
+  destroy data: leaked blocks and superblock drift are untidy but safe;
+  `unallocated_in_use` and `doubly_claimed` are not, because the linear
+  allocator will hand those blocks out again. It reports and does not
+  repair — choosing an owner for a doubly-claimed block belongs to whoever
+  can see which file matters. Verified against a genuinely damaged image
+  from this project's history, which it diagnosed as
+  `leaked=52 unallocated_in_use=4 doubly_claimed=1 out_of_range=1`.
 
 ### 3.3 Mount layout
 
