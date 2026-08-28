@@ -1,0 +1,11 @@
+[package]
+name = "racos-nc"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "nc"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite", features = ["alloc"] }
