@@ -30,6 +30,8 @@ pub fn is_builtin(name: &str) -> bool {
             | "exit"
             | "export"
             | "unset"
+            | "alias"
+            | "unalias"
             | "set"
             | "true"
             | "false"
@@ -62,6 +64,8 @@ pub fn run_builtin(args: &[String], env: &mut Env, write_fn: &dyn Fn(&[u8])) -> 
         "exit" => builtin_exit(args),
         "export" => builtin_export(args, env),
         "unset" => builtin_unset(args, env),
+        "alias" => builtin_alias(args, env, write_fn),
+        "unalias" => builtin_unalias(args, env, write_fn),
         "set" => builtin_set(env, write_fn),
         "true" => BuiltinResult::Ok(0),
         "false" => BuiltinResult::Ok(1),
@@ -155,6 +159,73 @@ fn builtin_unset(args: &[String], env: &mut Env) -> BuiltinResult {
         env.unset(arg);
     }
     BuiltinResult::Ok(0)
+}
+
+/// `alias` — list all aliases; `alias NAME` — show one; `alias NAME=VALUE` —
+/// define one. Listings are quoted so the output can be fed back to the shell.
+fn builtin_alias(args: &[String], env: &mut Env, write_fn: &dyn Fn(&[u8])) -> BuiltinResult {
+    if args.len() == 1 {
+        for (name, value) in env.aliases() {
+            write_alias(name, value, write_fn);
+        }
+        return BuiltinResult::Ok(0);
+    }
+
+    let mut status = 0;
+    for arg in &args[1..] {
+        match arg.find('=') {
+            // NAME=VALUE — define. An empty NAME (`=foo`) is not a valid
+            // definition, so fall through to the lookup path and report it.
+            Some(pos) if pos > 0 => {
+                let (name, rest) = arg.split_at(pos);
+                env.set_alias(String::from(name), String::from(&rest[1..]));
+            }
+            _ => match env.lookup_alias(arg) {
+                Some(value) => write_alias(arg, value, write_fn),
+                None => {
+                    write_fn(b"alias: ");
+                    write_fn(arg.as_bytes());
+                    write_fn(b": not found\n");
+                    status = 1;
+                }
+            },
+        }
+    }
+    BuiltinResult::Ok(status)
+}
+
+fn write_alias(name: &str, value: &str, write_fn: &dyn Fn(&[u8])) {
+    write_fn(name.as_bytes());
+    write_fn(b"='");
+    write_fn(value.as_bytes());
+    write_fn(b"'\n");
+}
+
+/// `unalias NAME...` — remove aliases. `unalias -a` removes every one.
+fn builtin_unalias(args: &[String], env: &mut Env, write_fn: &dyn Fn(&[u8])) -> BuiltinResult {
+    if args.len() == 1 {
+        write_fn(b"unalias: usage: unalias [-a] name...\n");
+        return BuiltinResult::Ok(2);
+    }
+
+    if args[1] == "-a" {
+        let names: Vec<String> = env.aliases().map(|(n, _)| String::from(n)).collect();
+        for n in names {
+            env.remove_alias(&n);
+        }
+        return BuiltinResult::Ok(0);
+    }
+
+    let mut status = 0;
+    for arg in &args[1..] {
+        if !env.remove_alias(arg) {
+            write_fn(b"unalias: ");
+            write_fn(arg.as_bytes());
+            write_fn(b": not found\n");
+            status = 1;
+        }
+    }
+    BuiltinResult::Ok(status)
 }
 
 fn builtin_set(env: &Env, write_fn: &dyn Fn(&[u8])) -> BuiltinResult {
