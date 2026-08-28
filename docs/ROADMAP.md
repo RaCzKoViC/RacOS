@@ -90,20 +90,41 @@ conventional but not required for v0.2.
 
 ### 2.2 racsh UX
 
-- **Persistent history** — `~/.racsh_history`, read at startup, append on
-  each line, cap at ~1000 entries.
-- **Tab completion** — minimum scope: command names from `$PATH`,
-  file paths from the current directory. Matches the existing
-  character-mode line editor in `shell/src/readline.rs` (no readline
-  dependency).
-- **Aliases** — `alias ll='ls -la'`. Expansion happens at parse time;
-  stored in `Env::aliases`.
-- **Prompt expansions** — `${PS1}` already parses but `\u`, `\h`, `\w`
-  substitutions don't happen. Add the basic set.
-- **`$(...)` command-substitution edge case** — the one found during the
-  awk T3.3 smoke (`'END { ... }'` inside `$(...)` fails with `sh: cannot
-  open script:` status 127, even though the kernel-side argc=3 is
-  correct). Fix the racsh parser and re-enable the dropped awk END smoke.
+- ✅ **Persistent history** — shipped. `History::load_file` / `save_file`,
+  cap 1000 entries, rewritten in full after each line so the cap holds and
+  no seek is needed. Path is `$HOME/.racsh_history`, falling back to
+  `/var/.racsh_history` because `/` is the read-only initramfs. Surviving a
+  *reboot* still waits on v0.3 §3.3, which puts `/home` on persistent
+  storage. `history` and `history -c` are handled in the REPL loop rather
+  than `racsh::builtin`, because the list is session state that
+  `exec_simple` has no handle on — the cost is that they don't work inside
+  a pipeline.
+- ✅ **Tab completion** — shipped. Command position offers builtins plus
+  every executable on `$PATH`; anywhere else completes paths. A word
+  containing `/` is always path-completed, so `./x` and `/bin/l` behave as
+  they read. One match is inserted with a trailing space, several extend by
+  their common prefix, and an ambiguous word with no further prefix prints
+  the candidates and redraws. Logic lives in `shell/src/complete.rs`, split
+  so the decision and prefix arithmetic are pure and host-tested.
+- ✅ **Aliases** — shipped. `alias`, `alias NAME`, `alias NAME=VALUE`,
+  `unalias NAME...`, `unalias -a`; stored sorted in `Env::aliases`.
+  Expansion happens at execution time in `exec_simple`, not parse time as
+  originally sketched: the parser has no `Env`, and exec-time expansion is
+  where the command word is already known. A name is expanded at most once
+  per command, so `alias ls='ls --color'` terminates. Replacements are split
+  on whitespace, so quoting *inside* an alias body does not survive — use a
+  shell function for that. Smoke `T22-ALIAS-OK`.
+- ✅ **Prompt expansions** — shipped. `\u`, `\h`, `\w`, `\W`, `\$`, `\n`,
+  `\\` in `shell/src/prompt.rs`; `\w` abbreviates `$HOME` to `~` on whole
+  components only. An unknown escape is emitted verbatim so a typo is
+  visible instead of silently deleting text.
+- ✅ **`$(...)` command-substitution edge case** — fixed, and it was never a
+  racsh bug: `prepare_user_stack` wrote the envp NULL terminator past the
+  reserved block, corrupting argv strings depending on their total length.
+  The dropped awk END smoke is back.
+
+Still open in §2.2: nothing. The remaining v0.2 work is §2.1 (`free`, `ln`,
+`rmdir`, `du`) and §2.3 (network tools).
 
 ### 2.3 Network tools
 

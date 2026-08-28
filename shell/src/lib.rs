@@ -8,10 +8,12 @@ extern crate alloc;
 
 pub mod ast;
 pub mod builtin;
+pub mod complete;
 pub mod exec;
 pub mod expand;
 pub mod lexer;
 pub mod parser;
+pub mod prompt;
 pub mod readline;
 pub mod token;
 

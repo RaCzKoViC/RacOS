@@ -28,6 +28,9 @@ pub struct Env {
     functions: Vec<(String, AstNode)>,
     /// Current shell-function call depth (recursion guard).
     pub fn_depth: u32,
+    /// Command aliases: (name, replacement), kept sorted by name so `alias`
+    /// with no operands lists them in a stable order.
+    aliases: Vec<(String, String)>,
 }
 
 impl Env {
@@ -40,6 +43,7 @@ impl Env {
             arg0: String::from("racsh"),
             functions: Vec::new(),
             fn_depth: 0,
+            aliases: Vec::new(),
         }
     }
 
@@ -95,6 +99,41 @@ impl Env {
         self.vars.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
+    /// Define (or redefine) an alias. Kept sorted so listings are stable.
+    pub fn set_alias(&mut self, name: String, value: String) {
+        match self
+            .aliases
+            .binary_search_by(|(n, _)| n.as_str().cmp(&name))
+        {
+            Ok(i) => self.aliases[i].1 = value,
+            Err(i) => self.aliases.insert(i, (name, value)),
+        }
+    }
+
+    /// Remove an alias. Returns true if one was actually removed.
+    pub fn remove_alias(&mut self, name: &str) -> bool {
+        match self.aliases.binary_search_by(|(n, _)| n.as_str().cmp(name)) {
+            Ok(i) => {
+                self.aliases.remove(i);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Look up an alias replacement by name.
+    pub fn lookup_alias(&self, name: &str) -> Option<&str> {
+        self.aliases
+            .binary_search_by(|(n, _)| n.as_str().cmp(name))
+            .ok()
+            .map(|i| self.aliases[i].1.as_str())
+    }
+
+    /// Iterate over all aliases as (name, value), sorted by name.
+    pub fn aliases(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.aliases.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
     /// Get PATH as an iterator of directory strings.
     pub fn path_dirs(&self) -> PathDirs<'_> {
         PathDirs {
@@ -113,6 +152,9 @@ impl Env {
             arg0: self.arg0.clone(),
             functions: self.functions.clone(),
             fn_depth: self.fn_depth,
+            // Aliases carry into the subshell: `$(ll)` should mean the same
+            // thing it means outside the substitution.
+            aliases: self.aliases.clone(),
         }
     }
 }

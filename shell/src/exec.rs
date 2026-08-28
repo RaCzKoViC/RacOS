@@ -288,6 +288,47 @@ fn exec_function(body: &AstNode, args: &[String], env: &mut Env) -> i32 {
 }
 
 /// Execute a simple command (assignments + words + redirects).
+/// Replace a leading alias with its definition, repeatedly.
+///
+/// Expansion recurses so `alias ll='ls -la'; alias la=ll` works, but a name
+/// already expanded on this command is never expanded twice — that is what
+/// makes the idiomatic `alias ls='ls --color'` terminate instead of looping
+/// forever.
+///
+/// The replacement is split on whitespace. Quoting *inside* an alias body
+/// (`alias x='echo "a b"'`) therefore yields two words, not one; aliases that
+/// need to preserve quoting should be shell functions instead.
+pub fn expand_aliases(mut words: Vec<String>, env: &Env) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+
+    loop {
+        let head = match words.first() {
+            Some(w) => w.clone(),
+            None => return words,
+        };
+        if seen.iter().any(|s| *s == head) {
+            return words;
+        }
+        let replacement = match env.lookup_alias(&head) {
+            Some(r) => r,
+            None => return words,
+        };
+
+        let mut rebuilt: Vec<String> = replacement
+            .split_whitespace()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        if rebuilt.is_empty() {
+            // `alias x=''` removes the command word rather than looping on it.
+            words.remove(0);
+            return words;
+        }
+        seen.push(head);
+        rebuilt.extend(words.drain(1..));
+        words = rebuilt;
+    }
+}
+
 fn exec_simple(
     assignments: &[Assignment],
     words: &[Word],
@@ -309,6 +350,11 @@ fn exec_simple(
         .flat_map(|w| expand::expand_word_list(w, env))
         .collect();
 
+    if expanded.is_empty() || expanded[0].is_empty() {
+        return 0;
+    }
+
+    let expanded = expand_aliases(expanded, env);
     if expanded.is_empty() || expanded[0].is_empty() {
         return 0;
     }
