@@ -23,6 +23,10 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
             }
         } else if arg.starts_with(b"-n") {
             max_lines = parse_usize(&arg[2..]);
+        } else if is_numeric_flag(arg) {
+            // `tail -5` is the shorthand everyone actually types. Without this
+            // it fell through to the FILE branch and was opened as a path.
+            max_lines = parse_usize(&arg[1..]);
         } else {
             file_arg = Some(i);
         }
@@ -66,22 +70,43 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         let _ = libc_lite::close(fd);
     }
 
-    // Find start of last N lines
-    let mut line_count = 0usize;
-    let mut pos = total;
-    while pos > 0 && line_count < max_lines {
-        pos -= 1;
-        if data[pos] == b'\n' {
-            line_count += 1;
-        }
-    }
-    // Adjust: if we stopped at a newline, skip it (we want content after it)
-    if pos > 0 && data[pos] == b'\n' {
-        pos += 1;
+    if max_lines == 0 {
+        return 0;
     }
 
-    let _ = libc_lite::write(1, &data[pos..total]);
+    // A trailing newline terminates the last line rather than starting a new
+    // one, so it must not be counted. Counting it made `tail -1` find its
+    // boundary immediately and emit an empty slice.
+    let mut end = total;
+    if end > 0 && data[end - 1] == b'\n' {
+        end -= 1;
+    }
+
+    // Walk back until we have crossed max_lines newlines; the byte after the
+    // last one is where the output starts. Fewer newlines than asked for means
+    // the whole input is the answer, so `start` stays 0.
+    let mut start = 0usize;
+    let mut newlines = 0usize;
+    let mut i = end;
+    while i > 0 {
+        i -= 1;
+        if data[i] == b'\n' {
+            newlines += 1;
+            if newlines == max_lines {
+                start = i + 1;
+                break;
+            }
+        }
+    }
+
+    let _ = libc_lite::write(1, &data[start..total]);
     0
+}
+
+/// True for `-1`, `-25`, ... -- a dash followed by at least one digit and
+/// nothing else. `-n` and a bare `-` are not numeric flags.
+fn is_numeric_flag(arg: &[u8]) -> bool {
+    arg.len() > 1 && arg[0] == b'-' && arg[1..].iter().all(|b| b.is_ascii_digit())
 }
 
 fn parse_usize(s: &[u8]) -> usize {

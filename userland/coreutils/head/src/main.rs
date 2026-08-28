@@ -23,6 +23,11 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
             }
         } else if arg.starts_with(b"-n") {
             max_lines = parse_usize(&arg[2..]);
+        } else if is_numeric_flag(arg) {
+            // `head -1` is the shorthand everyone actually types. Without
+            // this it fell through to the FILE branch and was opened as a
+            // path, giving "cannot open file" for a perfectly valid command.
+            max_lines = parse_usize(&arg[1..]);
         } else {
             file_arg = Some(i);
         }
@@ -67,6 +72,12 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         let _ = libc_lite::close(fd);
     }
     0
+}
+
+/// True for `-1`, `-25`, ... — a dash followed by at least one digit and
+/// nothing else. `-n` and a bare `-` are not numeric flags.
+fn is_numeric_flag(arg: &[u8]) -> bool {
+    arg.len() > 1 && arg[0] == b'-' && arg[1..].iter().all(|b| b.is_ascii_digit())
 }
 
 fn parse_usize(s: &[u8]) -> usize {
