@@ -57,6 +57,10 @@ members = [
     "userland/coreutils/mkfs-racfs",
     "userland/coreutils/mkfs-fat32",
     "userland/coreutils/sync",
+    "userland/coreutils/du",
+    "userland/coreutils/free",
+    "userland/coreutils/rmdir",
+    "userland/coreutils/clear",
 ]
 default-members = [
     "init",
@@ -113,6 +117,10 @@ default-members = [
     "userland/coreutils/mkfs-racfs",
     "userland/coreutils/mkfs-fat32",
     "userland/coreutils/sync",
+    "userland/coreutils/du",
+    "userland/coreutils/free",
+    "userland/coreutils/rmdir",
+    "userland/coreutils/clear",
 ]
 
 [workspace.package]
