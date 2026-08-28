@@ -1,0 +1,11 @@
+[package]
+name = "racos-netstat"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "netstat"
+path = "src/main.rs"
+
+[dependencies]
+libc-lite = { path = "../../../libs/libc-lite", features = ["alloc"] }
