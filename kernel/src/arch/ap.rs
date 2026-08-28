@@ -254,17 +254,20 @@ unsafe extern "C" fn ap_entry() -> ! {
     // exists for exactly that.
     enable_lapic_for_this_ap();
     let id = lapic::current_apic_id();
-    // G.4 foundation: bind GS to this CPU's PerCpu slot so any future
-    // per-CPU code (scheduler runqueue, IRQ tick counters, ...) just
-    // works via `percpu::current()`.
+    // G.4 foundation: bind GS to this CPU's PerCpu slot so kernel-path code
+    // can reach it via `percpu::current()`. Note this only holds while the
+    // CPU stays on the idle/kernel path — `enter_ring3` zeroes GS_BASE and
+    // `syscall_entry` swapgs's to `PerCpuData`, so anything reachable from
+    // an IRQ must locate its slot by LAPIC ID instead (see `percpu::peek`).
     crate::arch::percpu::init_for_this_cpu(id);
     // G.4.1: drop the trampoline GDT (where 0x08 is a 32-bit code segment)
     // and switch to the kernel GDT so IDT selectors that say "CS = 0x08"
     // resolve to a 64-bit segment instead of triple-faulting on IRQ entry.
     crate::arch::gdt::load_kernel_gdt_for_this_cpu();
     // G.4.1: load the shared IDT and arm this CPU's own LAPIC timer.
-    // Handler only touches gs:[OFFSET_TICK_COUNT] (per-CPU) and the local
-    // LAPIC's EOI MMIO, so there's no cross-CPU state at IRQ time.
+    // The handler only touches this CPU's own PerCpu slot (found by LAPIC
+    // ID, not via GS — see idt::lapic_timer_handler) and the local LAPIC's
+    // EOI MMIO, so there's no cross-CPU state at IRQ time.
     crate::arch::idt::load_on_this_cpu();
     lapic::init_timer_for_this_cpu();
     smp::mark_started(id);
