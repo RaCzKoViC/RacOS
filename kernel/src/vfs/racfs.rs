@@ -187,14 +187,22 @@ fn inode_to_bytes(inode: &DiskInode) -> [u8; INODE_DISK_SIZE] {
     buf
 }
 
+/// Decode an on-disk directory entry.
+///
+/// `buf` is raw disk content and is therefore untrusted: a torn write or a
+/// stale slot can put arbitrary bytes here, so `buf[4]` may claim a name far
+/// longer than `name` can hold. The returned struct upholds the invariant
+/// `name_len as usize <= name.len()`, which every consumer relies on to slice
+/// `name[..name_len]`. Without the clamp a corrupt entry took the whole kernel
+/// down with "range end index N out of range" instead of surfacing as a
+/// filesystem error.
 fn direntry_from_bytes(buf: &[u8]) -> DiskDirEntry {
     let mut name = [0u8; MAX_NAME_LEN - 4];
-    let name_len = buf[4] as usize;
-    let copy_len = name_len.min(name.len());
+    let copy_len = (buf[4] as usize).min(name.len());
     name[..copy_len].copy_from_slice(&buf[8..8 + copy_len]);
     DiskDirEntry {
         ino: read_u32_le(buf, 0),
-        name_len: buf[4],
+        name_len: copy_len as u8,
         _pad: [0; 3],
         name,
     }
@@ -724,15 +732,18 @@ impl Racfs {
             self.write_data_block(dir.direct[block_idx], &zero)?;
         }
 
-        // Build entry.
+        // Build entry. name_len records what actually fits, not what was
+        // asked for: `name.len() as u8` would wrap past 255 and, for anything
+        // over 56 bytes, claim more than the entry stores.
         let mut de = DiskDirEntry {
             ino: child_ino,
-            name_len: name.len() as u8,
+            name_len: 0,
             _pad: [0; 3],
             name: [0u8; MAX_NAME_LEN - 4],
         };
         let copy_len = name.len().min(de.name.len());
         de.name[..copy_len].copy_from_slice(&name.as_bytes()[..copy_len]);
+        de.name_len = copy_len as u8;
 
         // Write entry into data block.
         let mut sector = [0u8; SECTOR_SIZE];
@@ -826,7 +837,17 @@ impl Racfs {
         let mut entries = Vec::new();
         for i in 0..inode.dir_entry_count {
             let de = self.read_direntry(&inode, i)?;
-            let child = self.read_inode(de.ino)?;
+            // Skip slots that don't describe a usable entry rather than
+            // listing them or failing the whole directory. A damaged image
+            // (torn write, stale slot) otherwise shows up as blank `ls` rows,
+            // or makes one bad entry hide every good one behind a `?`.
+            if de.name_len == 0 {
+                continue;
+            }
+            let child = match self.read_inode(de.ino) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
             let name_bytes = &de.name[..de.name_len as usize];
             let name = core::str::from_utf8(name_bytes).unwrap_or("???");
             entries.push(DirEntry {
