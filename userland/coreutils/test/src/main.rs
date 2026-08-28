@@ -742,17 +742,22 @@ fn test_awk_basic() {
         a4 == Some(0)
     );
 
-    // Note: there's a separately-tracked racsh edge case in command
-    // substitution that fires when the awk script contains an END block
-    // (both `'END { ... }'` and `'{} END { ... }'` make racsh report
-    // `sh: cannot open script:` with status=127, even though the kernel
-    // delivers all three argv entries correctly). The awk runtime END
-    // path works — it's exercised end-to-end when /bin/awk is invoked
-    // directly (without `$(...)`) and is covered by the awk MVP's source
-    // header. Once the racsh fix lands, an END-block smoke can be added
-    // here.
+    // END runs once after the input is consumed.
+    //
+    // This case used to be un-smokeable: any script reaching racsh through
+    // `$(...)` could come back as `sh: cannot open script:` status 127. The
+    // cause was not racsh at all — `prepare_user_stack` wrote the envp NULL
+    // terminator one slot past the reserved argc/argv/envp block, clobbering
+    // the argv string data sitting directly above it. Whether it corrupted
+    // anything depended on the total argv length (hence the "only with END"
+    // appearance). Fixed in kernel/src/task/process.rs.
+    let a5 = shell_run(
+        b"result=$(echo hello | /bin/awk 'END { print \"done\" }'); \
+          case $result in done) exit 0;; *) exit 1;; esac\0",
+    );
+    check!("awk END prints once after input", a5 == Some(0));
 
-    if a1 == Some(0) && a2 == Some(0) && a3 == Some(0) && a4 == Some(0) {
+    if a1 == Some(0) && a2 == Some(0) && a3 == Some(0) && a4 == Some(0) && a5 == Some(0) {
         println("T33-AWK-OK");
     }
 }
@@ -823,11 +828,12 @@ fn test_top_prints_snapshot() {
 }
 
 /// Run a userland binary directly (bypassing /bin/sh) and return its
-/// exit status. Sidesteps a racsh $(...) edge case where `shell_run`
-/// occasionally produces `sh: cannot open script:` status 127 even
-/// for simple command lines — the racsh fix is tracked in
-/// ROADMAP.md §6 as a carried-forward TODO. Direct spawn is also a
-/// closer match to what's actually being tested (the binary).
+/// exit status.
+///
+/// This originally worked around the `sh: cannot open script:` status-127
+/// flake (an out-of-block envp write in `prepare_user_stack` that corrupted
+/// argv strings — now fixed). It is kept because direct spawn is a closer
+/// match to what these smokes actually test: the binary, not the shell.
 fn run_bin(path: &[u8], args: &[&[u8]]) -> Option<i32> {
     // Build an argv array of pointers. Cap at 8 args incl. argv[0]
     // + NULL terminator — every smoke today fits.
