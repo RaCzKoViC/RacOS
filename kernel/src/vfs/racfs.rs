@@ -2,6 +2,7 @@
 //
 // On-disk layout (all sizes in 512-byte sectors):
 //   Sector 0:                    Superblock (magic, version, counts, offsets)
+//   [1, bitmap_start):           Metadata journal (header + data slots)
 //   [bitmap_start, inode_start): Free-block bitmap (1 bit per data block)
 //   [inode_start, data_start):   Inode table (fixed-size 128-byte inodes)
 //   [data_start, total_sectors): Data blocks (512 bytes each)
@@ -11,6 +12,11 @@
 // bitmap_start`, which the layout has always implied. Deriving it rather than
 // adding a field keeps images written by the single-sector version mountable
 // - they report a length of 1, which is exactly what they have.
+//
+// The journal's length is derived the same way, as `bitmap_start - 1`. An
+// image written before the journal existed puts the bitmap at sector 1, so it
+// reports a journal of length 0 and runs unjournaled - which is exactly what
+// it is. Neither region needed a format version bump.
 //
 // Constraints:
 // - Max 128 inodes
@@ -67,6 +73,24 @@ const MAX_FILE_BLOCKS: usize = DIRECT_BLOCKS + SINGLE_INDIRECT_BLOCKS + DOUBLE_I
 /// Data blocks one sector of allocation bitmap can describe.
 const BLOCKS_PER_BITMAP_SECTOR: usize = SECTOR_SIZE * 8; // 4096
 
+// --- Metadata journal -----------------------------------------------------
+
+/// Journal header magic, "RJL1".
+const JOURNAL_MAGIC: u32 = 0x524A_4C31;
+
+/// Header states. The transition between them is a single sector write, and
+/// that write is the moment an operation becomes durable.
+const JOURNAL_EMPTY: u32 = 0;
+const JOURNAL_COMMITTED: u32 = 1;
+
+/// Sectors one transaction may log. The header carries their target LBAs as
+/// u64s after a 24-byte preamble, so (512 - 24) / 8 = 61 fit; 60 leaves the
+/// arithmetic obviously safe.
+const MAX_JOURNAL_ENTRIES: usize = 60;
+
+/// Total journal size: one header plus its data slots.
+const JOURNAL_SECTORS: u32 = 1 + MAX_JOURNAL_ENTRIES as u32;
+
 /// Inode type tags stored on disk.
 const ITYPE_FREE: u8 = 0;
 const ITYPE_FILE: u8 = 1;
@@ -107,6 +131,30 @@ impl Superblock {
     /// unreachable: `alloc_block` never scans there.
     fn addressable_blocks(&self) -> usize {
         (self.bitmap_sectors() as usize).saturating_mul(BLOCKS_PER_BITMAP_SECTOR)
+    }
+
+    /// First journal sector. The journal always starts right after the
+    /// superblock; only its length varies.
+    fn journal_start(&self) -> u64 {
+        1
+    }
+
+    /// Sectors the journal occupies, derived like the bitmap's length.
+    /// Zero on an image written before the journal existed.
+    fn journal_sectors(&self) -> u32 {
+        self.bitmap_start.saturating_sub(1)
+    }
+
+    /// Whether this filesystem can journal at all. A header with no data slot
+    /// behind it cannot log anything, so one sector does not count.
+    fn has_journal(&self) -> bool {
+        self.journal_sectors() > 1
+    }
+
+    /// How many data slots the journal actually has, capped by what a header
+    /// can address.
+    fn journal_capacity(&self) -> usize {
+        (self.journal_sectors().saturating_sub(1) as usize).min(MAX_JOURNAL_ENTRIES)
     }
 }
 
@@ -341,6 +389,11 @@ pub struct Racfs {
     /// multi-sector bitmap is the difference between one sector read per
     /// allocation and a dozen.
     alloc_hint: Cell<u32>,
+    /// Sequence number stamped on the next journal commit. Diagnostic only -
+    /// correctness comes from the header's state field, not from this - but a
+    /// replay that can name which transaction it restored is a great deal
+    /// easier to reason about after a crash.
+    journal_seq: Cell<u64>,
 }
 
 unsafe impl Send for Racfs {}
@@ -375,6 +428,7 @@ impl Racfs {
             cache: UnsafeCell::new(cache),
             sb: UnsafeCell::new(sb),
             alloc_hint: Cell::new(0),
+            journal_seq: Cell::new(1),
         }))
     }
 
@@ -391,8 +445,10 @@ impl Racfs {
     pub fn format_and_new(device: Arc<dyn BlockDevice>) -> VfsResult<Arc<Self>> {
         let total_sectors = device.sector_count() as u32;
 
-        // Layout calculation.
-        let bitmap_start: u32 = 1;
+        // Layout calculation. The journal sits between the superblock and the
+        // bitmap, so `bitmap_start` is where its length is recorded - see the
+        // header comment on why neither region is a superblock field.
+        let bitmap_start: u32 = 1 + JOURNAL_SECTORS;
         let inode_sectors = MAX_INODES.div_ceil(INODES_PER_SECTOR);
 
         // Size the bitmap so it describes every data block, rather than
@@ -407,7 +463,7 @@ impl Racfs {
         // future edit breaking that monotonicity, not a real bound.
         let mut bitmap_sectors: u32 = 1;
         for _ in 0..8 {
-            let overhead = 1 + bitmap_sectors + inode_sectors as u32;
+            let overhead = 1 + JOURNAL_SECTORS + bitmap_sectors + inode_sectors as u32;
             let data_blocks = total_sectors.saturating_sub(overhead) as usize;
             let needed = data_blocks.div_ceil(BLOCKS_PER_BITMAP_SECTOR).max(1) as u32;
             if needed <= bitmap_sectors {
@@ -442,10 +498,22 @@ impl Racfs {
             .write_sector(0, &sb_buf)
             .map_err(|_| VfsError::IoError)?;
 
+        // An empty journal header. Without it a fresh disk's journal sector
+        // holds whatever was there before, and a stale committed header would
+        // replay a previous filesystem's sectors over this one at first mount.
+        let zero = [0u8; SECTOR_SIZE];
+        {
+            let mut header = [0u8; SECTOR_SIZE];
+            write_u32_le(&mut header, 0, JOURNAL_MAGIC);
+            write_u32_le(&mut header, 4, JOURNAL_EMPTY);
+            cache
+                .write_sector(1, &header)
+                .map_err(|_| VfsError::IoError)?;
+        }
+
         // Zero bitmap. Every sector of it: a stale sector left from a
         // previous filesystem would read as "allocated" and quietly cost the
         // new one 4096 blocks.
-        let zero = [0u8; SECTOR_SIZE];
         for s in 0..bitmap_sectors {
             cache
                 .write_sector((bitmap_start + s) as u64, &zero)
@@ -479,16 +547,18 @@ impl Racfs {
             cache: UnsafeCell::new(cache),
             sb: UnsafeCell::new(sb),
             alloc_hint: Cell::new(0),
+            journal_seq: Cell::new(1),
         });
         fs.write_inode(0, &root_inode)?;
         fs.cache_mut().flush().map_err(|_| VfsError::IoError)?;
 
         crate::serial::serial_println!(
-            "[  RACFS  ] Formatted: {} sectors, {} data blocks, {} inodes, {} bitmap sectors",
+            "[  RACFS  ] Formatted: {} sectors, {} data blocks, {} inodes, {} bitmap sectors, {} journal sectors",
             total_sectors,
             data_block_count,
             MAX_INODES,
-            bitmap_sectors
+            bitmap_sectors,
+            JOURNAL_SECTORS
         );
 
         Ok(fs)
@@ -532,6 +602,11 @@ impl Racfs {
     /// Force all dirty cache entries to disk. Idempotent — no-op if nothing
     /// is dirty. Called by sys_sync and the periodic flushd kernel task.
     pub fn sync(&self) -> VfsResult<()> {
+        // The superblock too: it lives in memory and only reaches the disk
+        // when something writes it. `sync` promising durability while
+        // leaving `free_blocks` stale was a lie by omission - and the
+        // sb_drift=-1 that kept showing up on "cleanly" seeded images.
+        self.flush_sb()?;
         self.cache_mut().flush().map_err(|_| VfsError::IoError)
     }
 
@@ -549,6 +624,225 @@ impl Racfs {
         self.cache_mut()
             .write_sector(0, &buf)
             .map_err(|_| VfsError::IoError)
+    }
+
+    // --- Metadata journal ---------------------------------------------------
+    //
+    // Write-ahead log for metadata. An operation's sectors are copied into the
+    // journal and a commit record is written before any of them is allowed to
+    // land in place, so a crash leaves the filesystem either entirely before
+    // the operation or entirely after it - never in the half-applied state
+    // that once made a directory block read as file text and took the kernel
+    // down with `name_len = 111`.
+    //
+    // File *data* is deliberately not journalled. Logging it would double
+    // every write and bound file size by the journal; losing the tail of a
+    // file that was being written during a crash is the normal, expected
+    // outcome, whereas losing the directory that names it is not.
+
+    fn journal_header_sector(&self) -> u64 {
+        self.sb().journal_start()
+    }
+
+    fn journal_slot_sector(&self, index: usize) -> u64 {
+        self.sb().journal_start() + 1 + index as u64
+    }
+
+    /// Write the journal header. This single sector write is the atomic point
+    /// of the whole scheme: before it the operation did not happen, after it
+    /// the operation is guaranteed to complete, if necessary by replay.
+    fn write_journal_header(&self, state: u32, seq: u64, lbas: &[u64]) -> VfsResult<()> {
+        let mut buf = [0u8; SECTOR_SIZE];
+        write_u32_le(&mut buf, 0, JOURNAL_MAGIC);
+        write_u32_le(&mut buf, 4, state);
+        buf[8..16].copy_from_slice(&seq.to_le_bytes());
+        write_u32_le(&mut buf, 16, lbas.len() as u32);
+        for (i, lba) in lbas.iter().enumerate() {
+            let off = 24 + i * 8;
+            buf[off..off + 8].copy_from_slice(&lba.to_le_bytes());
+        }
+        let sector = self.journal_header_sector();
+        self.cache_mut()
+            .write_through(sector, &buf)
+            .map_err(|_| VfsError::IoError)
+    }
+
+    /// Read the journal header as (state, seq, target LBAs).
+    ///
+    /// A header whose magic does not match is treated as an empty journal
+    /// rather than an error: that is what an image from before the journal
+    /// existed looks like, and refusing to mount it would be wrong.
+    fn read_journal_header(&self) -> VfsResult<(u32, u64, Vec<u64>)> {
+        let mut buf = [0u8; SECTOR_SIZE];
+        let sector = self.journal_header_sector();
+        self.cache_mut()
+            .read_through(sector, &mut buf)
+            .map_err(|_| VfsError::IoError)?;
+
+        if read_u32_le(&buf, 0) != JOURNAL_MAGIC {
+            return Ok((JOURNAL_EMPTY, 0, Vec::new()));
+        }
+        let state = read_u32_le(&buf, 4);
+        let seq = u64::from_le_bytes([
+            buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+        ]);
+        // Clamped against what the journal can hold, not trusted: a torn or
+        // stale header could claim any count, and replaying that many slots
+        // would copy unrelated sectors over live metadata.
+        let count = (read_u32_le(&buf, 16) as usize).min(self.sb().journal_capacity());
+        let mut lbas = Vec::with_capacity(count);
+        for i in 0..count {
+            let off = 24 + i * 8;
+            lbas.push(u64::from_le_bytes([
+                buf[off],
+                buf[off + 1],
+                buf[off + 2],
+                buf[off + 3],
+                buf[off + 4],
+                buf[off + 5],
+                buf[off + 6],
+                buf[off + 7],
+            ]));
+        }
+        Ok((state, seq, lbas))
+    }
+
+    /// Finish any transaction a crash interrupted. Returns how many sectors
+    /// were restored, and the sequence number of the transaction they came
+    /// from.
+    ///
+    /// Runs before the consistency check, so `check()` sees the filesystem as
+    /// the completed operation left it rather than mid-write.
+    pub fn replay_journal(&self) -> VfsResult<(u32, u64)> {
+        if !self.sb().has_journal() {
+            return Ok((0, 0));
+        }
+        let (state, seq, lbas) = self.read_journal_header()?;
+        if state != JOURNAL_COMMITTED || lbas.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let total_sectors = self.sb().total_sectors as u64;
+        let mut restored = 0u32;
+        for (i, &lba) in lbas.iter().enumerate() {
+            // A target outside the device means the header is not
+            // trustworthy. Skip it rather than write somewhere arbitrary;
+            // the check that follows the mount will report what is left.
+            if lba >= total_sectors {
+                continue;
+            }
+            let mut buf = [0u8; SECTOR_SIZE];
+            self.cache_mut()
+                .read_through(self.journal_slot_sector(i), &mut buf)
+                .map_err(|_| VfsError::IoError)?;
+            self.cache_mut()
+                .write_through(lba, &buf)
+                .map_err(|_| VfsError::IoError)?;
+            restored += 1;
+        }
+
+        // Only once every sector is in place. Clearing the header first would
+        // turn a crash during replay into permanent corruption; as written, a
+        // crash mid-replay simply replays again next boot, which is safe
+        // because writing the same sector twice is the same as writing it
+        // once.
+        self.write_journal_header(JOURNAL_EMPTY, seq, &[])?;
+
+        // The superblock was very likely one of the replayed sectors.
+        let mut sb_buf = [0u8; SECTOR_SIZE];
+        self.cache_mut()
+            .read_through(0, &mut sb_buf)
+            .map_err(|_| VfsError::IoError)?;
+        *self.sb_mut() = superblock_from_sector(&sb_buf);
+        self.journal_seq.set(seq.saturating_add(1));
+
+        Ok((restored, seq))
+    }
+
+    /// Run `op` as one journalled transaction.
+    ///
+    /// While it runs, every sector it writes is pinned in the cache: neither
+    /// eviction nor `flush()` may put one on the device, so nothing lands in
+    /// place until the commit record says the whole operation exists. On
+    /// failure the pinned sectors are dropped and the superblock re-read,
+    /// which is a complete rollback precisely because none of them ever
+    /// reached the disk.
+    fn transaction<T>(&self, op: impl FnOnce() -> VfsResult<T>) -> VfsResult<T> {
+        if !self.sb().has_journal() {
+            // An image from before the journal existed. Behave exactly as
+            // that image always has: correct, just not crash-atomic.
+            return op();
+        }
+
+        self.cache_mut().begin_recording();
+        let result = op();
+
+        match result {
+            Ok(value) => {
+                // The superblock changes with almost every metadata operation
+                // (free_inodes, free_blocks) and has to be part of the same
+                // transaction; a commit without it replays into a filesystem
+                // whose counters disagree with its bitmap.
+                let sb_result = self.flush_sb();
+                let sectors: Vec<u64> = self.cache_mut().recorded().to_vec();
+                self.cache_mut().end_recording();
+                sb_result?;
+                self.journal_commit(&sectors)?;
+                Ok(value)
+            }
+            Err(e) => {
+                self.cache_mut().discard_recorded();
+                let mut sb_buf = [0u8; SECTOR_SIZE];
+                if self.cache_mut().read_through(0, &mut sb_buf).is_ok() {
+                    *self.sb_mut() = superblock_from_sector(&sb_buf);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Log `sectors`, mark the log committed, apply them, then clear the log.
+    fn journal_commit(&self, sectors: &[u64]) -> VfsResult<()> {
+        if sectors.is_empty() {
+            return Ok(());
+        }
+
+        // Too large to log. The operation is already staged in the cache and
+        // is correct; what it loses is atomicity, so it degrades to the
+        // pre-journal behaviour rather than failing. Said out loud, because a
+        // filesystem quietly dropping its crash guarantee is worth noticing.
+        if sectors.len() > self.sb().journal_capacity() {
+            crate::serial::serial_println!(
+                "[  RACFS  ] transaction of {} sectors exceeds the {}-slot journal; writing unjournaled",
+                sectors.len(),
+                self.sb().journal_capacity()
+            );
+            return self.cache_mut().flush().map_err(|_| VfsError::IoError);
+        }
+
+        // 1. The operation's sectors, as the cache has them, into the log.
+        for (i, &lba) in sectors.iter().enumerate() {
+            let mut buf = [0u8; SECTOR_SIZE];
+            self.cache_mut()
+                .peek_sector(lba, &mut buf)
+                .map_err(|_| VfsError::IoError)?;
+            self.cache_mut()
+                .write_through(self.journal_slot_sector(i), &buf)
+                .map_err(|_| VfsError::IoError)?;
+        }
+
+        // 2. The commit record. Everything before this point is undone by a
+        //    crash; everything after it is completed by one.
+        let seq = self.journal_seq.get();
+        self.write_journal_header(JOURNAL_COMMITTED, seq, sectors)?;
+        self.journal_seq.set(seq.saturating_add(1));
+
+        // 3. Apply. Recording has ended, so these are no longer pinned.
+        self.cache_mut().flush().map_err(|_| VfsError::IoError)?;
+
+        // 4. Retire the log. A crash before this replays a transaction that
+        //    is already applied, which changes nothing.
+        self.write_journal_header(JOURNAL_EMPTY, seq, &[])
     }
 
     /// Read an on-disk inode by number.
@@ -1075,7 +1369,23 @@ impl Racfs {
         self.create_entry(parent_ino, name, ITYPE_DIR, 0o755)
     }
 
+    /// Create a file or directory, as one journalled transaction.
+    ///
+    /// The work spans an inode, its parent's directory block, the allocation
+    /// bitmap and the superblock. A crash between any two of those used to
+    /// leave a directory entry pointing at an inode that was never written,
+    /// or a block marked used by nobody.
     fn create_entry(&self, parent_ino: u32, name: &str, itype: u8, mode: u16) -> VfsResult<u32> {
+        self.transaction(|| self.create_entry_inner(parent_ino, name, itype, mode))
+    }
+
+    fn create_entry_inner(
+        &self,
+        parent_ino: u32,
+        name: &str,
+        itype: u8,
+        mode: u16,
+    ) -> VfsResult<u32> {
         if name.len() > MAX_NAME_LEN - 4 {
             return Err(VfsError::InvalidArgument);
         }
@@ -1120,6 +1430,10 @@ impl Racfs {
     /// drop the count rather than free blocks the other name still points at.
     /// A file with `nlink == 1` behaves exactly as before.
     pub fn unlink(&self, parent_ino: u32, name: &str) -> VfsResult<()> {
+        self.transaction(|| self.unlink_inner(parent_ino, name))
+    }
+
+    fn unlink_inner(&self, parent_ino: u32, name: &str) -> VfsResult<()> {
         let parent = self.read_inode(parent_ino)?;
         if parent.itype != ITYPE_DIR {
             return Err(VfsError::NotADirectory);
@@ -1157,6 +1471,10 @@ impl Racfs {
     /// in the VFS, a directory hard link turns the tree into a graph that
     /// `du`, `find` and the mount logic would all walk forever.
     pub fn link(&self, parent_ino: u32, name: &str, target_ino: u32) -> VfsResult<()> {
+        self.transaction(|| self.link_inner(parent_ino, name, target_ino))
+    }
+
+    fn link_inner(&self, parent_ino: u32, name: &str, target_ino: u32) -> VfsResult<()> {
         if name.is_empty() || name.len() > MAX_NAME_LEN - 4 {
             return Err(VfsError::InvalidArgument);
         }
@@ -1240,12 +1558,39 @@ impl Racfs {
         // block the file already has, rather than from 0, is what keeps a
         // sequential write linear instead of quadratic in the file's length;
         // at 8 blocks that distinction did not exist, at 16520 it does.
+        //
+        // Allocation is *metadata* - it touches the bitmap, the superblock's
+        // free count, and the inode's block map - so it runs as a
+        // transaction like any other metadata operation. It did not at
+        // first, and the roadmap's list ("create / unlink / rename /
+        // set_metadata") is why: extending a file mutates the same
+        // structures, and leaving it out meant two real holes. The cache
+        // flushes its sectors in whatever order it likes, so a crash could
+        // land the inode's new block pointers before the bitmap marked those
+        // blocks used - an inode referencing blocks the allocator will hand
+        // out again, the damage class fsck calls dangerous. And nothing on
+        // this path wrote the superblock at all, so every boot whose last
+        // operation was an extending write left `free_blocks` stale on disk
+        // - the sb_drift the journal-replay test kept finding in images
+        // believed clean.
         let already = inode.size as usize / SECTOR_SIZE;
-        for i in already..blocks_needed {
-            self.map_block_alloc(&mut inode, i)?;
+        if blocks_needed > already {
+            self.transaction(|| {
+                for i in already..blocks_needed {
+                    self.map_block_alloc(&mut inode, i)?;
+                }
+                // The block map is durable before any data lands in it. A
+                // crash after this commit leaves zeroed blocks the file owns
+                // - visible garbage at worst, never someone else's sectors.
+                self.write_inode(ino, &inode)
+            })?;
         }
 
-        // Write data across blocks.
+        // The data itself, outside any transaction. Journaling it would
+        // double every write and cap file size at the journal's slot count;
+        // losing the tail of a file that was mid-write is the expected
+        // outcome of a crash, in a way losing the metadata that names it is
+        // not.
         let mut done = 0usize;
         let mut pos = offset as usize;
         while done < data.len() {
@@ -1261,10 +1606,15 @@ impl Racfs {
             pos += chunk;
         }
 
+        // Size last, and only after the data it describes is in the cache:
+        // a crash before this commit reads back the old length, never
+        // uninitialised bytes.
         if end as u32 > inode.size {
             inode.size = end as u32;
+            self.transaction(|| self.write_inode(ino, &inode))?;
+        } else {
+            self.write_inode(ino, &inode)?;
         }
-        self.write_inode(ino, &inode)?;
         self.cache_mut().flush().map_err(|_| VfsError::IoError)?;
         Ok(data.len())
     }
@@ -1522,6 +1872,10 @@ impl Racfs {
 
     /// Update inode mode/uid/gid.
     pub fn set_inode_metadata(&self, ino: u32, meta: &InodeMetadata) -> VfsResult<()> {
+        self.transaction(|| self.set_inode_metadata_inner(ino, meta))
+    }
+
+    fn set_inode_metadata_inner(&self, ino: u32, meta: &InodeMetadata) -> VfsResult<()> {
         let mut di = self.read_inode(ino)?;
         if di.itype == ITYPE_FREE {
             return Err(VfsError::NotFound);

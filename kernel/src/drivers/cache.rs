@@ -37,6 +37,13 @@ pub struct BlockCache {
     /// Statistics.
     hits: u64,
     misses: u64,
+    /// Sectors written since `begin_recording`, in write order, or None when
+    /// not recording.
+    ///
+    /// This exists for the racfs metadata journal, which has to know exactly
+    /// which sectors an operation touched *before* any of them reaches the
+    /// disk. See `evict_one` for the other half of that guarantee.
+    recording: Option<Vec<u64>>,
 }
 
 // SAFETY: Access serialized by cli/sti (single-core MVP).
@@ -52,6 +59,7 @@ impl BlockCache {
             seq: 0,
             hits: 0,
             misses: 0,
+            recording: None,
         }
     }
 
@@ -107,6 +115,12 @@ impl BlockCache {
         self.seq += 1;
         let seq = self.seq;
 
+        if let Some(list) = self.recording.as_mut() {
+            if !list.contains(&lba) {
+                list.push(lba);
+            }
+        }
+
         // Update existing entry if present.
         for entry in self.entries.iter_mut() {
             if entry.lba == lba {
@@ -133,9 +147,21 @@ impl BlockCache {
     }
 
     /// Flush all dirty entries to the device.
+    ///
+    /// Sectors belonging to an open transaction are skipped, for the same
+    /// reason `evict_one` skips them: nothing an operation touched may reach
+    /// the disk before the journal's commit record does. racfs operations
+    /// call `flush()` at the end of their own work, so without this the
+    /// journal would be writing a log of changes the disk already had.
     pub fn flush(&mut self) -> BlockResult<()> {
+        // Collected first: the borrow checker will not allow consulting
+        // `self.recording` while `self.entries` is mutably borrowed.
+        let pinned: Vec<u64> = match self.recording.as_ref() {
+            Some(list) => list.clone(),
+            None => Vec::new(),
+        };
         for entry in self.entries.iter_mut() {
-            if entry.dirty {
+            if entry.dirty && !pinned.contains(&entry.lba) {
                 self.device.write_sector(entry.lba, &entry.data)?;
                 entry.dirty = false;
             }
@@ -143,11 +169,81 @@ impl BlockCache {
         Ok(())
     }
 
+    /// Drop the cached copies of an aborted transaction's sectors without
+    /// writing them, so the next read comes from the disk again.
+    ///
+    /// This is the rollback: those sectors were never allowed onto the
+    /// device, so forgetting them is all it takes to undo a half-finished
+    /// operation.
+    pub fn discard_recorded(&mut self) {
+        let pinned: Vec<u64> = match self.recording.as_ref() {
+            Some(list) => list.clone(),
+            None => return,
+        };
+        self.entries
+            .retain(|e| !(e.dirty && pinned.contains(&e.lba)));
+        self.recording = None;
+    }
+
     /// Flush and invalidate all entries.
     pub fn flush_and_invalidate(&mut self) -> BlockResult<()> {
         self.flush()?;
         self.entries.clear();
         Ok(())
+    }
+
+    /// Start recording which sectors get written, for the racfs journal.
+    ///
+    /// Recording is not nesting: a second call discards whatever the first
+    /// collected. racfs opens exactly one transaction at a time and every
+    /// path out of one ends in `end_recording`, so a nested begin would mean
+    /// a bug worth losing the list over rather than silently merging two
+    /// operations into one transaction.
+    pub fn begin_recording(&mut self) {
+        self.recording = Some(Vec::new());
+    }
+
+    /// Sectors written since `begin_recording`, in write order.
+    pub fn recorded(&self) -> &[u64] {
+        match self.recording.as_ref() {
+            Some(list) => list.as_slice(),
+            None => &[],
+        }
+    }
+
+    /// Stop recording. Cached data is untouched; only the list is dropped.
+    pub fn end_recording(&mut self) {
+        self.recording = None;
+    }
+
+    /// Read a sector as the cache currently sees it, without disturbing LRU
+    /// order or counting a hit. Used by the journal to copy an operation's
+    /// sectors into the log before they are allowed in place.
+    pub fn peek_sector(&mut self, lba: u64, out: &mut [u8; SECTOR_SIZE]) -> BlockResult<()> {
+        for entry in self.entries.iter() {
+            if entry.lba == lba {
+                out.copy_from_slice(&entry.data);
+                return Ok(());
+            }
+        }
+        self.device.read_sector(lba, out)
+    }
+
+    /// Write straight to the device, bypassing the cache entirely.
+    ///
+    /// The journal needs this for its own sectors. Going through the cache
+    /// would leave the log's ordering at the mercy of eviction, and the log
+    /// is the one thing whose ordering has to be exact.
+    pub fn write_through(&mut self, lba: u64, data: &[u8; SECTOR_SIZE]) -> BlockResult<()> {
+        // Drop any cached copy first, or a later read would serve stale data
+        // for a sector the device has just been given a newer version of.
+        self.entries.retain(|e| e.lba != lba);
+        self.device.write_sector(lba, data)
+    }
+
+    /// Read straight from the device, bypassing the cache.
+    pub fn read_through(&mut self, lba: u64, out: &mut [u8; SECTOR_SIZE]) -> BlockResult<()> {
+        self.device.read_sector(lba, out)
     }
 
     /// Number of dirty entries.
@@ -165,20 +261,48 @@ impl BlockCache {
         if self.entries.is_empty() {
             return Ok(());
         }
-        let mut lru_idx = 0;
-        let mut lru_seq = self.entries[0].access_seq;
+
+        // A sector recorded by the open transaction must not reach the device
+        // yet: the journal's whole guarantee is that nothing lands in place
+        // before the commit record does. Evicting one here would put a
+        // half-applied operation on disk with no journal entry describing it —
+        // exactly the torn state journaling exists to prevent, arriving
+        // through the one path that looks like harmless cache maintenance.
+        //
+        // Such an entry is skipped rather than written. Clean entries can
+        // always go, since re-reading them costs a read and nothing else.
+        let mut lru_idx: Option<usize> = None;
+        let mut lru_seq = u64::MAX;
         for (i, entry) in self.entries.iter().enumerate() {
+            if entry.dirty && self.is_recorded(entry.lba) {
+                continue;
+            }
             if entry.access_seq < lru_seq {
                 lru_seq = entry.access_seq;
-                lru_idx = i;
+                lru_idx = Some(i);
             }
         }
-        // Flush if dirty.
+
+        // Everything cached belongs to the open transaction. Refusing is the
+        // only correct answer: the caller wanted room for one more sector of
+        // an operation that is already larger than the cache, and there is no
+        // way to make room without breaking write ordering.
+        let Some(lru_idx) = lru_idx else {
+            return Err(BlockError::OutOfRange);
+        };
+
         if self.entries[lru_idx].dirty {
             let e = &self.entries[lru_idx];
             self.device.write_sector(e.lba, &e.data)?;
         }
         self.entries.swap_remove(lru_idx);
         Ok(())
+    }
+
+    fn is_recorded(&self, lba: u64) -> bool {
+        match self.recording.as_ref() {
+            Some(list) => list.contains(&lba),
+            None => false,
+        }
     }
 }

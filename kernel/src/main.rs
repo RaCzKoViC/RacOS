@@ -167,9 +167,10 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Initialize drivers (subsystem, block, PCI).
     drivers::init();
-    // Phase F smoke test: verify AHCI persistence (write marker on first boot,
-    // confirm it on later boots).
-    drivers::ahci_self_test();
+    // The Phase F AHCI persistence smoke used to run here. It wrote a marker
+    // into LBA 1, which the filesystem has owned since Phase F ended - see the
+    // note where it used to be defined in drivers/mod.rs. racfs's boot-counter
+    // and big-probe prove the same thing through the real filesystem.
     // Phase E smoke test: verify the NIC TX path before the rest of init runs.
     drivers::nic_self_test();
     // Phase E krok 2/3: bring up the IPv4 stack and run the ARP→ICMP→DNS demo.
@@ -348,6 +349,22 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 // to mount a damaged disk would strand the one shell that
                 // could repair it, and the damage classes differ enough in
                 // severity that a blanket refusal would be wrong.
+                // Finish whatever a crash interrupted, before anything reads
+                // the filesystem. The check below then sees the state the
+                // completed operation left, not the middle of a write.
+                match racfs.replay_journal() {
+                    Ok((0, _)) => {}
+                    Ok((sectors, seq)) => serial::serial_println!(
+                        "[  0.000367] RACFS sda: journal replayed transaction {} ({} sectors restored)",
+                        seq,
+                        sectors
+                    ),
+                    Err(e) => serial::serial_println!(
+                        "[  0.000367] RACFS sda: journal replay failed: {:?}",
+                        e
+                    ),
+                }
+
                 match racfs.check() {
                     Ok(r) if r.is_clean() => {
                         serial::serial_println!("[  0.000368] RACFS sda: fsck clean");
