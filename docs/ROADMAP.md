@@ -177,11 +177,56 @@ covered by `T20-*`, `T21-COREUTILS-OK`, `T21-HARDLINK-OK`, `T22-ALIAS-OK` and
 
 ### 3.2 racfs maturity
 
-- **Journaling** — log-mode write-then-commit for metadata operations
-  (create / unlink / rename / set_metadata). Avoids torn superblock
-  states on crash. **Still open**, and now the largest single gap in
-  §3.2: `check()` detects the damage a torn write causes, journaling is
-  what would prevent it.
+- ✅ **Journaling** — shipped. Write-ahead log for metadata: an
+  operation's sectors are copied into the journal and a commit record is
+  written before any of them is allowed in place, so a crash leaves the
+  filesystem entirely before the operation or entirely after it.
+  `create` / `unlink` / `link` / `set_metadata` each run as one
+  transaction; replay happens at mount, before `check()`.
+
+  The journal lives in `[1, bitmap_start)` and its length is derived the
+  same way the bitmap's is, so an image from before it existed reports a
+  length of 0 and runs unjournaled — which is exactly what it is. Again
+  no format version bump.
+
+  **The subtlety that decides whether any of this works** is not in the
+  log format, it is in the block cache. `evict_one` could write a dirty
+  sector to the device at any moment, and `flush()` is called by the
+  operations themselves — either one would put half an operation on disk
+  with no journal entry describing it, arriving through a path that looks
+  like harmless cache maintenance. Sectors belonging to an open
+  transaction are therefore pinned: neither eviction nor flush may write
+  them until the commit record exists. That pinning is also what makes
+  rollback trivial — a failed operation's sectors never reached the disk,
+  so dropping the cached copies undoes it completely.
+
+  File *data* is deliberately not journalled. Logging it would double
+  every write and bound file size by the journal, and losing the tail of
+  a file that was mid-write is the expected outcome of a crash; losing
+  the directory that names it is not.
+
+  The list above says "and the allocation phase of `write_file`", and
+  that addition is a correction to this very entry: the original plan
+  said "create / unlink / rename / set_metadata", and extending a file
+  mutates the same structures (bitmap, superblock free count, inode
+  block map). Following the list as written left a crash window where
+  the inode's new pointers could land before the bitmap marked the
+  blocks used — the dangerous damage class — and left `free_blocks`
+  stale on disk after any boot that ended with an extending write.
+
+  Verified two ways, because the ordinary smokes shut the guest down
+  properly and so never touch the recovery path:
+
+  - `scripts/test-crash-consistency.ps1` — hard-kills QEMU during
+    metadata churn, same disk across iterations, next boot must be clean.
+  - `scripts/test-journal-replay.ps1` — forges the crash window instead
+    of waiting to hit it: corrupts a live inode-table sector, then boots
+    once with an empty journal (control — fsck must see the damage, which
+    proves the test can fail) and once with a committed journal entry
+    holding the original sector (treatment — must replay and come up
+    clean). The control phase is what caught two real defects: the
+    `write_file` hole above, and the Phase F AHCI self-test overwriting
+    LBA 1 (see §6 note below).
 - ✅ **Indirect blocks** — shipped. 8 direct + 128 single-indirect +
   128×128 double-indirect, so a file is 8.06 MiB instead of **4096
   bytes**. Directories share the map, so they are no longer capped at 64
@@ -401,6 +446,15 @@ The next "system becomes a platform" milestone:
 
 Small, known issues that don't fit a milestone but should stay visible:
 
+- ~~**Phase F AHCI persistence self-test**~~ — **REMOVED 2026-08-29**,
+  because it was corrupting the filesystem it shared a disk with. It
+  wrote a 17-byte marker into LBA 1 on every boot that did not find it
+  there; LBA 1 has belonged to the filesystem since Phase F ended (first
+  the allocation bitmap, now the journal header). The "genuinely damaged"
+  evidence image this roadmap cites for fsck's verification carries that
+  marker at LBA 1 — most of its damage was manufactured by this
+  self-test, not by power loss. Its job is done better by `boot-counter`
+  and `big-probe` surviving reboots through the real filesystem.
 - ~~**racsh `$(...)` edge case**~~ — **FIXED**. Was never a racsh bug:
   `prepare_user_stack` wrote the envp NULL terminator one slot past the
   reserved argc/argv/envp block, clobbering the argv string data directly

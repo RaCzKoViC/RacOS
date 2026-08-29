@@ -11,6 +11,91 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Added — v0.3 §3.2 (racfs metadata journal)
+
+- **Write-ahead log for metadata.** An operation's sectors are copied into
+  the journal and a commit record is written before any of them is allowed
+  to land in place, so a crash leaves the filesystem entirely before the
+  operation or entirely after it — never half-applied. `create` / `unlink` /
+  `link` / `set_metadata` and the allocation phase of `write_file` each run
+  as one transaction; replay happens at mount, before the consistency check,
+  so `check()` sees what the completed operation left rather than the middle
+  of a write.
+
+  The journal lives in `[1, bitmap_start)` and its length is derived the
+  same way the bitmap's is, so an image from before it existed reports a
+  length of 0 and simply runs unjournaled. Again no format version bump.
+
+  **The part that decides whether any of this works is in the block cache,
+  not the log format.** `evict_one` could write a dirty sector to the device
+  at any moment, and `flush()` is called by the operations themselves —
+  either would put half an operation on disk with no journal entry
+  describing it, through a path that looks like harmless cache maintenance.
+  Sectors belonging to an open transaction are therefore pinned: neither
+  eviction nor flush may write them until the commit record exists. The same
+  pinning makes rollback trivial — a failed operation's sectors never
+  reached the disk, so dropping the cached copies undoes it completely.
+
+  File *data* is deliberately not journalled: logging it would double every
+  write and bound file size by the journal, and losing the tail of a file
+  that was mid-write is the expected outcome of a crash, in a way losing the
+  directory that names it is not.
+
+- **`write_file`'s allocation phase is a transaction too — this was a real
+  hole, found by testing.** ROADMAP §3.2 listed "create / unlink / rename /
+  set_metadata" and the first implementation followed that list. But
+  extending a file mutates the bitmap, the superblock's free count and the
+  inode's block map — the same structures. The cache flushes in whatever
+  order it likes, so a crash could land the inode's new pointers before the
+  bitmap marked those blocks used: an inode referencing blocks the allocator
+  will hand out again, the damage class fsck calls dangerous. And nothing on
+  that path wrote the superblock at all, so any boot whose last operation
+  was an extending write left `free_blocks` stale on disk. Data is written
+  after the allocation commit, and the size is updated last — so a crash
+  reads the old length, never uninitialised bytes. `sync()` now flushes the
+  superblock as well; it promised durability while omitting it.
+
+- **Two new hostile smokes**, because the ordinary ones cannot test recovery
+  — they shut the guest down cleanly, so they exercise the commit path and
+  never the replay path:
+
+  - `scripts/test-crash-consistency.ps1` kills QEMU outright during a
+    metadata churn loop and asserts the next boot mounts clean. The disk is
+    deliberately reused across iterations so damage would accumulate.
+  - `scripts/test-journal-replay.ps1` forges the crash window instead of
+    waiting to hit it: it corrupts a live inode-table sector on the image
+    directly, and boots twice — once with an empty journal (the **control**:
+    fsck must report the damage, proving the test can fail) and once with a
+    committed journal entry holding the original sector (the **treatment**:
+    the boot must replay it and come up clean). Both phases start from a
+    byte-identical snapshot of the seeded image. Result:
+    `replay ran: transaction 4242, 1 sector restored` → `fsck clean`.
+
+### Removed — the Phase F AHCI self-test, which was corrupting the disk
+
+- **`ahci_self_test()` wrote "RACOS-AHCI-PhaseF" into LBA 1 on every boot
+  that did not find it there.** It was written when nothing else lived on
+  sda; LBA 1 has belonged to the filesystem ever since — first to the
+  allocation bitmap, now to the journal header. Every boot that re-wrote
+  the marker overwrote 17 bytes of live filesystem metadata.
+
+  This rewrites the history of this project's corruption evidence.
+  `racos-disk-corrupt-evidence.img`, kept as proof of "genuine corruption"
+  and cited below for its `leaked=52` diagnosis, holds
+  `SACOS-AHCI-PhaseF` at LBA 1 — the marker with one extra bit where the
+  filesystem later allocated block 0. The marker sets 55 bits; fsck
+  reported 52 leaked blocks and `unallocated_in_use=4`. **The corruption
+  fsck was built to detect was largely being manufactured by this
+  self-test**, boot after boot, not by unlucky power loss. The consistency
+  check entry below stands as written — the check does detect exactly this
+  damage — but the damage's origin was us.
+
+  Deleted rather than moved: what it proved is now proved properly by
+  `boot-counter` and `big-probe` surviving reboots through the real
+  filesystem, which says more about AHCI persistence than a raw sector
+  marker ever did. Found by the journal-replay test's control phase, whose
+  first run showed a journal header full of ASCII.
+
 ### Added — v0.3 §3.3 (mount layout: /home, /etc, /var/log, /var/lib/rpkg)
 
 - **Four directories now survive a reboot**, as subtree mounts of the single
