@@ -108,14 +108,29 @@ $checks = @(
     # big-probe is 8192 bytes and the assertion reads its *tail*, which lives
     # in a block reachable only through the inode's indirect pointer.
     @{ Name = "boot1: created big-probe";    Log = $b1; Pattern = "created big-probe \(8192 B, past the direct blocks\)" },
-    @{ Name = "boot2: indirect blocks survived"; Log = $b2; Pattern = "big-probe tail = 1 \(expected 1, indirect blocks survived reboot\)" }
+    @{ Name = "boot2: indirect blocks survived"; Log = $b2; Pattern = "big-probe tail = 1 \(expected 1, indirect blocks survived reboot\)" },
+    # v0.3 section 3.3. The /etc pair is the cross-reboot assertion: boot1 copies the
+    # initramfs defaults onto the disk, and boot2 must mount that /etc without
+    # seeding it again. A boot2 that re-seeds would mean the persistent /etc
+    # came up empty, which is also the state that leaves init with no units.
+    @{ Name = "boot1: /home persistent";         Log = $b1; Pattern = "/home is persistent \(sda:/home\)" },
+    @{ Name = "boot1: /var/log persistent";      Log = $b1; Pattern = "/var/log is persistent \(sda:/var/log\)" },
+    @{ Name = "boot1: /var/lib/rpkg persistent"; Log = $b1; Pattern = "/var/lib/rpkg is persistent \(sda:/var/lib/rpkg\)" },
+    @{ Name = "boot1: /etc seeded from initramfs"; Log = $b1; Pattern = "/etc seed: copied /etc/racinit/base.target" },
+    @{ Name = "boot2: /etc persistent";          Log = $b2; Pattern = "/etc is persistent \(sda:/etc\)" },
+    @{ Name = "boot2: /etc NOT re-seeded";       Log = $b2; Pattern = "/etc seed: copied"; Absent = $true }
 )
 
 Write-Host ""
 Write-Host "=== Persistence assertions ==="
 $fail = 0
 foreach ($c in $checks) {
-    if ($c.Log -match $c.Pattern) { Write-Host ("  PASS  " + $c.Name) }
+    # Absent = the pattern must NOT appear. Needed because some of what this
+    # smoke proves is that a boot did *not* do something -- re-seeding /etc,
+    # for instance, which would mean the persistent copy did not survive.
+    $found = [bool]($c.Log -match $c.Pattern)
+    $ok = if ($c.Absent) { -not $found } else { $found }
+    if ($ok) { Write-Host ("  PASS  " + $c.Name) }
     else { Write-Host ("  FAIL  " + $c.Name); $fail++ }
 }
 

@@ -114,6 +114,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_network_tools();
     test_fsck_reports_clean();
     test_large_files_and_dirs();
+    test_persistent_mount_layout();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
     test_rpkg_install_list_remove();
@@ -950,6 +951,70 @@ fn test_large_files_and_dirs() {
         && wide_bitmap == Some(0)
     {
         println("T34-BIGFILE-OK");
+    }
+}
+
+/// /home, /etc, /var/log and /var/lib/rpkg are subtrees of the persistent
+/// disk (ROADMAP v0.3 §3.3).
+///
+/// The failure this is really written against is silent: a subtree mount
+/// shares one Racfs with the whole-disk mount at /mnt and differs only in
+/// which inode it calls root, so a write path that resolves from inode 0
+/// anyway still succeeds, still reads back, and still looks correct -- it
+/// just put the file in the disk root. Checking the file through /mnt is what
+/// separates "it worked" from "it went where it was supposed to".
+fn test_persistent_mount_layout() {
+    println("\n[test] persistent mount layout");
+
+    // Written through /home, and visible at the matching path under the
+    // whole-disk mount. Both halves matter: the second is the one that fails
+    // if subtree routing is broken.
+    let home = shell_run(
+        b"echo subtree-ok > /home/probe.txt; sync; \
+          a=$(cat /home/probe.txt); b=$(cat /mnt/home/probe.txt); \
+          test \"$a\" = subtree-ok && test \"$b\" = subtree-ok\0",
+    );
+    check!(
+        "a file written to /home lands in sda:/home",
+        home == Some(0)
+    );
+
+    // ...and nowhere else. If the write had resolved from the disk root the
+    // file would be at /mnt/probe.txt, which reads back just as happily.
+    let not_root = shell_run(b"test -e /mnt/probe.txt && exit 1; exit 0\0");
+    check!("...and not in the disk root", not_root == Some(0));
+
+    let log = shell_run(
+        b"echo logline > /var/log/probe.log; sync; \
+          c=$(cat /var/log/probe.log); d=$(cat /mnt/var/log/probe.log); \
+          test \"$c\" = logline && test \"$d\" = logline\0",
+    );
+    check!("/var/log writes land in sda:/var/log", log == Some(0));
+
+    // /etc is the boot-critical one: init reads its units through this mount,
+    // so an empty or unreadable base.target means no shell at all next boot.
+    let etc = shell_run(b"n=$(wc -c < /etc/racinit/base.target); test \"$n\" -gt 0\0");
+    check!("/etc/racinit/base.target is readable", etc == Some(0));
+
+    // $HOME has to name a directory that exists, or racsh silently saves its
+    // history nowhere.
+    let home_var = shell_run(b"test \"$HOME\" = /home/racos && test -d /home/racos\0");
+    check!("$HOME names a real directory", home_var == Some(0));
+
+    // The mount points are visible in their parent listing. readdir lists the
+    // filesystem below a mount, not the mount table, so this only holds
+    // because the boot creates them as real directories underneath.
+    let visible = shell_run(b"l=$(ls /var | grep log | wc -l); test \"$l\" -ge 1\0");
+    check!("/var lists its mount points", visible == Some(0));
+
+    if home == Some(0)
+        && not_root == Some(0)
+        && log == Some(0)
+        && etc == Some(0)
+        && home_var == Some(0)
+        && visible == Some(0)
+    {
+        println("T35-MOUNTS-OK");
     }
 }
 
