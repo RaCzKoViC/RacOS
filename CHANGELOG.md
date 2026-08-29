@@ -11,6 +11,43 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Added — v0.4 first slice: the framebuffer gets an owner (§4.1, per §6b)
+
+- **`kernel/src/gfx.rs` — the framebuffer owner.** Nothing in the kernel
+  writes a pixel except through it: clients get a region or a `Surface`,
+  and the owner decides where those bytes land. The console now *asks* for
+  its region instead of assuming it owns the screen, and the status bar at
+  the bottom — a hue gradient with the OS name, drawn into an off-screen
+  `Surface` and presented by the owner — is the first client on the new
+  path. Per ROADMAP §6b this inversion is the point: a terminal that owns
+  the screen has to be taken apart the day a second window exists, so
+  v0.4's work is built as the bottom of a compositor from the start.
+
+- **The §4.1 format invariant, confirmed and handled.** GOP hands over
+  32bpp linear in BGRX (QEMU OVMF, always) or RGBX (possible on hardware);
+  BootInfo carried `PixelFormat` all along and nothing read it. The old
+  console wrote raw `0xRRGGBB` u32s — which happens to match BGRX byte
+  order on little-endian, so it looked correct for two milestones and
+  would have swapped red and blue on RGBX hardware. `gfx::encode()` is now
+  the one place that knows the channel order.
+
+- **UTF-8 multibyte in the print path** (from §4.2's list). Bytes ≥ 0x80
+  were silently dropped: multibyte text vanished and the cursor pretended
+  it was never there. The console decodes the sequence length and draws
+  one replacement glyph (a hollow box, `FONT[0x7F]`) per *character*, with
+  correct cursor arithmetic. Glyphs beyond ASCII need a bigger font —
+  still open.
+
+- **Gate 11, the graphics smoke** (`scripts/test-graphics.ps1`): asserts
+  the owner's claim line (geometry + channel order) and takes a **QMP
+  screendump** required to contain ≥ 1000 distinct non-zero pixel values
+  — 25 571 in practice, which only the gradient's per-pixel shading can
+  produce, so the number is reachable only if `Surface`/`present` actually
+  work. The dump earned its keep immediately: the first version drew the
+  status bar before the heap existed, the bar silently never appeared, and
+  every serial line still looked perfect. One distinct pixel value in the
+  dump — white text — was the only witness.
+
 ### Added — v0.3 §3.4 + §3.5: real-media boot, and MILESTONE-V0.3-OK
 
 **v0.3 is complete.** The guest prints the milestone marker itself, after a

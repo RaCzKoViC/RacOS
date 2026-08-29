@@ -374,10 +374,34 @@ moves to the parallel tracks as nice-to-have.
 
 ### 4.1 GOP framebuffer plumbing
 
-BootInfo already carries `framebuffer.address` / `pitch` / `height`;
-`fb_console.rs` writes pixels directly. Confirm and document the format
-invariant (UEFI spec → BGRA 32bpp on QEMU OVMF; physical hardware can
-present RGBA). Handle both.
+- ✅ Shipped, as `kernel/src/gfx.rs` — the framebuffer **owner** from §6b.
+  Nothing in the kernel writes a pixel except through it: clients get a
+  region or a `Surface`, and the owner decides where the bytes land. The
+  console asks for its region (`console_region()`) instead of assuming it
+  owns the screen; the status bar at the bottom is the first client
+  rendered through a real off-screen surface (`Surface` + `present`).
+
+  The format invariant, confirmed and handled: GOP hands over 32bpp
+  linear in **BGRX** (QEMU OVMF, always) or **RGBX** (possible on real
+  hardware); BootInfo carried `PixelFormat` all along and nothing read
+  it. The old console wrote raw `0xRRGGBB` u32s — which happens to match
+  BGRX byte order on little-endian, so it looked correct for two
+  milestones and would have swapped red and blue on RGBX hardware.
+  `gfx::encode()` is now the single place that knows the channel order.
+
+  Also in this slice from §4.2's list: **UTF-8 multibyte in the print
+  path**. Bytes ≥ 0x80 were silently dropped — multibyte text vanished
+  and the cursor pretended it was never there. The console now decodes
+  the sequence length and draws one replacement glyph (`FONT[0x7F]`, a
+  hollow box) per character, with correct cursor arithmetic. Real glyph
+  coverage beyond ASCII needs a bigger font and is still open.
+
+  Verified by gate 11 (`scripts/test-graphics.ps1`): the claim line with
+  geometry and channel order, plus a **QMP screendump** required to
+  contain ≥ 1000 distinct non-zero pixel values — 25 571 in practice.
+  The dump is the assertion the serial log cannot make: the first version
+  of this slice drew the status bar before the heap existed, the bar
+  silently never appeared, and every log line still looked perfect.
 
 ### 4.2 Graphical RacTerm
 
@@ -396,10 +420,12 @@ the GOP framebuffer.
 
 ### 4.4 Acceptance criteria (DoD for v0.4)
 
-- New CI job `Graphics smoke` boots QEMU with `-vga std`, asserts a
-  24-bit BGRA framebuffer was claimed + RacTerm wrote ≥ 1000 distinct
-  non-zero pixel values to it.
-- New marker `MILESTONE-V0.4-OK`.
+- ✅ The graphics smoke exists as gate 11: boots with `-vga std`, asserts
+  the claim line (geometry + channel order) and ≥ 1000 distinct non-zero
+  pixel values in a QMP screendump of the actual display.
+- ⏳ `MILESTONE-V0.4-OK` — not yet: §4.2's RacTerm-from-buffer rendering
+  and mouse tracking are still open, and the milestone marker waits for
+  them.
 
 ---
 
