@@ -343,7 +343,8 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 // severity that a blanket refusal would be wrong.
                 match racfs.check() {
                     Ok(r) if r.is_clean() => {
-                        serial::serial_println!("[  0.000368] RACFS sda: fsck clean")
+                        serial::serial_println!("[  0.000368] RACFS sda: fsck clean");
+                        report_unaddressable(&r);
                     }
                     Ok(r) => {
                         serial::serial_println!(
@@ -355,6 +356,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                             r.out_of_range_entries,
                             r.superblock_free_blocks_drift,
                         );
+                        report_unaddressable(&r);
                         if r.is_dangerous() {
                             // ASCII only: the serial console and the
                             // framebuffer both emit bytes verbatim, so a
@@ -1321,6 +1323,24 @@ fn flushd_task() -> ! {
 
 // ─── CI boot smoke harness ────────────────────────────────────────────────
 //
+/// Say so when part of the device is unreachable.
+///
+/// This is not damage, so it is deliberately not part of `is_clean()`: it
+/// means the image was formatted when the allocation bitmap was fixed at one
+/// sector and could describe only 4096 blocks. Nothing will corrupt, but the
+/// capacity `df` used to promise was never really there. Reformatting is what
+/// recovers it, and the message says so rather than leaving the reader to
+/// work out why a 16 MiB disk fills up at 2 MiB.
+fn report_unaddressable(r: &vfs::racfs::FsckReport) {
+    if r.unaddressable_blocks == 0 {
+        return;
+    }
+    serial::serial_println!(
+        "[  0.000369] RACFS sda: {} data blocks are unreachable (bitmap predates multi-sector layout); `umount /mnt` then `mkfs.racfs sda` recovers them",
+        r.unaddressable_blocks
+    );
+}
+
 // Compiled in only when the `ci-smoke` feature is enabled. The smoke runs
 // synchronous, deterministic assertions and signals the host via
 // isa-debug-exit (port 0xf4):

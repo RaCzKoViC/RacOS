@@ -6,11 +6,14 @@
 #
 #     <file>:<line> unsafe block missing SAFETY comment
 #
-# Exit code is *always* 0 — this is informational, not gating. RacOS
-# is still working through a ~400-block backlog (see ROADMAP.md T4.2)
-# and we don't want to block CI while we chip away at it. Use the
-# `--strict` flag to flip the exit code so a future CI gate can pick
-# this up after the backlog clears.
+# Without `--strict` the exit code is 0 for missing annotations: that was
+# the mode used while RacOS worked through its ~400-block backlog (ROADMAP
+# T4.2). The backlog cleared, so CI now runs this `--strict` as a required
+# gate and a missing annotation exits 1.
+#
+# Two conditions exit 2 whatever the mode, because both mean the scan did
+# not happen and reporting a clean tree would be a lie: a missing tool, and
+# a scan that matched no unsafe blocks at all.
 #
 # Usage:
 #   bash scripts/check-unsafe-safety.sh
@@ -32,6 +35,19 @@ for arg in "$@"; do
             exit 2
             ;;
     esac
+done
+
+# The tools this needs. Checked up front because the failure mode otherwise is
+# silent and backwards: run under a bash whose PATH lacks coreutils (Git for
+# Windows' bare bash.exe does exactly this) and `grep` is not found, the scan
+# finds nothing, and the script reports "scanned 0 blocks; 0 missing" and exits
+# 0 -- a gate enforcing SAFETY annotations passing without reading a line.
+for tool in dirname grep sed; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "check-unsafe-safety: required tool '$tool' not found in PATH" >&2
+        echo "  (on Windows use Git Bash's own environment, e.g. C:\\Git\\bin\\bash.exe)" >&2
+        exit 2
+    fi
 done
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -63,6 +79,15 @@ done < <(grep -rn "unsafe {" kernel/src libs/libc-lite/src)
 
 echo ""
 echo "scanned $TOTAL unsafe blocks under kernel/ + libs/; $MISSING missing SAFETY"
+
+# Finding nothing is not a pass. The kernel has hundreds of unsafe blocks, so
+# zero means the scan did not happen -- wrong directory, a moved tree, a grep
+# that silently produced nothing. Reporting that as clean is the one outcome
+# this lint must never produce.
+if [ "$TOTAL" -eq 0 ]; then
+    echo "no unsafe blocks found at all: the scan did not run, not a clean tree" >&2
+    exit 2
+fi
 
 if [ "$STRICT" -eq 1 ] && [ "$MISSING" -gt 0 ]; then
     echo "strict mode: failing because $MISSING blocks are missing SAFETY annotations"

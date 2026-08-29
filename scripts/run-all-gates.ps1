@@ -33,6 +33,35 @@ Set-Location $Root
 # applies, and the kernel triple-faults before its first serial write.
 $KernelFlags = "-C relocation-model=static -C link-arg=-no-pie"
 
+# Gate 5 runs a shell script, and a bare `bash` is the wrong one twice over on
+# a stock Windows box:
+#
+#   - PATH resolves it to WSL's C:\Windows\System32\bash.exe, which refuses a
+#     CRLF script outright ("$'\r': command not found") and the gate hard-fails
+#     for a reason that has nothing to do with the code.
+#   - Git's inner usr\bin\bash.exe runs the script but without coreutils on
+#     PATH, so `grep` is not found, the scan matches nothing, and the lint
+#     reports "scanned 0 unsafe blocks; 0 missing" and exits 0. A gate that
+#     enforces SAFETY annotations passing without reading a line is worse than
+#     one that fails.
+#
+# Git's bin\bash.exe is the wrapper that sets up its own environment, so name
+# it explicitly rather than trusting PATH. The script itself now also refuses
+# to report success when it scanned nothing, so this is belt and braces.
+function Find-Bash {
+    $gitCmd = Get-Command git -ErrorAction SilentlyContinue
+    if ($gitCmd) {
+        $gitRoot = Split-Path -Parent (Split-Path -Parent $gitCmd.Source)
+        $candidate = Join-Path $gitRoot "bin\bash.exe"
+        if (Test-Path $candidate) { return $candidate }
+    }
+    foreach ($p in @("C:\Program Files\Git\bin\bash.exe", "C:\Git\bin\bash.exe")) {
+        if (Test-Path $p) { return $p }
+    }
+    return "bash"
+}
+$BashExe = Find-Bash
+
 $results = [ordered]@{}
 function Record($name, $ok, $detail) {
     $results[$name] = @{ Ok = $ok; Detail = $detail }
@@ -83,7 +112,7 @@ Record "clippy" ($errs -eq 0) "$errs errors, $warns warnings"
 # ---- 5. unsafe-safety lint ----------------------------------------------
 Write-Host ""
 Write-Host "[5/8] unsafe-safety lint" -ForegroundColor Cyan
-$u = bash scripts/check-unsafe-safety.sh --strict 2>&1 | Out-String
+$u = & $BashExe scripts/check-unsafe-safety.sh --strict 2>&1 | Out-String
 $uOk = ($LASTEXITCODE -eq 0)
 $uSummary = (($u -split "`n") | Where-Object { $_ -match 'scanned' } | Select-Object -First 1)
 Record "unsafe-safety" $uOk ($uSummary -replace '\s+$', '')

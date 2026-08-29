@@ -83,7 +83,7 @@ then exits. The CI smoke is much simpler that way.
 | `free` | ✅ shipped (v0.2 §2.1) | `T21-COREUTILS-OK`. `/proc/meminfo` already existed, so no procfs work was needed. `-k` (default) / `-m`. Fields are read **by name**, not line position — procfs may add fields, and a positional parser would silently start reporting the wrong numbers. |
 | `ln` | ⏳ | **Blocked on the kernel, not on userland.** `sys_link` is a stub returning `ENOSYS`; hard links need racfs support (inode link count, a second dirent pointing at one inode, and unlink decrementing rather than freeing). That is kernel work deserving its own change, not a coreutil. Symlinks wait on `sys_symlink`, also a stub. |
 | `rmdir` | ✅ shipped (v0.2 §2.1) | `T21-COREUTILS-OK`. Emptiness is enforced by racfs (`unlink` refuses a directory with entries), not re-checked in userland where it would be a race. Refuses a regular file after `stat` so the message names the real problem. |
-| `du` | ✅ shipped (v0.2 §2.1) | `T21-COREUTILS-OK`. `-s` summarise, `-b` bytes; default is 1 KiB blocks rounded up. Reports apparent size (`st_size`) — racfs has no sparse files, so it equals allocated size today. Recursion is depth-bounded at 32: a directory cycle (possible once hard links exist) must not take the process down. |
+| `du` | ✅ shipped (v0.2 §2.1) | `T21-COREUTILS-OK`. `-s` summarise, `-b` bytes; default is 1 KiB blocks rounded up. Reports apparent size (`st_size`). racfs still has no sparse files, but since §3.2 added indirect blocks this is no longer exactly the allocated size: a file past 8 blocks also owns the indirect blocks holding its pointers, one per 128 data blocks, which `st_size` does not count. Recursion is depth-bounded at 32: a directory cycle (possible once hard links exist) must not take the process down. |
 | `clear` | ✅ shipped (not in the original plan) | `T21-COREUTILS-OK`. Ctrl-L was always bound, but the missing command reads as a broken system. Emits ED 2 + CUP in a **single** write — RacTerm and the framebuffer console parse CSI per write, so a split sequence prints its tail literally. |
 
 `pwd` and `cd` are already racsh builtins; standalone `/bin/pwd` is
@@ -179,14 +179,41 @@ covered by `T20-*`, `T21-COREUTILS-OK`, `T21-HARDLINK-OK`, `T22-ALIAS-OK` and
 
 - **Journaling** — log-mode write-then-commit for metadata operations
   (create / unlink / rename / set_metadata). Avoids torn superblock
-  states on crash.
-- **Allocator** — switch from linear scan to bitmap-based + free-block
-  hint to make large-file growth cheaper. **Bigger than it reads:** the
-  allocation bitmap is a single sector, so it can only describe
-  `SECTOR_SIZE * 8` = 4096 blocks, and `alloc_block` scans exactly that
-  range. On a 16 MiB disk that leaves 4096 of 32734 data blocks reachable
-  and the other 87% dead space. A multi-sector bitmap is the prerequisite,
-  not the optimisation.
+  states on crash. **Still open**, and now the largest single gap in
+  §3.2: `check()` detects the damage a torn write causes, journaling is
+  what would prevent it.
+- ✅ **Indirect blocks** — shipped. 8 direct + 128 single-indirect +
+  128×128 double-indirect, so a file is 8.06 MiB instead of **4096
+  bytes**. Directories share the map, so they are no longer capped at 64
+  entries either. Smoke `T34-BIGFILE-OK`.
+
+  This item was not in the plan, and the plan was wrong to omit it. The
+  entry below named the single-sector bitmap as what capped racfs, but
+  128 inodes × 8 direct pointers is 1024 blocks — a quarter of what that
+  bitmap already described, so it never got the chance to bite. The 4 KiB
+  file was the real reason `/var/log` and `/var/lib/rpkg` could not move
+  to persistent storage in §3.3.
+
+  New pointers sit at inode bytes 52 and 56, which the previous version
+  always wrote as zero, so old inodes decode as "no indirect blocks" and
+  existing disks still mount. No format version bump.
+- ✅ **Allocator** — shipped: multi-sector bitmap + free-block hint. The
+  bitmap now spans as many sectors as the device needs (8 on the 16 MiB
+  CI disk, **32727 addressable blocks against 4096 before**). Its length
+  is derived from `inode_start - bitmap_start` rather than stored, so a
+  single-sector-era image reads back as length 1 — which is what it has —
+  instead of needing a version bump that would unmount every existing
+  disk. `alloc_block` scans from where the last allocation landed and
+  wraps; the wrap is required, not an optimisation, because without it a
+  block freed below the hint would be unreachable until the next mount.
+
+  `check()` reports `unaddressable_blocks` for the dead space on an old
+  image, and `df` totals now clamp to what the bitmap describes rather
+  than to the raw device size.
+- **Inode count** — 128, unchanged, and the next capacity limit to bite
+  now that file size is not. Raising it changes only a fresh format
+  (`inode_count` comes from the superblock), so it is cheap; nothing has
+  run out yet.
 - ✅ **fsck-like consistency check** at mount — shipped. `Racfs::check()`
   walks live inodes, builds a per-block reference count, and compares it
   against the bitmap and superblock. Findings are split by whether they can
@@ -198,12 +225,29 @@ covered by `T20-*`, `T21-COREUTILS-OK`, `T21-HARDLINK-OK`, `T22-ALIAS-OK` and
   from this project's history, which it diagnosed as
   `leaked=52 unallocated_in_use=4 doubly_claimed=1 out_of_range=1`.
 
+  It now also walks the indirect blocks and counts them as referenced —
+  they come from the same bitmap, so omitting them would report every one
+  of them leaked.
+
 ### 3.3 Mount layout
 
 - `/home` on persistent racfs (currently mountpoint doesn't exist).
 - `/etc` config moves out of initramfs into persistent storage with
   fallback-to-defaults if the partition is empty.
 - `/var/log` and `/var/lib/rpkg` move to persistent storage.
+
+**What is left blocking this**, now that §3.2's capacity work has landed
+and a file is no longer 4 KiB:
+
+- **AHCI is single-port.** `drivers/ahci.rs` picks the first implemented
+  present port and registers it as `sda`, with the driver's state global
+  to that one port. Giving `/home`, `/etc` and `/var` separate persistent
+  filesystems needs either a second device (multi-port AHCI, or the
+  VirtIO-block driver from §3.1) or partitioning one racfs and mounting
+  subtrees of it.
+- **`/etc` fallback-to-defaults** needs a rule for "the partition is
+  empty" that is not confusable with "the partition is damaged" — which
+  is what `check()` now reports on, so the two can be told apart.
 
 ### 3.4 Boot from real media
 

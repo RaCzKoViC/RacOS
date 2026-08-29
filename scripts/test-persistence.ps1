@@ -103,7 +103,12 @@ $checks = @(
     @{ Name = "boot2: racsh banner";         Log = $b2; Pattern = "racsh 0\.1\.0" },
     @{ Name = "boot2: SMP $Smp CPUs enabled"; Log = $b2; Pattern = "SMP topology - $Smp enabled CPU\(s\)" },
     @{ Name = "boot1: created counter = 1";  Log = $b1; Pattern = "created boot-counter = 1 \(first boot\)" },
-    @{ Name = "boot2: counter survived = 2"; Log = $b2; Pattern = "boot-counter = 2 \(was 1, file survived reboot\)" }
+    @{ Name = "boot2: counter survived = 2"; Log = $b2; Pattern = "boot-counter = 2 \(was 1, file survived reboot\)" },
+    # boot-counter is one byte, so it only ever proved direct[0] survives. The
+    # big-probe is 8192 bytes and the assertion reads its *tail*, which lives
+    # in a block reachable only through the inode's indirect pointer.
+    @{ Name = "boot1: created big-probe";    Log = $b1; Pattern = "created big-probe \(8192 B, past the direct blocks\)" },
+    @{ Name = "boot2: indirect blocks survived"; Log = $b2; Pattern = "big-probe tail = 1 \(expected 1, indirect blocks survived reboot\)" }
 )
 
 Write-Host ""
