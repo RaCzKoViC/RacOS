@@ -11,6 +11,40 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Added — v0.4 §4.2: the console is RacTerm, rendered from its buffer
+
+- **Each VT owns a real `racterm::Terminal`, and the screen is painted from
+  its cell grid.** Bytes go in through `Terminal::feed`; dirty rows come out
+  through the gfx owner as presented surface strips. Until now the kernel
+  ran two parsers with two states — fb_console's ANSI-naive one for the
+  pixels, plus six escape-stripped byte arrays as "remembered screens" — and
+  switching VTs restored text with every attribute forgotten. Now a switch
+  redraws exactly what that VT's grid holds, colors included. Kernel
+  messages route through the same path after takeover, so one cursor state
+  exists instead of two fighting over the region. racterm is in-repo; the
+  kernel still has zero external dependencies.
+
+- **Full cell rendering**: VGA 16, the 256-color cube and grayscale ramp,
+  truecolor, bold-brightening, reverse video, underline, and a reversed
+  block cursor. The renderer is a pure gfx client — it never touches the
+  framebuffer, it draws rows into a Surface and asks the owner to present.
+
+- **UTF-8 decoded where it belongs**: inside `Terminal::feed`, wrapping the
+  escape parser — sound because UTF-8 bytes (≥ 0x80) and escape-sequence
+  bytes (< 0x80) cannot overlap. One cell per character, replacement-boxed
+  when the 128-glyph font cannot show it, malformed bytes surfaced rather
+  than resynchronised silently. Three new host tests; writing them found
+  `CSI G` (CHA) unimplemented, now fixed. Scrollback is switchable off and
+  off in the kernel: it cost a row-clone allocation per scrolled line, on
+  the print path, in whatever context printed.
+
+- **Performance, measured rather than assumed.** The first renderer wrote
+  pixels one `write_volatile` at a time; under TCG the in-guest suite
+  reached 11 of 27 markers in 300 s. Row-sized `copy_nonoverlapping` into
+  the framebuffer restored the full 176/0 in the normal budget. The number
+  is in this entry because the difference — a slideshow versus a console —
+  never shows up in any log line, only in a stopwatch.
+
 ### Added — v0.4 first slice: the framebuffer gets an owner (§4.1, per §6b)
 
 - **`kernel/src/gfx.rs` — the framebuffer owner.** Nothing in the kernel
