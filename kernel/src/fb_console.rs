@@ -41,7 +41,7 @@ struct Char {
 /// Complete 8x16 font for all 128 ASCII characters.
 /// Each glyph is 8 pixels wide, 16 pixels tall.
 /// Row 0 is the topmost row; bit 7 (MSB) is the leftmost pixel.
-const FONT: [[u8; 16]; 128] = {
+pub const FONT: [[u8; 16]; 128] = {
     let mut f = [[0u8; 16]; 128];
 
     // ── Control characters 0-31 and 127 left blank ──
@@ -410,6 +410,11 @@ const FONT: [[u8; 16]; 128] = {
     ];
     // 0x7E ~
     f[0x7E] = [0, 0, 0, 0x32, 0x4C, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    // 0x7F is repurposed as the replacement glyph: a hollow box, drawn for
+    // any character the 128-glyph font cannot show. DEL never prints anyway.
+    f[0x7F] = [
+        0, 0, 0x7E, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x7E, 0, 0, 0, 0, 0, 0,
+    ];
 
     f
 };
@@ -453,13 +458,18 @@ impl FramebufferConsole {
         let fb = &boot_info.framebuffer;
         let char_width = 8;
         let char_height = 16;
-        let cols = fb.width / char_width;
-        let rows = fb.height / char_height;
+        // The gfx owner decides how much of the screen the console gets -
+        // today that is everything above the status strip. Storing the
+        // granted height as `self.height` confines every later bounds
+        // check, clear and scroll to the granted region for free.
+        let (grant_w, grant_h) = crate::gfx::console_region().unwrap_or((fb.width, fb.height));
+        let cols = grant_w / char_width;
+        let rows = grant_h / char_height;
 
         Some(FramebufferConsole {
             fb_addr: fb.address as *mut u32,
-            width: fb.width,
-            height: fb.height,
+            width: grant_w,
+            height: grant_h,
             pitch: fb.pitch,
             bpp: fb.bpp,
             char_width,
@@ -536,8 +546,31 @@ impl FramebufferConsole {
                     continue;
                 }
             }
-            self.put_char(bytes[i]);
-            i += 1;
+            let b = bytes[i];
+            if b < 0x80 {
+                self.put_char(b);
+                i += 1;
+                continue;
+            }
+            // UTF-8 multibyte (v0.4 section 4.2). The font has 128 glyphs, so
+            // the honest rendering is one replacement box per *character* -
+            // previously every byte >= 0x7F was silently dropped, which made
+            // multibyte text vanish and left the cursor pretending the text
+            // was never there. The sequence length comes from the lead byte;
+            // a malformed lead consumes one byte so garbage cannot stall the
+            // parser.
+            let seq_len = match b {
+                0xC0..=0xDF => 2,
+                0xE0..=0xEF => 3,
+                0xF0..=0xF7 => 4,
+                _ => 1, // stray continuation or invalid lead
+            };
+            self.draw_char(0x7F);
+            self.cursor_x += 1;
+            if self.cursor_x >= self.cols {
+                self.put_char(b'\n');
+            }
+            i += seq_len.min(bytes.len() - i);
         }
     }
 
@@ -830,25 +863,30 @@ impl FramebufferConsole {
 
     /// Convert Color to pixel value.
     fn color_to_pixel(&self, color: Color) -> u32 {
-        // Simple RGB mapping for now
-        match color {
-            Color::Black => 0x000000,
-            Color::Blue => 0x0000AA,
-            Color::Green => 0x00AA00,
-            Color::Cyan => 0x00AAAA,
-            Color::Red => 0xAA0000,
-            Color::Magenta => 0xAA00AA,
-            Color::Brown => 0xAA5500,
-            Color::LightGray => 0xAAAAAA,
-            Color::DarkGray => 0x555555,
-            Color::LightBlue => 0x5555FF,
-            Color::LightGreen => 0x55FF55,
-            Color::LightCyan => 0x55FFFF,
-            Color::LightRed => 0xFF5555,
-            Color::LightMagenta => 0xFF55FF,
-            Color::Yellow => 0xFFFF55,
-            Color::White => 0xFFFFFF,
-        }
+        // Channel order is the gfx owner's business (v0.4 section 4.1). The
+        // old code wrote 0xRRGGBB u32s directly, which happens to match the
+        // BGRX byte order QEMU always reports - and would have swapped red
+        // and blue on hardware reporting RGBX. gfx::encode is the one place
+        // that knows.
+        let (r, g, b): (u8, u8, u8) = match color {
+            Color::Black => (0x00, 0x00, 0x00),
+            Color::Blue => (0x00, 0x00, 0xAA),
+            Color::Green => (0x00, 0xAA, 0x00),
+            Color::Cyan => (0x00, 0xAA, 0xAA),
+            Color::Red => (0xAA, 0x00, 0x00),
+            Color::Magenta => (0xAA, 0x00, 0xAA),
+            Color::Brown => (0xAA, 0x55, 0x00),
+            Color::LightGray => (0xAA, 0xAA, 0xAA),
+            Color::DarkGray => (0x55, 0x55, 0x55),
+            Color::LightBlue => (0x55, 0x55, 0xFF),
+            Color::LightGreen => (0x55, 0xFF, 0x55),
+            Color::LightCyan => (0x55, 0xFF, 0xFF),
+            Color::LightRed => (0xFF, 0x55, 0x55),
+            Color::LightMagenta => (0xFF, 0x55, 0xFF),
+            Color::Yellow => (0xFF, 0xFF, 0x55),
+            Color::White => (0xFF, 0xFF, 0xFF),
+        };
+        crate::gfx::encode(r, g, b)
     }
 }
 
