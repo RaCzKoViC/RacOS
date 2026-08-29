@@ -102,6 +102,12 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     let mut env = Env::new(pid);
     env.set(String::from("PATH"), String::from("/bin:/sbin"));
     env.set(String::from("PS1"), String::from("racsh$ "));
+    // With HOME unset, history_path() falls back to /var/.racsh_history, which
+    // survives the session but not a reboot. Since v0.3 §3.3 /home is a
+    // subtree of the persistent disk, so pointing HOME at it is what makes
+    // history outlive the boot -- and what `cd` and `~` have always assumed
+    // existed. The kernel creates /home/racos before the shell starts.
+    env.set(String::from("HOME"), String::from("/home/racos"));
 
     let argn = libc_lite::arg_count(argc);
 
