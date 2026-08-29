@@ -405,13 +405,41 @@ moves to the parallel tracks as nice-to-have.
 
 ### 4.2 Graphical RacTerm
 
-- Render directly from `Terminal::buffer` to the framebuffer (no PTY
-  byte-forwarding). Today the buffer is updated but the actual pixels
-  come from `fb_console::put_char` ANSI-naive output.
-- Bitmap font rendering — extend the existing 8x16 font or add a 16x16
-  option.
-- **UTF-8 multibyte** in the print path.
-- **Mouse-tracking modes** (1000 / 1006).
+- ✅ **Rendered from `Terminal::buffer`** — shipped. Each VT now owns a
+  real `racterm::Terminal` (the same emulator the userland binary uses,
+  34 host tests and all), and the screen is painted FROM its cell grid:
+  bytes in through `Terminal::feed`, dirty rows out through the gfx
+  owner as presented surface strips. The old arrangement ran two parsers
+  with two states — fb_console's ANSI-naive one for pixels, plus six
+  escape-stripped byte arrays as "remembered screens" — and a VT switch
+  restored text with every attribute forgotten. Now a switch redraws
+  exactly what that VT's grid holds, colors included, and kernel
+  messages (`fb_print`) route through the same path after takeover so
+  there is one cursor, not two. racterm is an in-repo crate; the
+  kernel's zero-external-deps stance is unchanged.
+
+  Full 256-color + truecolor cell rendering (VGA 16, 6×6×6 cube,
+  grayscale ramp), bold-brightening, reverse, underline, and a reversed
+  block cursor.
+
+  **Performance, measured the hard way:** the first renderer wrote
+  pixels one `write_volatile` at a time and the in-guest suite reached
+  11 of 27 markers in 300 s — a slideshow. Row-sized `copy_nonoverlapping`
+  into the framebuffer brought back the full 176/0 in the usual budget.
+  A scroll-delta optimisation (shift a backing surface instead of
+  re-rasterising every row on scroll) is possible on top of racterm's
+  dirty-row API if interactive feel ever demands it; the gates do not.
+
+- ✅ **UTF-8 multibyte** — shipped, in the right place this time: a
+  decoder wrapping the escape parser inside `racterm::Terminal::feed`
+  (UTF-8 bytes and escape bytes cannot overlap, which is what makes
+  that sound). One cell per character, replacement-boxed when the
+  128-glyph font cannot show it; 3 new host tests. Writing those tests
+  found `CSI G` (CHA) unimplemented — also fixed.
+- ⏳ Bitmap font: 8x16 still; a 16x16 option and real non-ASCII glyph
+  coverage remain open.
+- ⏳ **Mouse-tracking modes** (1000 / 1006) — blocked on a mouse driver;
+  the kernel speaks PS/2 keyboard only today.
 
 ### 4.3 Optional: VirtIO-GPU
 

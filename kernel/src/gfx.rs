@@ -201,12 +201,18 @@ pub fn present(surface: &Surface, x: u32, y: u32) {
     for row in 0..rows {
         let src = &surface.pixels[row * surface.width as usize..][..cols];
         let dst_off = (y as usize + row) * stride + x as usize;
-        for (col, &px) in src.iter().enumerate() {
-            // SAFETY: row/col are clipped against the claimed framebuffer
-            // geometry above; stride comes from the GOP pitch.
-            unsafe {
-                core::ptr::write_volatile(fb.add(dst_off + col), px);
-            }
+        // A row-sized copy instead of per-pixel volatile writes matters
+        // enormously here: the console repaints every row on scroll, and
+        // under TCG the difference between rep-movs and a million
+        // write_volatile calls is the difference between a usable console
+        // and a slideshow (measured: 11 of 27 in-guest markers in 300 s
+        // versus the full suite). The framebuffer is plain write-combining
+        // memory and nothing reads it back, so memcpy semantics are right.
+        //
+        // SAFETY: the row is clipped against the claimed framebuffer
+        // geometry above; stride comes from the GOP pitch.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), fb.add(dst_off), cols);
         }
     }
 }

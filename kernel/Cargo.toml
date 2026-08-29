@@ -5,6 +5,11 @@ edition.workspace = true
 
 [dependencies]
 # compiler_builtins is provided by build-std
+#
+# racterm is IN-REPO (terminal/), not an external dependency - the kernel's
+# zero-external-deps stance (docs/DEPENDENCIES.md) is unchanged. It is
+# no_std+alloc, and v0.4 s4.2 renders the console from its Terminal::buffer.
+racterm = { path = "../terminal" }
 
 [profile.release]
 relocation-model = "static"

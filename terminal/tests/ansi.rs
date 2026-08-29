@@ -397,3 +397,37 @@ fn osc_0_sets_window_title() {
     t.feed(b"\x1b]0;RacOS Shell\x07");
     assert_eq!(t.title, "RacOS Shell");
 }
+
+#[test]
+fn utf8_multibyte_prints_one_cell_per_character() {
+    let mut t = Terminal::new(10, 20);
+    // 0xC5 0x82 is a two-byte character, 0xE2 0x82 0xAC a three-byte one.
+    // Each must land in ONE cell; the parser used to hand every byte >= 0x80
+    // to Print as Latin-1, producing one garbage cell per byte.
+    t.feed(b"ab\xC5\x82c\xE2\x82\xACd");
+    let row: String = (0..7).map(|c| t.buffer.get(0, c).character).collect();
+    assert_eq!(row, "ab\u{142}c\u{20AC}d ");
+}
+
+#[test]
+fn utf8_malformed_bytes_become_replacement_not_desync() {
+    let mut t = Terminal::new(10, 20);
+    // A stray continuation byte, then a sequence truncated by ASCII.
+    t.feed(b"\x82x\xC5yz");
+    assert_eq!(t.buffer.get(0, 0).character, char::REPLACEMENT_CHARACTER);
+    assert_eq!(t.buffer.get(0, 1).character, 'x');
+    assert_eq!(t.buffer.get(0, 2).character, char::REPLACEMENT_CHARACTER);
+    assert_eq!(t.buffer.get(0, 3).character, 'y');
+    assert_eq!(t.buffer.get(0, 4).character, 'z');
+}
+
+#[test]
+fn utf8_does_not_disturb_escape_parsing() {
+    let mut t = Terminal::new(10, 20);
+    // Multibyte text, then a CSI cursor move, then more multibyte. UTF-8 and
+    // the escape grammar never overlap byte-wise, which is what makes
+    // decoding above the parser sound.
+    t.feed(b"\xC5\x82\x1b[1;5H\xC5\x82");
+    assert_eq!(t.buffer.get(0, 0).character, '\u{142}');
+    assert_eq!(t.buffer.get(0, 4).character, '\u{142}');
+}

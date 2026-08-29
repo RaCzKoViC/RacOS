@@ -197,6 +197,14 @@ impl ScreenBuffer {
         }
     }
 
+    /// Cap (or, with 0, disable) scrollback retention.
+    pub fn set_scrollback_limit(&mut self, limit: usize) {
+        self.scrollback_limit = limit;
+        if limit == 0 {
+            self.scrollback.clear();
+        }
+    }
+
     /// Scroll up by n lines (within optional scroll region).
     pub fn scroll_up(&mut self, n: usize, top: usize, bottom: usize) {
         let top = top.min(self.rows - 1);
@@ -206,8 +214,11 @@ impl ScreenBuffer {
         }
         let n = n.min(bottom - top);
 
-        // Save scrolled-out lines to scrollback (only if scrolling the whole screen)
-        if !self.using_alternate && top == 0 {
+        // Save scrolled-out lines to scrollback (only if scrolling the whole
+        // screen). Skipped entirely at limit 0 - the row clone below is an
+        // allocation per scrolled line, and the kernel console runs with
+        // scrollback off precisely to keep allocation off the print path.
+        if !self.using_alternate && top == 0 && self.scrollback_limit > 0 {
             for i in 0..n {
                 let start = i * self.cols;
                 let end = start + self.cols;
