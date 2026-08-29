@@ -82,6 +82,9 @@ dependencies = [
 [[package]]
 name = "racore"
 version = "0.1.0"
+dependencies = [
+ "racterm",
+]
 
 [[package]]
 name = "racos-awk"

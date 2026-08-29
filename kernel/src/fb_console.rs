@@ -907,6 +907,15 @@ pub unsafe fn init(boot_info: &BootInfo) {
 
 /// Write to framebuffer console (if available).
 pub fn fb_print(s: &str) {
+    // Once the VT layer owns the console region, kernel messages go through
+    // it like every other byte stream. Two writers with two cursor states
+    // scribbling on one region is exactly the incoherence v0.4 s4.2 removed;
+    // before VT init (early boot, or a headless boot where VT never starts)
+    // this remains the direct boot console.
+    if crate::tty::vt::is_active() {
+        crate::tty::vt::vt_print(s);
+        return;
+    }
     // SAFETY: FB_CONSOLE is boot-initialised; single-CPU MVP.
     unsafe {
         if let Some(console) = get_console() {
