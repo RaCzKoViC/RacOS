@@ -113,6 +113,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_hard_links();
     test_network_tools();
     test_fsck_reports_clean();
+    test_large_files_and_dirs();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
     test_rpkg_install_list_remove();
@@ -832,6 +833,123 @@ fn test_fsck_reports_clean() {
 
     if f1 == Some(0) && f2 == Some(0) && f3 == Some(0) {
         println("T32-FSCK-OK");
+    }
+}
+
+/// Files and directories bigger than the eight direct block pointers hold
+/// (ROADMAP v0.3 §3.2).
+///
+/// Every case here failed outright before indirect blocks existed: a racfs
+/// file stopped at 8 * 512 = 4096 bytes and a directory at 64 entries, on a
+/// disk reporting 16 MiB free. That is why `/var/log` and `/var/lib/rpkg`
+/// could not move onto persistent storage.
+fn test_large_files_and_dirs() {
+    println("\n[test] racfs past the direct blocks");
+
+    // Every size assertion below is `wc -c`, so pin that first. `wc` used to
+    // ignore its flags and print lines, words and bytes whatever was asked,
+    // which made `test "$(wc -c < f)" -eq N` compare "  258  258  16402"
+    // against a number and fail for a reason that had nothing to do with the
+    // filesystem. If this check fails, none of the rest means anything.
+    let wc_flags = shell_run(
+        b"echo abc > /mnt/wcflag; \
+          c=$(wc -c < /mnt/wcflag); l=$(wc -l < /mnt/wcflag); \
+          test \"$c\" -eq 4 && test \"$l\" -eq 1\0",
+    );
+    check!("wc -c and wc -l print one number each", wc_flags == Some(0));
+
+    // A 64-byte seed line doubled up to 4096, then bracketed with markers.
+    // The markers are the point: they land in the first and the last block,
+    // so reading both back shows the block map returns the right block at
+    // each end rather than merely returning something.
+    //
+    // 16402 bytes = 33 blocks: 8 direct plus 25 through the single indirect.
+    let single = shell_run(
+        b"mkdir /mnt/big; \
+          echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde > /mnt/big/a; \
+          cat /mnt/big/a /mnt/big/a /mnt/big/a /mnt/big/a > /mnt/big/b; \
+          cat /mnt/big/b /mnt/big/b /mnt/big/b /mnt/big/b > /mnt/big/a; \
+          cat /mnt/big/a /mnt/big/a /mnt/big/a /mnt/big/a > /mnt/big/b; \
+          echo HEADMARK > /mnt/big/c; \
+          cat /mnt/big/b /mnt/big/b /mnt/big/b /mnt/big/b >> /mnt/big/c; \
+          echo TAILMARK >> /mnt/big/c; \
+          n=$(wc -c < /mnt/big/c); test \"$n\" -eq 16402\0",
+    );
+    check!(
+        "a 16402-byte file writes (single indirect)",
+        single == Some(0)
+    );
+
+    let ends = shell_run(
+        b"h=$(head -1 /mnt/big/c); t=$(tail -1 /mnt/big/c); \
+          test \"$h\" = HEADMARK && test \"$t\" = TAILMARK\0",
+    );
+    check!("its first and last block read back", ends == Some(0));
+
+    // 262432 bytes = 513 blocks, past the 136 that direct + single indirect
+    // reach, so this one can only be served through the double indirect.
+    let double = shell_run(
+        b"cat /mnt/big/c /mnt/big/c /mnt/big/c /mnt/big/c > /mnt/big/d; \
+          cat /mnt/big/d /mnt/big/d /mnt/big/d /mnt/big/d > /mnt/big/e; \
+          n=$(wc -c < /mnt/big/e); t=$(tail -1 /mnt/big/e); \
+          test \"$n\" -eq 262432 && test \"$t\" = TAILMARK\0",
+    );
+    check!(
+        "a 262432-byte file writes (double indirect)",
+        double == Some(0)
+    );
+
+    // Deleting a file must return every block it held, including the indirect
+    // blocks themselves. Those come out of the same bitmap, and a free path
+    // that forgot them would leak one block per 128 - invisible until a later
+    // mount reported it, which is exactly the damage class fsck names.
+    let no_leak = shell_run(
+        b"before=$(grep /mnt /proc/diskstats | cut -f 4 -d ' '); \
+          cat /mnt/big/b /mnt/big/b /mnt/big/b /mnt/big/b > /mnt/big/tmp; \
+          rm /mnt/big/tmp; \
+          after=$(grep /mnt /proc/diskstats | cut -f 4 -d ' '); \
+          test \"$before\" -eq \"$after\"\0",
+    );
+    check!(
+        "deleting it frees the indirect blocks too",
+        no_leak == Some(0)
+    );
+
+    // 73 names in one directory, past the 64 that 8 blocks of entries hold.
+    // They are hard links to a single inode on purpose: the directory is what
+    // is under test, and 73 separate files would spend more than half the
+    // filesystem's 128 inodes proving nothing extra.
+    let many = shell_run(
+        b"mkdir /mnt/manydir; echo x > /mnt/manydir/base; \
+          for a in 1 2 3 4 5 6 7 8 9; do \
+            for b in 1 2 3 4 5 6 7 8; do \
+              ln /mnt/manydir/base /mnt/manydir/l$a$b; \
+            done; \
+          done; \
+          n=$(ls /mnt/manydir | wc -l); test \"$n\" -eq 73\0",
+    );
+    check!("a directory holds 73 entries", many == Some(0));
+
+    // The allocation bitmap must span the device, not stay at the one sector
+    // it was fixed at. The `df`-style totals come straight from what the
+    // bitmap can describe, so a total still stuck at 4096 blocks would mean a
+    // single-sector bitmap however well the files above behaved.
+    let wide_bitmap =
+        shell_run(b"t=$(grep /mnt /proc/diskstats | cut -f 2 -d ' '); test \"$t\" -gt 4096\0");
+    check!(
+        "the bitmap describes more than one sector of blocks",
+        wide_bitmap == Some(0)
+    );
+
+    if wc_flags == Some(0)
+        && single == Some(0)
+        && ends == Some(0)
+        && double == Some(0)
+        && no_leak == Some(0)
+        && many == Some(0)
+        && wide_bitmap == Some(0)
+    {
+        println("T34-BIGFILE-OK");
     }
 }
 
