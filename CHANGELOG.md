@@ -11,6 +11,56 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Added — v0.3 §3.4 + §3.5: real-media boot, and MILESTONE-V0.3-OK
+
+**v0.3 is complete.** The guest prints the milestone marker itself, after a
+hard-kill reboot, from a system that can also boot off a USB stick.
+
+- **§3.4 — boot from real media.** `scripts/make-esp-image.py` builds an
+  MBR-partitioned FAT32 disk image from `esp/`. The FAT32 formatter is
+  written from scratch (~250 lines of dependency-free Python, LFN entries
+  included), because mtools does not exist on a stock Windows box and
+  QEMU's `fat:rw:esp` is not a real filesystem. The image was verified by
+  an independent from-scratch FAT32 *reader* comparing every file
+  byte-for-byte against the source tree, then by the real consumer:
+  `scripts/test-usb-boot.ps1` (gate 9) attaches it as USB mass storage on
+  an XHCI controller with no `fat:rw` fallback and requires OVMF USB
+  enumeration → partition parse → FAT32 → `\EFI\BOOT\BOOTX64.EFI`
+  fallback → our bootloader reading kernel + 157 MB initramfs over USB →
+  racsh prompt. Passed on the first boot. The physical-stick procedure and
+  its honest limits (PS/2-only keyboard, no USB stack after handover, no
+  NVMe, no real NICs) are in `docs/BOOT-MEDIA.md`.
+
+- **Reaching real hardware forced a safety fix: RacOS no longer formats
+  disks it does not recognise.** `Racfs::open_or_format` formatted on any
+  superblock mismatch — fine while every disk in reach was a zeroed QEMU
+  image, a data shredder on a machine whose first AHCI disk holds Windows.
+  The boot now formats only a *blank* disk (first sector all zeroes) and
+  refuses anything else with instructions to run `mkfs.racfs sda`
+  deliberately. Destroying a filesystem is a decision for the person who
+  can see what it is, not for a boot path.
+
+- **§3.5 — the milestone smoke** (`scripts/test-milestone-v03.ps1`,
+  gate 10). Boot 1 types a command into racsh — history is saved after
+  every line to `/home/racos/` on the persistent disk — installs
+  `/share/demo.rpk`, syncs, and is hard-killed. Boot 2 verifies both
+  survived and prints `MILESTONE-V0.3-OK` on its own console; the host
+  only greps. The marker coming from inside the system is the point: it
+  proves racsh, grep, rpkg, the journal and the persistent mounts
+  cooperate after an unfriendly reboot.
+
+- **`/share/demo.rpk`** — a sample package now ships in the initramfs,
+  generated at build time by `scripts/make-demo-rpk.py`, so "install
+  something and see it work" needs no network.
+
+- **A testing lesson, recorded because it will bite again:** the first
+  version of the milestone smoke reported an impossible result — both
+  checks FAIL yet the final marker "passed". The serial console echoes
+  keystrokes, so any pattern that appears in the typed command matches its
+  own echo before the guest has produced output. Success tokens are now
+  assembled from shell variables (`echo $mm`), so the token text never
+  appears in the typed line and can only come from real output.
+
 ### Added — v0.3 §3.2 (racfs metadata journal)
 
 - **Write-ahead log for metadata.** An operation's sectors are copied into
