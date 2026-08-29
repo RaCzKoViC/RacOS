@@ -17,6 +17,8 @@ pub struct Terminal {
     pub buffer: ScreenBuffer,
     pub cursor: Cursor,
     parser: EscParser,
+    /// Pending UTF-8 multibyte sequence: (bytes so far, bytes still needed).
+    utf8: (u32, u8, u8),
     /// Current text attributes for new characters.
     fg: Color,
     bg: Color,
@@ -33,6 +35,7 @@ impl Terminal {
             buffer: ScreenBuffer::new(rows, cols),
             cursor: Cursor::new(rows, cols),
             parser: EscParser::new(),
+            utf8: (0, 0, 0),
             fg: Color::Default,
             bg: Color::Default,
             attrs: CellAttrs::default(),
@@ -48,12 +51,70 @@ impl Terminal {
     }
 
     /// Process output bytes from the shell/PTY.
+    ///
+    /// UTF-8 is decoded here, wrapping the escape parser, because the parser
+    /// works a byte at a time and used to hand every byte >= 0x80 straight to
+    /// Print as a Latin-1 code point - one garbage cell per byte of a
+    /// multibyte character. Decoding above the parser is safe precisely
+    /// because UTF-8 and the escape grammar do not overlap: every byte of a
+    /// multibyte sequence is >= 0x80, and every byte of an escape sequence is
+    /// < 0x80, so neither can appear inside the other.
     pub fn feed(&mut self, data: &[u8]) {
         for &byte in data {
-            if let Some(action) = self.parser.feed(byte) {
-                self.execute_action(action);
+            if byte < 0x80 {
+                // A stray ASCII byte inside a multibyte sequence means the
+                // sequence was malformed; show that it happened rather than
+                // silently resynchronising.
+                if self.utf8.2 > 0 {
+                    self.utf8 = (0, 0, 0);
+                    self.execute_action(Action::Print(char::REPLACEMENT_CHARACTER));
+                }
+                if let Some(action) = self.parser.feed(byte) {
+                    self.execute_action(action);
+                }
+                continue;
+            }
+
+            let (acc, seen, need) = self.utf8;
+            if need == 0 {
+                // Lead byte.
+                let (initial, len) = match byte {
+                    0xC2..=0xDF => ((byte & 0x1F) as u32, 2u8),
+                    0xE0..=0xEF => ((byte & 0x0F) as u32, 3),
+                    0xF0..=0xF4 => ((byte & 0x07) as u32, 4),
+                    _ => {
+                        // Stray continuation or an invalid lead (0xC0/0xC1
+                        // overlongs included).
+                        self.execute_action(Action::Print(char::REPLACEMENT_CHARACTER));
+                        continue;
+                    }
+                };
+                self.utf8 = (initial, 1, len);
+            } else if (0x80..=0xBF).contains(&byte) {
+                let acc = (acc << 6) | (byte & 0x3F) as u32;
+                if seen + 1 == need {
+                    self.utf8 = (0, 0, 0);
+                    let ch = char::from_u32(acc).unwrap_or(char::REPLACEMENT_CHARACTER);
+                    self.execute_action(Action::Print(ch));
+                } else {
+                    self.utf8 = (acc, seen + 1, need);
+                }
+            } else {
+                // A second lead byte where a continuation belonged.
+                self.utf8 = (0, 0, 0);
+                self.execute_action(Action::Print(char::REPLACEMENT_CHARACTER));
+                // Reprocess this byte as a fresh lead.
+                self.feed(&[byte]);
             }
         }
+    }
+
+    /// Cap (or disable, with 0) the scrollback. The kernel console uses 0:
+    /// scrollback costs one row-clone allocation per scrolled line, there is
+    /// no scroll-up UI in the kernel yet to read it, and allocation on the
+    /// console path is allocation in whatever context printed.
+    pub fn set_scrollback_limit(&mut self, limit: usize) {
+        self.buffer.set_scrollback_limit(limit);
     }
 
     /// Resize the terminal.
@@ -142,6 +203,13 @@ impl Terminal {
                 let row = p1.max(1) as usize;
                 let col = p2.max(1) as usize;
                 self.cursor.set_position(row, col);
+            }
+            // CHA - Cursor Horizontal Absolute. Found missing by the UTF-8
+            // decoder's tests, whose first draft used `5G` and watched the
+            // cursor not move.
+            b'G' => {
+                let row = self.cursor.row + 1; // set_position is 1-based
+                self.cursor.set_position(row, p1.max(1) as usize);
             }
             // ED — Erase Display
             b'J' => match p1 {
