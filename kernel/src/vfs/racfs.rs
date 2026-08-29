@@ -1370,9 +1370,19 @@ impl Racfs {
         Ok(())
     }
 
-    /// Lookup path from root. Returns inode number.
+    /// Lookup a path from the disk root. Returns inode number.
     pub fn lookup_path(&self, path: &str) -> VfsResult<u32> {
-        let mut current: u32 = 0; // root
+        self.lookup_path_from(0, path)
+    }
+
+    /// Walk `path` starting at `root` instead of at the disk root.
+    ///
+    /// This is what a subtree mount is: the same filesystem entered at a
+    /// different inode. Without it, `/home` mounted at the disk's `home`
+    /// directory would resolve `mkdir /home/x` against the disk root and
+    /// create `x` in entirely the wrong place.
+    pub fn lookup_path_from(&self, root: u32, path: &str) -> VfsResult<u32> {
+        let mut current: u32 = root;
         for component in path.split('/') {
             if component.is_empty() || component == "." {
                 continue;
@@ -1388,14 +1398,24 @@ impl Racfs {
         Ok(current)
     }
 
-    /// Split path into (parent_ino, leaf_name).
+    /// Split path into (parent_ino, leaf_name), resolved from the disk root.
     pub fn split_parent_leaf<'a>(&self, path: &'a str) -> VfsResult<(u32, &'a str)> {
+        self.split_parent_leaf_from(0, path)
+    }
+
+    /// Split path into (parent_ino, leaf_name), resolved from `root`.
+    /// The subtree-mount counterpart of `lookup_path_from`.
+    pub fn split_parent_leaf_from<'a>(
+        &self,
+        root: u32,
+        path: &'a str,
+    ) -> VfsResult<(u32, &'a str)> {
         let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
         if parts.is_empty() {
             return Err(VfsError::InvalidArgument);
         }
         let leaf = parts[parts.len() - 1];
-        let mut parent_ino: u32 = 0;
+        let mut parent_ino: u32 = root;
         for &part in &parts[..parts.len() - 1] {
             let inode = self.read_inode(parent_ino)?;
             if inode.itype != ITYPE_DIR {
@@ -1404,6 +1424,47 @@ impl Racfs {
             parent_ino = self.dir_lookup(&inode, part)?.ok_or(VfsError::NotFound)?;
         }
         Ok((parent_ino, leaf))
+    }
+
+    /// Create `path` and any missing parents; return the leaf's inode.
+    ///
+    /// Existing directories are reused. A *file* in the way is an error
+    /// rather than something to replace silently: at boot this lays out
+    /// `/home`, `/etc` and `/var/lib/rpkg` on a disk whose contents came
+    /// from an earlier run, and quietly deleting a user's file to make room
+    /// for a mount point would be the wrong way to find that out.
+    pub fn ensure_dir_path(&self, path: &str) -> VfsResult<u32> {
+        let mut current: u32 = 0;
+        for component in path.split('/') {
+            if component.is_empty() || component == "." {
+                continue;
+            }
+            let parent = self.read_inode(current)?;
+            if parent.itype != ITYPE_DIR {
+                return Err(VfsError::NotADirectory);
+            }
+            current = match self.dir_lookup(&parent, component)? {
+                Some(ino) => {
+                    if self.read_inode(ino)?.itype != ITYPE_DIR {
+                        return Err(VfsError::NotADirectory);
+                    }
+                    ino
+                }
+                None => self.create_dir(current, component)?,
+            };
+        }
+        Ok(current)
+    }
+
+    /// How many entries a directory holds. Used to tell "never populated"
+    /// from "populated and then emptied", which decides whether the boot
+    /// seeds a persistent /etc from the initramfs defaults.
+    pub fn dir_entry_count(&self, ino: u32) -> VfsResult<u32> {
+        let di = self.read_inode(ino)?;
+        if di.itype != ITYPE_DIR {
+            return Err(VfsError::NotADirectory);
+        }
+        Ok(di.dir_entry_count)
     }
 
     /// List directory entries.
@@ -1526,11 +1587,33 @@ impl InodeOps for RacfsInode {
 /// Filesystem adapter.
 pub struct RacfsFilesystem {
     inner: Arc<Racfs>,
+    /// Inode this mount presents as `/`. Zero for a whole-disk mount; a
+    /// directory's inode for a subtree mount, which is how `/home`, `/etc`
+    /// and `/var/lib/rpkg` all live on the one persistent disk without
+    /// needing a block device each.
+    root_ino: u32,
 }
 
 impl RacfsFilesystem {
     pub fn new(racfs: Arc<Racfs>) -> Arc<Self> {
-        Arc::new(RacfsFilesystem { inner: racfs })
+        Arc::new(RacfsFilesystem {
+            inner: racfs,
+            root_ino: 0,
+        })
+    }
+
+    /// Mount the directory `root_ino` of `racfs` as a filesystem of its own.
+    pub fn new_subtree(racfs: Arc<Racfs>, root_ino: u32) -> Arc<Self> {
+        Arc::new(RacfsFilesystem {
+            inner: racfs,
+            root_ino,
+        })
+    }
+
+    /// The inode this mount treats as its root. Path resolution for writes
+    /// must start here, not at inode 0.
+    pub fn root_ino(&self) -> u32 {
+        self.root_ino
     }
 
     /// Access the concrete Racfs backing this mount. Used by syscall handlers
@@ -1543,7 +1626,7 @@ impl RacfsFilesystem {
 impl Filesystem for RacfsFilesystem {
     fn root_inode(&self) -> Arc<dyn InodeOps> {
         Arc::new(RacfsInode {
-            ino: 0,
+            ino: self.root_ino,
             fs: self.inner.clone(),
         })
     }

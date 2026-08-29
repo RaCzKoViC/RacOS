@@ -33,7 +33,7 @@ fn map_vfs_error(err: VfsError) -> SyscallError {
 fn writable_store_from_mount(mount: &crate::vfs::mount::MountEntry) -> Option<WritableStore> {
     let any = mount.fs.as_any();
     if let Some(racfs_fs) = any.downcast_ref::<crate::vfs::racfs::RacfsFilesystem>() {
-        return Some(WritableStore::Racfs(racfs_fs.inner()));
+        return Some(WritableStore::Racfs(racfs_fs.inner(), racfs_fs.root_ino()));
     }
     if let Some(tmpfs_fs) = any.downcast_ref::<crate::vfs::tmpfs::TmpfsFilesystem>() {
         return Some(WritableStore::Tmpfs(tmpfs_fs.inner()));
@@ -47,7 +47,11 @@ fn writable_store_from_mount(mount: &crate::vfs::mount::MountEntry) -> Option<Wr
 /// Abstraction over writable filesystem stores (tmpfs, racfs, fat32).
 enum WritableStore {
     Tmpfs(alloc::sync::Arc<crate::vfs::tmpfs::Tmpfs>),
-    Racfs(alloc::sync::Arc<crate::vfs::racfs::Racfs>),
+    /// The filesystem plus the inode its mount presents as root. A subtree
+    /// mount shares one Racfs with other mounts and differs only in that
+    /// inode, so resolving a write path without it would send every
+    /// `mkdir /home/x` to the disk root.
+    Racfs(alloc::sync::Arc<crate::vfs::racfs::Racfs>, u32),
     Fat32(alloc::sync::Arc<crate::vfs::fat32::Fat32Fs>),
 }
 
@@ -55,8 +59,8 @@ impl WritableStore {
     fn split_parent_leaf<'a>(&self, path: &'a str) -> crate::vfs::inode::VfsResult<(u64, &'a str)> {
         match self {
             WritableStore::Tmpfs(t) => t.split_parent_leaf(path),
-            WritableStore::Racfs(r) => {
-                let (ino, leaf) = r.split_parent_leaf(path)?;
+            WritableStore::Racfs(r, root) => {
+                let (ino, leaf) = r.split_parent_leaf_from(*root, path)?;
                 Ok((ino as u64, leaf))
             }
             WritableStore::Fat32(f) => {
@@ -69,7 +73,7 @@ impl WritableStore {
     fn create_file(&self, parent_ino: u64, name: &str) -> crate::vfs::inode::VfsResult<u64> {
         match self {
             WritableStore::Tmpfs(t) => t.create_file(parent_ino, name),
-            WritableStore::Racfs(r) => r.create_file(parent_ino as u32, name).map(|i| i as u64),
+            WritableStore::Racfs(r, _) => r.create_file(parent_ino as u32, name).map(|i| i as u64),
             WritableStore::Fat32(f) => f.create_file(parent_ino as u32, name).map(|c| c as u64),
         }
     }
@@ -77,7 +81,7 @@ impl WritableStore {
     fn create_dir(&self, parent_ino: u64, name: &str) -> crate::vfs::inode::VfsResult<u64> {
         match self {
             WritableStore::Tmpfs(t) => t.create_dir(parent_ino, name),
-            WritableStore::Racfs(r) => r.create_dir(parent_ino as u32, name).map(|i| i as u64),
+            WritableStore::Racfs(r, _) => r.create_dir(parent_ino as u32, name).map(|i| i as u64),
             WritableStore::Fat32(f) => f.create_dir(parent_ino as u32, name).map(|c| c as u64),
         }
     }
@@ -85,7 +89,7 @@ impl WritableStore {
     fn unlink(&self, parent_ino: u64, name: &str) -> crate::vfs::inode::VfsResult<()> {
         match self {
             WritableStore::Tmpfs(t) => t.unlink(parent_ino, name),
-            WritableStore::Racfs(r) => r.unlink(parent_ino as u32, name),
+            WritableStore::Racfs(r, _) => r.unlink(parent_ino as u32, name),
             WritableStore::Fat32(f) => f.unlink(parent_ino as u32, name),
         }
     }
@@ -102,7 +106,7 @@ impl WritableStore {
         target_ino: u64,
     ) -> crate::vfs::inode::VfsResult<()> {
         match self {
-            WritableStore::Racfs(r) => r.link(parent_ino as u32, name, target_ino as u32),
+            WritableStore::Racfs(r, _) => r.link(parent_ino as u32, name, target_ino as u32),
             WritableStore::Tmpfs(_) | WritableStore::Fat32(_) => {
                 Err(crate::vfs::inode::VfsError::PermissionDenied)
             }
