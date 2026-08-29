@@ -11,6 +11,52 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Added — v0.3 §3.3 (mount layout: /home, /etc, /var/log, /var/lib/rpkg)
+
+- **Four directories now survive a reboot**, as subtree mounts of the single
+  racfs on sda rather than as filesystems of their own. AHCI here binds one
+  port and registers it as `sda`, so there is exactly one persistent device,
+  and four directories needing to outlive a boot is not a reason to demand
+  four disks. `RacfsFilesystem` gained a root inode: a subtree mount is the
+  same filesystem entered at a different inode, and the mount table already
+  routes by longest prefix.
+
+- **The part that was not a rename.** Every write path resolved from inode 0,
+  so `mkdir /home/x` through a subtree mount would have created `x` in the
+  **disk root** — succeeding, reading back, and looking entirely correct.
+  `lookup_path_from` / `split_parent_leaf_from` take the mount's root
+  instead, and `WritableStore::Racfs` carries it. The smoke checks the file
+  through `/mnt` as well as through `/home`, and asserts it is *not* in the
+  disk root; that second half is what separates "it worked" from "it went
+  where it was supposed to".
+
+- **`/etc` is handled differently from the rest, because it can break the
+  boot.** RacInit reads `/etc/racinit/base.target`, so mounting an empty
+  directory over `/etc` leaves PID 1 with no units and the guest with no
+  shell — and the serial log shows a clean boot right up to the point where
+  nothing happens. So the initramfs defaults are copied in first, read back
+  through the filesystem that will serve them, and the mount happens only if
+  that worked. Every failure path leaves `/etc` on the initramfs, which is
+  the arrangement that boots today. Seeding runs only on an `/etc` that has
+  never been populated: a user who deleted a unit file meant to delete it,
+  and restoring it each boot would make it undeletable.
+
+- **`$HOME` is `/home/racos`**, so racsh's history goes to persistent storage
+  instead of `/var/.racsh_history`. That settles half of the v0.2 §2.4 DoD
+  criterion that has been open since the milestone; aliases still have no
+  `~/.racshrc` to reload from.
+
+- **`/var/log` and `/var/lib` exist as real directories on the ram0 racfs**,
+  so `ls /var` shows them. `readdir` lists the filesystem *below* a mount
+  point, not the mount table, so a mount point with nothing underneath is
+  reachable but invisible.
+
+- **Smoke `T35-MOUNTS-OK`** plus six cross-reboot assertions in the two-boot
+  persistence smoke. The sharpest of those is a negative: boot 2 must mount
+  `/etc` **without** re-seeding it. A boot that re-seeds would mean the
+  persistent copy did not survive — which is also exactly the state that
+  leaves init with no units.
+
 ### Added — v0.3 §3.2 (racfs capacity: indirect blocks + multi-sector bitmap)
 
 - **Inodes gained single- and double-indirect block pointers.** A racfs file

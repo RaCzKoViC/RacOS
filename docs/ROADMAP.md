@@ -231,23 +231,43 @@ covered by `T20-*`, `T21-COREUTILS-OK`, `T21-HARDLINK-OK`, `T22-ALIAS-OK` and
 
 ### 3.3 Mount layout
 
-- `/home` on persistent racfs (currently mountpoint doesn't exist).
-- `/etc` config moves out of initramfs into persistent storage with
-  fallback-to-defaults if the partition is empty.
-- `/var/log` and `/var/lib/rpkg` move to persistent storage.
+- ✅ `/home` on persistent racfs — shipped.
+- ✅ `/etc` config moves out of initramfs into persistent storage with
+  fallback-to-defaults if the partition is empty — shipped.
+- ✅ `/var/log` and `/var/lib/rpkg` move to persistent storage — shipped.
 
-**What is left blocking this**, now that §3.2's capacity work has landed
-and a file is no longer 4 KiB:
+All four are **subtree mounts of the single racfs on sda**, not separate
+filesystems. AHCI here binds one port and registers it as `sda`, so there
+is exactly one persistent device — and four directories needing to
+survive a reboot is not a reason to demand four disks. `RacfsFilesystem`
+gained a root inode; a subtree mount is the same filesystem entered at a
+different inode, and the mount table already routes by longest prefix.
 
-- **AHCI is single-port.** `drivers/ahci.rs` picks the first implemented
-  present port and registers it as `sda`, with the driver's state global
-  to that one port. Giving `/home`, `/etc` and `/var` separate persistent
-  filesystems needs either a second device (multi-port AHCI, or the
-  VirtIO-block driver from §3.1) or partitioning one racfs and mounting
-  subtrees of it.
-- **`/etc` fallback-to-defaults** needs a rule for "the partition is
-  empty" that is not confusable with "the partition is damaged" — which
-  is what `check()` now reports on, so the two can be told apart.
+The change that made this more than a rename: every write path resolved
+from inode 0, so `mkdir /home/x` through a subtree mount would have
+created `x` in the **disk root** — succeeding, reading back, and looking
+correct. `split_parent_leaf_from` / `lookup_path_from` take the mount's
+root instead. `T35-MOUNTS-OK` checks the file through `/mnt` as well as
+through `/home`, which is what separates "it worked" from "it went where
+it was supposed to".
+
+`/etc` is boot-critical in a way the others are not: RacInit reads
+`/etc/racinit/base.target`, so mounting an empty directory over it leaves
+PID 1 with no units and the guest with no shell. The defaults are
+therefore copied in first, read back through the filesystem that will
+serve them, and the mount happens only if that worked — every failure
+path leaves `/etc` on the initramfs. Seeding runs only on an `/etc` that
+has never been populated: a user who removed a unit file meant to remove
+it.
+
+`$HOME` is now `/home/racos`, so racsh's history lands on persistent
+storage instead of `/var/.racsh_history`. That settles half of §2.4's
+open DoD criterion; aliases still have no `~/.racshrc` to be reloaded
+from.
+
+Still open in §3.3: nothing. `/var` itself remains on ram0 by design —
+only the subtrees the roadmap named are persistent, and the rest of
+`/var` is scratch.
 
 ### 3.4 Boot from real media
 
@@ -265,8 +285,15 @@ and a file is no longer 4 KiB:
 
 ## 4. v0.4 — Graphics base
 
-> **Goal**: framebuffer console becomes a proper graphical terminal.
-> RacOS gets its first "wow" screenshot.
+> **Goal**: own the framebuffer properly and get RacOS its first "wow"
+> screenshot.
+>
+> Read this section against §6b. The work below is the same either way,
+> but what it should turn into differs: build the framebuffer owner as
+> something that hands out *surfaces*, with RacTerm as its first client,
+> rather than as a terminal that happens to own the screen. A terminal
+> that owns the screen has to be taken apart again the day a second
+> window exists.
 
 ### 4.1 GOP framebuffer plumbing
 
@@ -397,11 +424,66 @@ Small, known issues that don't fit a milestone but should stay visible:
 
 ---
 
+## 6b. Destination: a graphical workspace
+
+> **The stated goal of this project is a full graphical desktop** — real
+> windows, real applications, and responsiveness a Linux user would
+> recognise as normal rather than excuse as "for a hobby OS". This is
+> not a post-v1.0 curiosity; it is what the rest of the plan is for, and
+> it is written here because it changes decisions taken *now*.
+
+**On the language.** Rust already is the right choice, and the reason is
+not taste. Smooth interaction means bounded, predictable latency, and
+the two things that most reliably destroy that in a desktop stack are
+garbage-collection pauses and a copy on every frame. Rust has no GC and
+gives direct control of memory layout, so the ceiling here is the same
+one C has on Linux. The kernel carries **zero** external dependencies
+today (`docs/DEPENDENCIES.md`), which is what keeps that ceiling
+reachable rather than mortgaged to somebody else's abstractions.
+
+So the honest statement is: the language is not the risk. The risk is
+everything below.
+
+**What actually decides whether it feels smooth**, roughly in order of
+how much each one hurts if it is missing:
+
+1. **`mmap` and copy-on-write `fork`** (§5.5). `sys_mmap` returns
+   `ENOSYS` and `fork` copies every page eagerly. A window server hands
+   clients shared buffers; without `mmap` every pixel is copied through
+   a syscall, and no amount of fast drawing recovers that. **This is the
+   single largest gap between here and a usable desktop**, and it is a
+   memory-model problem, not a graphics one.
+2. **GPU-backed surfaces** (§4.3 VirtIO-GPU). Compositing in software on
+   a CPU-drawn framebuffer sets a hard ceiling on window count and
+   animation. The GOP framebuffer in §4.1 is the right baseline and the
+   wrong destination.
+3. **Per-CPU scheduling and IPI preemption** (§5.2). One global run queue
+   means input latency is at the mercy of whatever else is runnable. A
+   desktop is judged on the worst frame, not the average.
+4. **A display server protocol and a toolkit.** Neither exists. This is
+   the largest *volume* of work by far, and the least novel — which is
+   why it is last: it is the part that cannot start until 1-3 are real.
+
+**What this changes about v0.4.** Section 4 currently reads as "make the
+framebuffer console a nicer terminal". Under this goal it should be
+designed as the bottom of a compositor instead: an owner of the
+framebuffer that hands out surfaces, with RacTerm as its first client
+rather than as the thing that owns the screen. Same amount of work at
+this stage, very different thing to build on.
+
+**What it does not change.** v0.3 and the correctness work stay in front
+of it. A desktop on a filesystem that loses data on a hard reset is not
+a desktop anyone keeps using, which is why journaling (§3.2) is still
+the next item and not a detour.
+
+---
+
 ## 7. Long-term (post v1.0)
 
-Carried from `ARCHITECTURE.md §13` (explicitly excluded from v1.0):
+Carried from `ARCHITECTURE.md §13`. The GUI line is no longer an
+exclusion — see §6b, which makes it the destination — but the rest still
+stand as out of scope for v1.0:
 
-- GUI desktop environment
 - Full glibc / Linux userspace compatibility
 - Container runtime (Docker-class)
 - Wide HW driver support beyond QEMU + a couple of physical test rigs
