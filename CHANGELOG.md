@@ -11,6 +11,130 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Added — v0.3 §3.2 (racfs capacity: indirect blocks + multi-sector bitmap)
+
+- **Inodes gained single- and double-indirect block pointers.** A racfs file
+  was eight direct blocks — **4096 bytes** — and returned `ENOSPC` past that
+  on a disk reporting 16 MiB free. It is now 8 direct + 128 single-indirect +
+  128×128 double-indirect blocks, so 8.06 MiB.
+
+  ROADMAP §3.2 named the single-sector allocation bitmap as the thing capping
+  racfs, and that was measuring the wrong limit. 128 inodes × 8 direct
+  pointers is 1024 blocks — a quarter of what the 4096-block bitmap already
+  described. The bitmap never got the chance to bite. What actually blocked
+  v0.3's goal of moving `/var/log` and `/var/lib/rpkg` onto persistent
+  storage was the 4 KiB file, and no rpkg blob or log fits in that.
+
+  The two limits are complements, not alternatives: indirect blocks are what
+  make the bitmap's size matter, so both ship together.
+
+  New pointers live at inode bytes 52 and 56, which the previous version
+  always wrote as zero. An inode written before this decodes as "no indirect
+  blocks", which is exactly true of it — no format version bump, and existing
+  disks still mount.
+
+- **Directories use the same block map**, so a directory is no longer capped
+  at the 64 entries eight blocks of entries hold. Nothing had hit that yet
+  only because nothing persistent had that many names in it; `/home` would
+  have.
+
+- **The allocation bitmap now spans as many sectors as the device needs.**
+  Its length is not a new superblock field: it is `inode_start -
+  bitmap_start`, which the layout has always implied, so an image from the
+  single-sector era reports a length of 1 — precisely what it has. A stored
+  field would have required a version bump and made every existing disk
+  unmountable to buy nothing.
+
+  `format_and_new` sizes it by fixed point, since the bitmap's size and the
+  data area's size each depend on the other. On the 16 MiB CI disk that is 8
+  bitmap sectors and **32727 addressable data blocks, against 4096 before**.
+
+- **Allocation got a free-block hint.** `alloc_block` scans from where the
+  last one landed and wraps, instead of restarting at block 0 and re-reading
+  the same full bitmap sectors every time. The wrap is not optional: without
+  it a block freed below the hint would stay unreachable until the next
+  mount. `free_block` lowers the hint to the hole it just made, so a
+  create/delete loop stays inside one bitmap sector.
+
+- **`check()` walks the indirect blocks too**, counting them as referenced.
+  They are allocated from the same bitmap, so omitting them would have
+  reported every one of them as leaked. It also gained
+  `unaddressable_blocks`, which reports the dead space on a
+  single-sector-era image — deliberately *not* part of `is_clean()`, because
+  wasted capacity on an old layout is a fact about that layout and not
+  damage, and marking a healthy old disk unclean would train the reader to
+  ignore the line. The boot message says reformatting is what recovers it.
+
+- **`du` now slightly understates what a large file costs.** It reports
+  apparent size (`st_size`), and a file past 8 blocks also owns the indirect
+  blocks holding its pointers — one per 128 data blocks — which `st_size`
+  does not count. Not worth an `st_blocks` field yet, but ROADMAP §2.1's
+  claim that apparent size equals allocated size is no longer true and has
+  been corrected there.
+
+- **`df`-style totals report what can actually be allocated.** `stats()`
+  clamps to what the bitmap describes rather than to the raw device size:
+  promising 16 MiB where `alloc_block` will only ever find 2 MiB is a lie
+  the user then has to debug.
+
+- **`free_block` refuses a block the bitmap cannot describe** instead of
+  indexing a 512-byte array with a byte offset of up to 4091. Only a corrupt
+  inode reaches that, and it used to take the kernel down. `free_inode` now
+  ignores such failures so a damaged file can still be `rm`ed — which is
+  what the fsck warning tells the user to do.
+
+- **Smoke `T34-BIGFILE-OK`** — six in-guest assertions: a 16402-byte file
+  (single indirect) with markers in its first and last block, a 262432-byte
+  file (double indirect), free-block accounting returning to its exact
+  starting value after a delete, a 73-entry directory, and `/proc/diskstats`
+  reporting more than one bitmap sector's worth of blocks.
+
+- **The two-boot persistence smoke now proves the indirect map survives a
+  reboot.** `boot-counter` is one byte long, so it only ever exercised
+  `direct[0]` — it would have kept passing on a filesystem whose indirect
+  blocks were written somewhere else entirely, which is exactly the code this
+  release adds. Alongside it the kernel now keeps `big-probe`, 8192 bytes (8
+  direct blocks and 8 through the single indirect), whose last 16 bytes carry
+  the number of the boot that wrote them. The second boot reads *those*
+  bytes, because they are the part only the indirect map can reach.
+
+- **Verified against images from the single-sector era.** A healthy one still
+  mounts, its `boot-counter` still increments across the reboot, and it
+  reports `28638 data blocks are unreachable` — exactly 32734 − 4096. The
+  damaged image kept from earlier in this project's history still diagnoses
+  as `leaked=52 unallocated_in_use=4 doubly_claimed=1 out_of_range=1
+  sb_drift=-49`, byte for byte what it reported before this change.
+
+### Fixed
+
+- **`tail` reported the last line of the *first* 8 KiB.** It read input into
+  a fixed 8 KiB buffer and stopped there, so on anything longer the answer
+  was not the tail of anything. Input is now a ring buffer over the most
+  recent 8 KiB, which moves the bound from the input to the answer. No test
+  caught this because no racfs file could exceed 4096 bytes until this
+  release; `tail` on a large initramfs binary was always wrong.
+
+- **The unsafe-safety gate could pass without reading a line.** Run under a
+  bash whose PATH lacks coreutils — Git for Windows' inner `usr\bin\bash.exe`
+  does exactly that — `grep` was not found, the scan matched nothing, and the
+  script printed `scanned 0 unsafe blocks; 0 missing SAFETY` and exited 0.
+  The one outcome a lint must never produce. It now checks for its tools up
+  front and treats a scan that found no unsafe blocks at all as a failure,
+  since the kernel has hundreds. Its header comment also no longer claims the
+  exit code is "always 0"; `--strict` has been a required CI gate since the
+  T4.2 backlog cleared.
+
+- **`run-all-gates.ps1` resolved `bash` to WSL's,** which refuses a CRLF
+  script outright, so gate 5 hard-failed for an environmental reason on a
+  stock Windows box. It now names Git's wrapper `bin\bash.exe` explicitly.
+
+- **`wc` ignored `-c`, `-l` and `-w`,** always printing all three counts, and
+  accepted no file operands at all. `n=$(wc -c < f); test "$n" -eq 16402`
+  therefore compared `"  258  258  16402"` against a number and failed for a
+  reason unrelated to whatever it was testing. Flags now select (and bundle,
+  `-lc`), file operands work with a `total` line for more than one, and
+  counts print unpadded so a shell can use them.
+
 ### Added — v0.3 §3.2 (racfs consistency check)
 
 - **`Racfs::check()` runs when the persistent disk is mounted.** It walks
