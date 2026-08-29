@@ -54,3 +54,6 @@ RacOS1*.html.txt
 
 # Conflict markers from sync tools
 *Edit conflict*
+
+# Graphics smoke screendumps
+*.ppm
