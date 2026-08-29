@@ -6,7 +6,16 @@ use libc_lite;
 /// tail — output the last N lines of input (default 10).
 ///
 /// Usage: tail [-n N] [FILE]
-/// Reads from stdin if no FILE given. Buffers all input (max 8 KiB).
+/// Reads from stdin if no FILE given.
+///
+/// Input is kept in a ring buffer holding the most recent 8 KiB, so the answer
+/// comes from the end of the input however long the input is. It used to stop
+/// reading at 8 KiB instead, and reported the last line of the *first* 8 KiB —
+/// which is not the last line of anything. Nothing caught it because no racfs
+/// file could exceed 4096 bytes until inodes grew indirect blocks.
+///
+/// The bound is now on the answer rather than on the input: last lines that
+/// together exceed 8 KiB come back truncated at the front.
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     let mut max_lines: usize = 10;
@@ -47,20 +56,23 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         None => 0,
     };
 
-    // Read all input into fixed buffer (8 KiB)
-    let mut data = [0u8; 8192];
-    let mut total = 0usize;
+    // Ring buffer over the most recent CAP bytes: read everything, keep the
+    // end. `write_pos` wraps; `seen` counts every byte that ever arrived, so
+    // it also tells us whether the ring wrapped at all.
+    const CAP: usize = 8192;
+    let mut ring = [0u8; CAP];
+    let mut write_pos = 0usize;
+    let mut seen = 0usize;
     let mut buf = [0u8; 512];
     loop {
         match libc_lite::read(fd, &mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                let copy = n.min(data.len() - total);
-                data[total..total + copy].copy_from_slice(&buf[..copy]);
-                total += copy;
-                if total >= data.len() {
-                    break;
+                for &b in buf.iter().take(n) {
+                    ring[write_pos] = b;
+                    write_pos = (write_pos + 1) % CAP;
                 }
+                seen += n;
             }
             Err(_) => break,
         }
@@ -68,6 +80,19 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 
     if fd != 0 {
         let _ = libc_lite::close(fd);
+    }
+
+    // Straighten the ring into `data` so the scan below can walk backwards
+    // over a plain slice.
+    let mut data = [0u8; CAP];
+    let total = seen.min(CAP);
+    let start_pos = if seen <= CAP {
+        0
+    } else {
+        write_pos // oldest surviving byte
+    };
+    for i in 0..total {
+        data[i] = ring[(start_pos + i) % CAP];
     }
 
     if max_lines == 0 {
