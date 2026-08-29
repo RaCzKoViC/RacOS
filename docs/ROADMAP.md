@@ -177,11 +177,56 @@ covered by `T20-*`, `T21-COREUTILS-OK`, `T21-HARDLINK-OK`, `T22-ALIAS-OK` and
 
 ### 3.2 racfs maturity
 
-- **Journaling** — log-mode write-then-commit for metadata operations
-  (create / unlink / rename / set_metadata). Avoids torn superblock
-  states on crash. **Still open**, and now the largest single gap in
-  §3.2: `check()` detects the damage a torn write causes, journaling is
-  what would prevent it.
+- ✅ **Journaling** — shipped. Write-ahead log for metadata: an
+  operation's sectors are copied into the journal and a commit record is
+  written before any of them is allowed in place, so a crash leaves the
+  filesystem entirely before the operation or entirely after it.
+  `create` / `unlink` / `link` / `set_metadata` each run as one
+  transaction; replay happens at mount, before `check()`.
+
+  The journal lives in `[1, bitmap_start)` and its length is derived the
+  same way the bitmap's is, so an image from before it existed reports a
+  length of 0 and runs unjournaled — which is exactly what it is. Again
+  no format version bump.
+
+  **The subtlety that decides whether any of this works** is not in the
+  log format, it is in the block cache. `evict_one` could write a dirty
+  sector to the device at any moment, and `flush()` is called by the
+  operations themselves — either one would put half an operation on disk
+  with no journal entry describing it, arriving through a path that looks
+  like harmless cache maintenance. Sectors belonging to an open
+  transaction are therefore pinned: neither eviction nor flush may write
+  them until the commit record exists. That pinning is also what makes
+  rollback trivial — a failed operation's sectors never reached the disk,
+  so dropping the cached copies undoes it completely.
+
+  File *data* is deliberately not journalled. Logging it would double
+  every write and bound file size by the journal, and losing the tail of
+  a file that was mid-write is the expected outcome of a crash; losing
+  the directory that names it is not.
+
+  The list above says "and the allocation phase of `write_file`", and
+  that addition is a correction to this very entry: the original plan
+  said "create / unlink / rename / set_metadata", and extending a file
+  mutates the same structures (bitmap, superblock free count, inode
+  block map). Following the list as written left a crash window where
+  the inode's new pointers could land before the bitmap marked the
+  blocks used — the dangerous damage class — and left `free_blocks`
+  stale on disk after any boot that ended with an extending write.
+
+  Verified two ways, because the ordinary smokes shut the guest down
+  properly and so never touch the recovery path:
+
+  - `scripts/test-crash-consistency.ps1` — hard-kills QEMU during
+    metadata churn, same disk across iterations, next boot must be clean.
+  - `scripts/test-journal-replay.ps1` — forges the crash window instead
+    of waiting to hit it: corrupts a live inode-table sector, then boots
+    once with an empty journal (control — fsck must see the damage, which
+    proves the test can fail) and once with a committed journal entry
+    holding the original sector (treatment — must replay and come up
+    clean). The control phase is what caught two real defects: the
+    `write_file` hole above, and the Phase F AHCI self-test overwriting
+    LBA 1 (see §6 note below).
 - ✅ **Indirect blocks** — shipped. 8 direct + 128 single-indirect +
   128×128 double-indirect, so a file is 8.06 MiB instead of **4096
   bytes**. Directories share the map, so they are no longer capped at 64
@@ -231,42 +276,101 @@ covered by `T20-*`, `T21-COREUTILS-OK`, `T21-HARDLINK-OK`, `T22-ALIAS-OK` and
 
 ### 3.3 Mount layout
 
-- `/home` on persistent racfs (currently mountpoint doesn't exist).
-- `/etc` config moves out of initramfs into persistent storage with
-  fallback-to-defaults if the partition is empty.
-- `/var/log` and `/var/lib/rpkg` move to persistent storage.
+- ✅ `/home` on persistent racfs — shipped.
+- ✅ `/etc` config moves out of initramfs into persistent storage with
+  fallback-to-defaults if the partition is empty — shipped.
+- ✅ `/var/log` and `/var/lib/rpkg` move to persistent storage — shipped.
 
-**What is left blocking this**, now that §3.2's capacity work has landed
-and a file is no longer 4 KiB:
+All four are **subtree mounts of the single racfs on sda**, not separate
+filesystems. AHCI here binds one port and registers it as `sda`, so there
+is exactly one persistent device — and four directories needing to
+survive a reboot is not a reason to demand four disks. `RacfsFilesystem`
+gained a root inode; a subtree mount is the same filesystem entered at a
+different inode, and the mount table already routes by longest prefix.
 
-- **AHCI is single-port.** `drivers/ahci.rs` picks the first implemented
-  present port and registers it as `sda`, with the driver's state global
-  to that one port. Giving `/home`, `/etc` and `/var` separate persistent
-  filesystems needs either a second device (multi-port AHCI, or the
-  VirtIO-block driver from §3.1) or partitioning one racfs and mounting
-  subtrees of it.
-- **`/etc` fallback-to-defaults** needs a rule for "the partition is
-  empty" that is not confusable with "the partition is damaged" — which
-  is what `check()` now reports on, so the two can be told apart.
+The change that made this more than a rename: every write path resolved
+from inode 0, so `mkdir /home/x` through a subtree mount would have
+created `x` in the **disk root** — succeeding, reading back, and looking
+correct. `split_parent_leaf_from` / `lookup_path_from` take the mount's
+root instead. `T35-MOUNTS-OK` checks the file through `/mnt` as well as
+through `/home`, which is what separates "it worked" from "it went where
+it was supposed to".
+
+`/etc` is boot-critical in a way the others are not: RacInit reads
+`/etc/racinit/base.target`, so mounting an empty directory over it leaves
+PID 1 with no units and the guest with no shell. The defaults are
+therefore copied in first, read back through the filesystem that will
+serve them, and the mount happens only if that worked — every failure
+path leaves `/etc` on the initramfs. Seeding runs only on an `/etc` that
+has never been populated: a user who removed a unit file meant to remove
+it.
+
+`$HOME` is now `/home/racos`, so racsh's history lands on persistent
+storage instead of `/var/.racsh_history`. That settles half of §2.4's
+open DoD criterion; aliases still have no `~/.racshrc` to be reloaded
+from.
+
+Still open in §3.3: nothing. `/var` itself remains on ram0 by design —
+only the subtrees the roadmap named are persistent, and the rest of
+`/var` is scratch.
 
 ### 3.4 Boot from real media
 
-- USB-stick boot path documented + smoke-tested (currently only ESP via
-  `fat:rw:esp` / pre-baked `esp.img` in CI).
+- ✅ Shipped. `scripts/make-esp-image.py` builds an MBR-partitioned FAT32
+  disk image from `esp/` — the FAT32 formatter is written from scratch in
+  Python (~250 lines, LFN entries included), because mtools does not exist
+  on a stock Windows box and `fat:rw:esp` is not a real filesystem.
+  `scripts/test-usb-boot.ps1` boots that image as USB mass storage on an
+  XHCI controller with **no** `fat:rw` fallback attached, requiring the
+  whole chain — OVMF USB enumeration, partition parse, FAT32 driver,
+  `\EFI\BOOT\BOOTX64.EFI` fallback, our bootloader reading kernel +
+  initramfs over USB — to produce a racsh prompt. Marker `USB-BOOT PASS`,
+  gate 9. The physical-stick procedure and its honest caveats (PS/2-only
+  keyboard, no USB stack after boot, no NVMe, no real NICs) live in
+  [`docs/BOOT-MEDIA.md`](BOOT-MEDIA.md).
+
+- Making real hardware *reachable* forced one safety change:
+  `Racfs::open_or_format` formatted on any superblock mismatch, which was
+  fine while every disk in reach was a zeroed QEMU image and would have
+  been a data shredder on a machine whose first AHCI disk holds Windows.
+  The boot now formats only a **blank** disk (first sector all zeroes);
+  anything else is refused with instructions to run `mkfs.racfs sda`
+  deliberately. QEMU smokes create their disks zero-filled, so CI still
+  auto-formats exactly as before.
 
 ### 3.5 Acceptance criteria (DoD for v0.3)
 
-- Two-boot CI smoke extended: first boot installs an rpkg + writes to
-  `/home/test/.racsh_history`; second boot reads both back and prints
-  `MILESTONE-V0.3-OK`.
-- `bash scripts/check-unsafe-safety.sh --strict` still clean.
+- ✅ **`MILESTONE-V0.3-OK` — printed by the guest itself.**
+  `scripts/test-milestone-v03.ps1` (gate 10): boot 1 types a command into
+  racsh (history is saved after every line, to `/home/racos/` on the
+  persistent disk), installs `/share/demo.rpk` — a sample package now
+  shipped in the initramfs, generated by `scripts/make-demo-rpk.py` —
+  syncs, and is **hard-killed**. Boot 2 verifies the history line and the
+  installed package survived and prints the marker on its own console;
+  the host only greps for it. The marker coming from inside the system is
+  the point: it proves racsh, grep, rpkg, the journal and the persistent
+  mounts cooperate after an unfriendly reboot.
+- ✅ `bash scripts/check-unsafe-safety.sh --strict` still clean (gate 5,
+  which since 2026-08-29 also refuses to pass when it scanned nothing).
+
+**v0.3 is complete**: §3.2 (capacity + fsck + journal), §3.3 (persistent
+mount layout), §3.4 (real-media boot), §3.5 (DoD). §3.1 VirtIO-block was
+not needed for any of it — subtree mounts made one AHCI disk enough — and
+moves to the parallel tracks as nice-to-have.
 
 ---
 
 ## 4. v0.4 — Graphics base
 
-> **Goal**: framebuffer console becomes a proper graphical terminal.
-> RacOS gets its first "wow" screenshot.
+> **Goal**: own the framebuffer properly and get RacOS its first "wow"
+> screenshot.
+>
+> Read this section against §6b. The work below is the same either way,
+> but what it should turn into differs: build the framebuffer owner as
+> something that hands out *surfaces*, with RacTerm as its first client,
+> rather than as a terminal that happens to own the screen. A terminal
+> that owns the screen has to be taken apart again the day a second
+> window exists.
 
 ### 4.1 GOP framebuffer plumbing
 
@@ -374,6 +478,15 @@ The next "system becomes a platform" milestone:
 
 Small, known issues that don't fit a milestone but should stay visible:
 
+- ~~**Phase F AHCI persistence self-test**~~ — **REMOVED 2026-08-29**,
+  because it was corrupting the filesystem it shared a disk with. It
+  wrote a 17-byte marker into LBA 1 on every boot that did not find it
+  there; LBA 1 has belonged to the filesystem since Phase F ended (first
+  the allocation bitmap, now the journal header). The "genuinely damaged"
+  evidence image this roadmap cites for fsck's verification carries that
+  marker at LBA 1 — most of its damage was manufactured by this
+  self-test, not by power loss. Its job is done better by `boot-counter`
+  and `big-probe` surviving reboots through the real filesystem.
 - ~~**racsh `$(...)` edge case**~~ — **FIXED**. Was never a racsh bug:
   `prepare_user_stack` wrote the envp NULL terminator one slot past the
   reserved argc/argv/envp block, clobbering the argv string data directly
@@ -397,11 +510,66 @@ Small, known issues that don't fit a milestone but should stay visible:
 
 ---
 
+## 6b. Destination: a graphical workspace
+
+> **The stated goal of this project is a full graphical desktop** — real
+> windows, real applications, and responsiveness a Linux user would
+> recognise as normal rather than excuse as "for a hobby OS". This is
+> not a post-v1.0 curiosity; it is what the rest of the plan is for, and
+> it is written here because it changes decisions taken *now*.
+
+**On the language.** Rust already is the right choice, and the reason is
+not taste. Smooth interaction means bounded, predictable latency, and
+the two things that most reliably destroy that in a desktop stack are
+garbage-collection pauses and a copy on every frame. Rust has no GC and
+gives direct control of memory layout, so the ceiling here is the same
+one C has on Linux. The kernel carries **zero** external dependencies
+today (`docs/DEPENDENCIES.md`), which is what keeps that ceiling
+reachable rather than mortgaged to somebody else's abstractions.
+
+So the honest statement is: the language is not the risk. The risk is
+everything below.
+
+**What actually decides whether it feels smooth**, roughly in order of
+how much each one hurts if it is missing:
+
+1. **`mmap` and copy-on-write `fork`** (§5.5). `sys_mmap` returns
+   `ENOSYS` and `fork` copies every page eagerly. A window server hands
+   clients shared buffers; without `mmap` every pixel is copied through
+   a syscall, and no amount of fast drawing recovers that. **This is the
+   single largest gap between here and a usable desktop**, and it is a
+   memory-model problem, not a graphics one.
+2. **GPU-backed surfaces** (§4.3 VirtIO-GPU). Compositing in software on
+   a CPU-drawn framebuffer sets a hard ceiling on window count and
+   animation. The GOP framebuffer in §4.1 is the right baseline and the
+   wrong destination.
+3. **Per-CPU scheduling and IPI preemption** (§5.2). One global run queue
+   means input latency is at the mercy of whatever else is runnable. A
+   desktop is judged on the worst frame, not the average.
+4. **A display server protocol and a toolkit.** Neither exists. This is
+   the largest *volume* of work by far, and the least novel — which is
+   why it is last: it is the part that cannot start until 1-3 are real.
+
+**What this changes about v0.4.** Section 4 currently reads as "make the
+framebuffer console a nicer terminal". Under this goal it should be
+designed as the bottom of a compositor instead: an owner of the
+framebuffer that hands out surfaces, with RacTerm as its first client
+rather than as the thing that owns the screen. Same amount of work at
+this stage, very different thing to build on.
+
+**What it does not change.** v0.3 and the correctness work stay in front
+of it. A desktop on a filesystem that loses data on a hard reset is not
+a desktop anyone keeps using, which is why journaling (§3.2) is still
+the next item and not a detour.
+
+---
+
 ## 7. Long-term (post v1.0)
 
-Carried from `ARCHITECTURE.md §13` (explicitly excluded from v1.0):
+Carried from `ARCHITECTURE.md §13`. The GUI line is no longer an
+exclusion — see §6b, which makes it the destination — but the rest still
+stand as out of scope for v1.0:
 
-- GUI desktop environment
 - Full glibc / Linux userspace compatibility
 - Container runtime (Docker-class)
 - Wide HW driver support beyond QEMU + a couple of physical test rigs

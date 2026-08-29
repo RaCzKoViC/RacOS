@@ -167,9 +167,10 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Initialize drivers (subsystem, block, PCI).
     drivers::init();
-    // Phase F smoke test: verify AHCI persistence (write marker on first boot,
-    // confirm it on later boots).
-    drivers::ahci_self_test();
+    // The Phase F AHCI persistence smoke used to run here. It wrote a marker
+    // into LBA 1, which the filesystem has owned since Phase F ended - see the
+    // note where it used to be defined in drivers/mod.rs. racfs's boot-counter
+    // and big-probe prove the same thing through the real filesystem.
     // Phase E smoke test: verify the NIC TX path before the rest of init runs.
     drivers::nic_self_test();
     // Phase E krok 2/3: bring up the IPv4 stack and run the ARP→ICMP→DNS demo.
@@ -295,6 +296,13 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     {
         // SAFETY: racfs::init is boot-once (singleton on ram0).
         let racfs = unsafe { vfs::racfs::init() };
+        // `log` and `lib/rpkg` get persistent subtrees mounted over them once
+        // sda is up. Creating them here as real directories is what makes
+        // `ls /var` show them: readdir lists the filesystem underneath a
+        // mount point, not the mount table, so a mount point that does not
+        // exist below is reachable but invisible.
+        let _ = racfs.ensure_dir_path("log");
+        let _ = racfs.ensure_dir_path("lib/rpkg");
         let racfs_fs = vfs::racfs::RacfsFilesystem::new(racfs);
         // SAFETY: mount_table singleton.
         unsafe {
@@ -334,13 +342,29 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Phase F krok 3: mount racfs on the persistent SATA disk at /mnt.
     // Open existing FS if the superblock is valid; otherwise format it once.
     if let Some(sda) = drivers::block::find("sda") {
-        match vfs::racfs::Racfs::open_or_format(sda) {
+        match open_or_format_if_blank(sda) {
             Ok(racfs) => {
                 // Consistency check before anything writes to it (v0.3 §3.2).
                 // Read-only: it reports and lets the boot continue. Refusing
                 // to mount a damaged disk would strand the one shell that
                 // could repair it, and the damage classes differ enough in
                 // severity that a blanket refusal would be wrong.
+                // Finish whatever a crash interrupted, before anything reads
+                // the filesystem. The check below then sees the state the
+                // completed operation left, not the middle of a write.
+                match racfs.replay_journal() {
+                    Ok((0, _)) => {}
+                    Ok((sectors, seq)) => serial::serial_println!(
+                        "[  0.000367] RACFS sda: journal replayed transaction {} ({} sectors restored)",
+                        seq,
+                        sectors
+                    ),
+                    Err(e) => serial::serial_println!(
+                        "[  0.000367] RACFS sda: journal replay failed: {:?}",
+                        e
+                    ),
+                }
+
                 match racfs.check() {
                     Ok(r) if r.is_clean() => {
                         serial::serial_println!("[  0.000368] RACFS sda: fsck clean");
@@ -375,7 +399,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 // Run persistence test against the on-disk FS before handing
                 // it off to the mount table.
                 vfs::racfs::persistence_test(&racfs, "sda");
-                let racfs_fs = vfs::racfs::RacfsFilesystem::new(racfs);
+                let racfs_fs = vfs::racfs::RacfsFilesystem::new(racfs.clone());
                 // SAFETY: mount_table singleton.
                 unsafe {
                     vfs::mount::mount_table().mount("/mnt", racfs_fs);
@@ -383,6 +407,8 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
                 serial::serial_println!(
                     "[  0.000370] RACORE: racfs mounted on /mnt (persistent, on sda)"
                 );
+
+                mount_persistent_layout(&racfs);
             }
             Err(e) => serial::serial_println!("[  0.000370] RACORE: /mnt mount failed: {:?}", e),
         }
@@ -1331,6 +1357,202 @@ fn flushd_task() -> ! {
 /// capacity `df` used to promise was never really there. Reformatting is what
 /// recovers it, and the message says so rather than leaving the reader to
 /// work out why a 16 MiB disk fills up at 2 MiB.
+/// Mount racfs from `dev`, formatting it only if the disk is blank.
+///
+/// `Racfs::open_or_format` formats on *any* superblock mismatch, and that
+/// was fine while the only disks in reach were QEMU images created zeroed a
+/// moment earlier. Section 3.4 makes RacOS bootable from a USB stick on
+/// real hardware, where the first AHCI disk the driver binds may hold the
+/// machine's Windows or Linux installation - and "did not recognise it, so
+/// formatted it" would be the last thing that disk ever did.
+///
+/// So the policy is: a valid racfs mounts; a blank disk (first sector all
+/// zeroes - what a fresh image or a wiped stick looks like) is claimed and
+/// formatted; anything else is refused with instructions, because choosing
+/// to destroy a filesystem belongs to the person who can see what it is,
+/// not to a boot path. QEMU smokes create their disks zero-filled, so CI
+/// still auto-formats exactly as before.
+fn open_or_format_if_blank(
+    dev: alloc::sync::Arc<dyn drivers::block::BlockDevice>,
+) -> Result<alloc::sync::Arc<vfs::racfs::Racfs>, vfs::inode::VfsError> {
+    if let Ok(fs) = vfs::racfs::Racfs::open(dev.clone()) {
+        return Ok(fs);
+    }
+    let mut sector0 = [0u8; drivers::block::SECTOR_SIZE];
+    dev.read_sector(0, &mut sector0)
+        .map_err(|_| vfs::inode::VfsError::IoError)?;
+    if sector0.iter().all(|&b| b == 0) {
+        return vfs::racfs::Racfs::format_and_new(dev);
+    }
+    serial::serial_println!(
+        "[  0.000366] RACFS sda: holds a filesystem that is not racfs; refusing to auto-format. Run `mkfs.racfs sda` to claim this disk for RacOS (this DESTROYS its contents)."
+    );
+    Err(vfs::inode::VfsError::IoError)
+}
+
+/// Read a whole file through the VFS, whatever filesystem backs it.
+///
+/// Used to copy the initramfs `/etc` defaults onto the persistent disk before
+/// anything is mounted over them, so it has to go through the mount table
+/// rather than reach into one filesystem directly.
+fn read_file_via_vfs(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    // SAFETY: mount_table singleton.
+    let (fs, ino) = unsafe { vfs::mount::mount_table().lookup_path(path) }.ok()?;
+    let inode = fs.get_inode(ino).ok()?;
+    let mut out = alloc::vec::Vec::new();
+    let mut buf = [0u8; 512];
+    let mut offset = 0u64;
+    loop {
+        match inode.read(offset, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                offset += n as u64;
+            }
+            Err(_) => return None,
+        }
+    }
+    Some(out)
+}
+
+/// v0.3 §3.3: give the persistent disk the directories the system expects to
+/// keep across a reboot, and mount each of them where it belongs.
+///
+/// They are subtrees of the single racfs on sda rather than filesystems of
+/// their own. There is exactly one persistent device here — the AHCI driver
+/// binds one port and registers it as `sda` — and four directories needing to
+/// survive a reboot is not a reason to demand four disks. The mount table
+/// routes by longest prefix, so a subtree behaves like any other mount.
+fn mount_persistent_layout(racfs: &alloc::sync::Arc<vfs::racfs::Racfs>) {
+    // (mount point, path on the persistent disk)
+    const LAYOUT: &[(&str, &str)] = &[
+        ("/home", "home"),
+        ("/var/log", "var/log"),
+        ("/var/lib/rpkg", "var/lib/rpkg"),
+    ];
+
+    for (mount_point, disk_path) in LAYOUT {
+        match racfs.ensure_dir_path(disk_path) {
+            Ok(ino) => {
+                let fs = vfs::racfs::RacfsFilesystem::new_subtree(racfs.clone(), ino);
+                // SAFETY: mount_table singleton.
+                unsafe {
+                    vfs::mount::mount_table().mount(mount_point, fs);
+                }
+                serial::serial_println!(
+                    "[  0.000371] RACORE: {} is persistent (sda:/{})",
+                    mount_point,
+                    disk_path
+                );
+            }
+            // A failure here costs persistence for that path, not the boot:
+            // whatever was mounted there before is still mounted.
+            Err(e) => serial::serial_println!(
+                "[  0.000371] RACORE: {} stays volatile, could not create sda:/{}: {:?}",
+                mount_point,
+                disk_path,
+                e
+            ),
+        }
+    }
+
+    // racsh writes its history to $HOME, so $HOME has to be a real directory
+    // before the shell starts, not after the user notices nothing was saved.
+    if let Err(e) = racfs.ensure_dir_path("home/racos") {
+        serial::serial_println!(
+            "[  0.000371] RACORE: could not create sda:/home/racos: {:?}",
+            e
+        );
+    }
+
+    seed_persistent_etc(racfs);
+}
+
+/// Move `/etc` onto the persistent disk, seeding it from the initramfs
+/// defaults the first time.
+///
+/// This one is boot-critical in a way the others are not. RacInit reads
+/// `/etc/racinit/base.target`, so mounting an empty directory over `/etc`
+/// would leave PID 1 with no units and the guest with no shell — and the
+/// serial log would show a clean boot right up to the point where nothing
+/// happens. So the defaults are copied in first, read back through the
+/// filesystem that will serve them, and the mount happens only if that
+/// worked. Every failure path leaves `/etc` on the initramfs, which is the
+/// arrangement that boots today.
+fn seed_persistent_etc(racfs: &alloc::sync::Arc<vfs::racfs::Racfs>) {
+    // (directory on disk, file name, source path in the initramfs)
+    const DEFAULTS: &[(&str, &str, &str)] = &[
+        ("etc/racinit", "base.target", "/etc/racinit/base.target"),
+        ("etc/racinit", "shell.service", "/etc/racinit/shell.service"),
+    ];
+
+    let etc_ino = match racfs.ensure_dir_path("etc") {
+        Ok(ino) => ino,
+        Err(e) => {
+            serial::serial_println!(
+                "[  0.000372] RACORE: /etc stays on initramfs, could not create sda:/etc: {:?}",
+                e
+            );
+            return;
+        }
+    };
+
+    // Seed only an /etc that has never been populated. A user who removed a
+    // unit file meant to remove it; putting it back on the next boot would
+    // make the file impossible to delete.
+    if racfs.dir_entry_count(etc_ino).unwrap_or(0) == 0 {
+        for (dir, name, source) in DEFAULTS {
+            let Some(bytes) = read_file_via_vfs(source) else {
+                serial::serial_println!(
+                    "[  0.000372] RACORE: /etc seed: {} unreadable in the initramfs",
+                    source
+                );
+                continue;
+            };
+            let written = racfs
+                .ensure_dir_path(dir)
+                .and_then(|parent| racfs.create_file(parent, name))
+                .and_then(|ino| racfs.write_file(ino, 0, &bytes));
+            match written {
+                Ok(_) => serial::serial_println!(
+                    "[  0.000372] RACORE: /etc seed: copied {} ({} B)",
+                    source,
+                    bytes.len()
+                ),
+                Err(e) => serial::serial_println!(
+                    "[  0.000372] RACORE: /etc seed: {} failed: {:?}",
+                    source,
+                    e
+                ),
+            }
+        }
+        let _ = racfs.sync();
+    }
+
+    // Refuse to mount an /etc that cannot serve what init needs. Checked
+    // against the disk rather than against what was just written, so a disk
+    // seeded by an earlier boot is verified the same way.
+    let usable = racfs
+        .lookup_path("etc/racinit/base.target")
+        .and_then(|ino| racfs.inode_metadata(ino))
+        .map(|m| m.size > 0)
+        .unwrap_or(false);
+
+    if !usable {
+        serial::serial_println!(
+            "[  0.000372] RACORE: /etc stays on initramfs - sda:/etc/racinit/base.target is missing or empty"
+        );
+        return;
+    }
+
+    let fs = vfs::racfs::RacfsFilesystem::new_subtree(racfs.clone(), etc_ino);
+    // SAFETY: mount_table singleton.
+    unsafe {
+        vfs::mount::mount_table().mount("/etc", fs);
+    }
+    serial::serial_println!("[  0.000372] RACORE: /etc is persistent (sda:/etc)");
+}
+
 fn report_unaddressable(r: &vfs::racfs::FsckReport) {
     if r.unaddressable_blocks == 0 {
         return;

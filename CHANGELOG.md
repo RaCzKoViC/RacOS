@@ -11,6 +11,187 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Added — v0.3 §3.4 + §3.5: real-media boot, and MILESTONE-V0.3-OK
+
+**v0.3 is complete.** The guest prints the milestone marker itself, after a
+hard-kill reboot, from a system that can also boot off a USB stick.
+
+- **§3.4 — boot from real media.** `scripts/make-esp-image.py` builds an
+  MBR-partitioned FAT32 disk image from `esp/`. The FAT32 formatter is
+  written from scratch (~250 lines of dependency-free Python, LFN entries
+  included), because mtools does not exist on a stock Windows box and
+  QEMU's `fat:rw:esp` is not a real filesystem. The image was verified by
+  an independent from-scratch FAT32 *reader* comparing every file
+  byte-for-byte against the source tree, then by the real consumer:
+  `scripts/test-usb-boot.ps1` (gate 9) attaches it as USB mass storage on
+  an XHCI controller with no `fat:rw` fallback and requires OVMF USB
+  enumeration → partition parse → FAT32 → `\EFI\BOOT\BOOTX64.EFI`
+  fallback → our bootloader reading kernel + 157 MB initramfs over USB →
+  racsh prompt. Passed on the first boot. The physical-stick procedure and
+  its honest limits (PS/2-only keyboard, no USB stack after handover, no
+  NVMe, no real NICs) are in `docs/BOOT-MEDIA.md`.
+
+- **Reaching real hardware forced a safety fix: RacOS no longer formats
+  disks it does not recognise.** `Racfs::open_or_format` formatted on any
+  superblock mismatch — fine while every disk in reach was a zeroed QEMU
+  image, a data shredder on a machine whose first AHCI disk holds Windows.
+  The boot now formats only a *blank* disk (first sector all zeroes) and
+  refuses anything else with instructions to run `mkfs.racfs sda`
+  deliberately. Destroying a filesystem is a decision for the person who
+  can see what it is, not for a boot path.
+
+- **§3.5 — the milestone smoke** (`scripts/test-milestone-v03.ps1`,
+  gate 10). Boot 1 types a command into racsh — history is saved after
+  every line to `/home/racos/` on the persistent disk — installs
+  `/share/demo.rpk`, syncs, and is hard-killed. Boot 2 verifies both
+  survived and prints `MILESTONE-V0.3-OK` on its own console; the host
+  only greps. The marker coming from inside the system is the point: it
+  proves racsh, grep, rpkg, the journal and the persistent mounts
+  cooperate after an unfriendly reboot.
+
+- **`/share/demo.rpk`** — a sample package now ships in the initramfs,
+  generated at build time by `scripts/make-demo-rpk.py`, so "install
+  something and see it work" needs no network.
+
+- **A testing lesson, recorded because it will bite again:** the first
+  version of the milestone smoke reported an impossible result — both
+  checks FAIL yet the final marker "passed". The serial console echoes
+  keystrokes, so any pattern that appears in the typed command matches its
+  own echo before the guest has produced output. Success tokens are now
+  assembled from shell variables (`echo $mm`), so the token text never
+  appears in the typed line and can only come from real output.
+
+### Added — v0.3 §3.2 (racfs metadata journal)
+
+- **Write-ahead log for metadata.** An operation's sectors are copied into
+  the journal and a commit record is written before any of them is allowed
+  to land in place, so a crash leaves the filesystem entirely before the
+  operation or entirely after it — never half-applied. `create` / `unlink` /
+  `link` / `set_metadata` and the allocation phase of `write_file` each run
+  as one transaction; replay happens at mount, before the consistency check,
+  so `check()` sees what the completed operation left rather than the middle
+  of a write.
+
+  The journal lives in `[1, bitmap_start)` and its length is derived the
+  same way the bitmap's is, so an image from before it existed reports a
+  length of 0 and simply runs unjournaled. Again no format version bump.
+
+  **The part that decides whether any of this works is in the block cache,
+  not the log format.** `evict_one` could write a dirty sector to the device
+  at any moment, and `flush()` is called by the operations themselves —
+  either would put half an operation on disk with no journal entry
+  describing it, through a path that looks like harmless cache maintenance.
+  Sectors belonging to an open transaction are therefore pinned: neither
+  eviction nor flush may write them until the commit record exists. The same
+  pinning makes rollback trivial — a failed operation's sectors never
+  reached the disk, so dropping the cached copies undoes it completely.
+
+  File *data* is deliberately not journalled: logging it would double every
+  write and bound file size by the journal, and losing the tail of a file
+  that was mid-write is the expected outcome of a crash, in a way losing the
+  directory that names it is not.
+
+- **`write_file`'s allocation phase is a transaction too — this was a real
+  hole, found by testing.** ROADMAP §3.2 listed "create / unlink / rename /
+  set_metadata" and the first implementation followed that list. But
+  extending a file mutates the bitmap, the superblock's free count and the
+  inode's block map — the same structures. The cache flushes in whatever
+  order it likes, so a crash could land the inode's new pointers before the
+  bitmap marked those blocks used: an inode referencing blocks the allocator
+  will hand out again, the damage class fsck calls dangerous. And nothing on
+  that path wrote the superblock at all, so any boot whose last operation
+  was an extending write left `free_blocks` stale on disk. Data is written
+  after the allocation commit, and the size is updated last — so a crash
+  reads the old length, never uninitialised bytes. `sync()` now flushes the
+  superblock as well; it promised durability while omitting it.
+
+- **Two new hostile smokes**, because the ordinary ones cannot test recovery
+  — they shut the guest down cleanly, so they exercise the commit path and
+  never the replay path:
+
+  - `scripts/test-crash-consistency.ps1` kills QEMU outright during a
+    metadata churn loop and asserts the next boot mounts clean. The disk is
+    deliberately reused across iterations so damage would accumulate.
+  - `scripts/test-journal-replay.ps1` forges the crash window instead of
+    waiting to hit it: it corrupts a live inode-table sector on the image
+    directly, and boots twice — once with an empty journal (the **control**:
+    fsck must report the damage, proving the test can fail) and once with a
+    committed journal entry holding the original sector (the **treatment**:
+    the boot must replay it and come up clean). Both phases start from a
+    byte-identical snapshot of the seeded image. Result:
+    `replay ran: transaction 4242, 1 sector restored` → `fsck clean`.
+
+### Removed — the Phase F AHCI self-test, which was corrupting the disk
+
+- **`ahci_self_test()` wrote "RACOS-AHCI-PhaseF" into LBA 1 on every boot
+  that did not find it there.** It was written when nothing else lived on
+  sda; LBA 1 has belonged to the filesystem ever since — first to the
+  allocation bitmap, now to the journal header. Every boot that re-wrote
+  the marker overwrote 17 bytes of live filesystem metadata.
+
+  This rewrites the history of this project's corruption evidence.
+  `racos-disk-corrupt-evidence.img`, kept as proof of "genuine corruption"
+  and cited below for its `leaked=52` diagnosis, holds
+  `SACOS-AHCI-PhaseF` at LBA 1 — the marker with one extra bit where the
+  filesystem later allocated block 0. The marker sets 55 bits; fsck
+  reported 52 leaked blocks and `unallocated_in_use=4`. **The corruption
+  fsck was built to detect was largely being manufactured by this
+  self-test**, boot after boot, not by unlucky power loss. The consistency
+  check entry below stands as written — the check does detect exactly this
+  damage — but the damage's origin was us.
+
+  Deleted rather than moved: what it proved is now proved properly by
+  `boot-counter` and `big-probe` surviving reboots through the real
+  filesystem, which says more about AHCI persistence than a raw sector
+  marker ever did. Found by the journal-replay test's control phase, whose
+  first run showed a journal header full of ASCII.
+
+### Added — v0.3 §3.3 (mount layout: /home, /etc, /var/log, /var/lib/rpkg)
+
+- **Four directories now survive a reboot**, as subtree mounts of the single
+  racfs on sda rather than as filesystems of their own. AHCI here binds one
+  port and registers it as `sda`, so there is exactly one persistent device,
+  and four directories needing to outlive a boot is not a reason to demand
+  four disks. `RacfsFilesystem` gained a root inode: a subtree mount is the
+  same filesystem entered at a different inode, and the mount table already
+  routes by longest prefix.
+
+- **The part that was not a rename.** Every write path resolved from inode 0,
+  so `mkdir /home/x` through a subtree mount would have created `x` in the
+  **disk root** — succeeding, reading back, and looking entirely correct.
+  `lookup_path_from` / `split_parent_leaf_from` take the mount's root
+  instead, and `WritableStore::Racfs` carries it. The smoke checks the file
+  through `/mnt` as well as through `/home`, and asserts it is *not* in the
+  disk root; that second half is what separates "it worked" from "it went
+  where it was supposed to".
+
+- **`/etc` is handled differently from the rest, because it can break the
+  boot.** RacInit reads `/etc/racinit/base.target`, so mounting an empty
+  directory over `/etc` leaves PID 1 with no units and the guest with no
+  shell — and the serial log shows a clean boot right up to the point where
+  nothing happens. So the initramfs defaults are copied in first, read back
+  through the filesystem that will serve them, and the mount happens only if
+  that worked. Every failure path leaves `/etc` on the initramfs, which is
+  the arrangement that boots today. Seeding runs only on an `/etc` that has
+  never been populated: a user who deleted a unit file meant to delete it,
+  and restoring it each boot would make it undeletable.
+
+- **`$HOME` is `/home/racos`**, so racsh's history goes to persistent storage
+  instead of `/var/.racsh_history`. That settles half of the v0.2 §2.4 DoD
+  criterion that has been open since the milestone; aliases still have no
+  `~/.racshrc` to reload from.
+
+- **`/var/log` and `/var/lib` exist as real directories on the ram0 racfs**,
+  so `ls /var` shows them. `readdir` lists the filesystem *below* a mount
+  point, not the mount table, so a mount point with nothing underneath is
+  reachable but invisible.
+
+- **Smoke `T35-MOUNTS-OK`** plus six cross-reboot assertions in the two-boot
+  persistence smoke. The sharpest of those is a negative: boot 2 must mount
+  `/etc` **without** re-seeding it. A boot that re-seeds would mean the
+  persistent copy did not survive — which is also exactly the state that
+  leaves init with no units.
+
 ### Added — v0.3 §3.2 (racfs capacity: indirect blocks + multi-sector bitmap)
 
 - **Inodes gained single- and double-indirect block pointers.** A racfs file

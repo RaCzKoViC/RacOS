@@ -61,40 +61,28 @@ pub fn init() {
     }
 }
 
-/// Persistence smoke test for AHCI. On first boot writes a marker into LBA 1;
-/// on later boots reads it back to prove data survived. Skipped silently if
-/// no SATA disk is registered.
-pub fn ahci_self_test() {
-    use block::SECTOR_SIZE;
-    let Some(dev) = block::find("sda") else {
-        return;
-    };
-    let marker = b"RACOS-AHCI-PhaseF";
-    let mut buf = [0u8; SECTOR_SIZE];
-    match dev.read_sector(1, &mut buf) {
-        Ok(()) => {
-            if buf[..marker.len()] == *marker {
-                crate::serial::serial_println!(
-                    "[  0.001320] DRIVERS: AHCI persistence OK — marker at LBA 1 survived reboot"
-                );
-            } else {
-                let mut w = [0u8; SECTOR_SIZE];
-                w[..marker.len()].copy_from_slice(marker);
-                match dev.write_sector(1, &w) {
-                    Ok(()) => crate::serial::serial_println!(
-                        "[  0.001320] DRIVERS: AHCI first-boot marker written to LBA 1"
-                    ),
-                    Err(e) => crate::serial::serial_println!(
-                        "[  0.001320] DRIVERS: AHCI write failed: {:?}",
-                        e
-                    ),
-                }
-            }
-        }
-        Err(e) => crate::serial::serial_println!("[  0.001320] DRIVERS: AHCI read failed: {:?}", e),
-    }
-}
-
+// `ahci_self_test` used to live here. It wrote "RACOS-AHCI-PhaseF" into LBA 1
+// on any boot where it did not already find it there, and read it back on the
+// next boot to prove the SATA disk kept data across a reboot.
+//
+// It was written in Phase F, when nothing else lived on sda. Something does
+// now, and LBA 1 has belonged to the filesystem ever since: first to the
+// allocation bitmap, and since the metadata journal to its header. So every
+// boot that did not find the marker overwrote 17 bytes of live filesystem
+// metadata with ASCII text.
+//
+// That is not a hypothetical. `racos-disk-corrupt-evidence.img`, kept in this
+// project as evidence of "genuine corruption" and cited in the CHANGELOG for
+// its `leaked=52` diagnosis, holds "SACOS-AHCI-PhaseF" at LBA 1 - the marker
+// with one extra bit set where the filesystem later allocated block 0. The
+// marker sets 55 bits; fsck reported 52 leaked blocks. The corruption fsck
+// was built to detect was being manufactured by this self-test.
+//
+// It is deleted rather than moved because what it proved is now proved
+// properly: racfs's boot-counter and big-probe survive a reboot through the
+// real filesystem, which is a stronger statement about AHCI persistence than
+// a raw sector ever was, and they do it without writing outside their own
+// filesystem.
 /// Self-test invoked from kernel_main after init: sends a single broadcast
 /// frame and reports the result. No-op if the NIC is absent.
 pub fn nic_self_test() {

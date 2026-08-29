@@ -114,6 +114,13 @@ foreach ($bin in $SbinList) {
     Write-Host $msg
 }
 
+# Sample package for the v0.3 milestone smoke (and for anyone who wants to
+# try rpkg on a fresh image without a network). Regenerated every build so
+# the file tracks its generator, not a stale binary in git.
+$ShareDir = Join-Path $InitramfsRoot "share"
+if (-not (Test-Path $ShareDir)) { New-Item -ItemType Directory -Force $ShareDir | Out-Null }
+python (Join-Path $Root "scripts\make-demo-rpk.py") (Join-Path $ShareDir "demo.rpk")
+
 # --- Step 4: Pack initramfs image ---
 Write-Host ""
 Write-Host "[4/4] Packing initramfs image..." -ForegroundColor Yellow
