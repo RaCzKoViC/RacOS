@@ -342,7 +342,7 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Phase F krok 3: mount racfs on the persistent SATA disk at /mnt.
     // Open existing FS if the superblock is valid; otherwise format it once.
     if let Some(sda) = drivers::block::find("sda") {
-        match vfs::racfs::Racfs::open_or_format(sda) {
+        match open_or_format_if_blank(sda) {
             Ok(racfs) => {
                 // Consistency check before anything writes to it (v0.3 §3.2).
                 // Read-only: it reports and lets the boot continue. Refusing
@@ -1357,6 +1357,39 @@ fn flushd_task() -> ! {
 /// capacity `df` used to promise was never really there. Reformatting is what
 /// recovers it, and the message says so rather than leaving the reader to
 /// work out why a 16 MiB disk fills up at 2 MiB.
+/// Mount racfs from `dev`, formatting it only if the disk is blank.
+///
+/// `Racfs::open_or_format` formats on *any* superblock mismatch, and that
+/// was fine while the only disks in reach were QEMU images created zeroed a
+/// moment earlier. Section 3.4 makes RacOS bootable from a USB stick on
+/// real hardware, where the first AHCI disk the driver binds may hold the
+/// machine's Windows or Linux installation - and "did not recognise it, so
+/// formatted it" would be the last thing that disk ever did.
+///
+/// So the policy is: a valid racfs mounts; a blank disk (first sector all
+/// zeroes - what a fresh image or a wiped stick looks like) is claimed and
+/// formatted; anything else is refused with instructions, because choosing
+/// to destroy a filesystem belongs to the person who can see what it is,
+/// not to a boot path. QEMU smokes create their disks zero-filled, so CI
+/// still auto-formats exactly as before.
+fn open_or_format_if_blank(
+    dev: alloc::sync::Arc<dyn drivers::block::BlockDevice>,
+) -> Result<alloc::sync::Arc<vfs::racfs::Racfs>, vfs::inode::VfsError> {
+    if let Ok(fs) = vfs::racfs::Racfs::open(dev.clone()) {
+        return Ok(fs);
+    }
+    let mut sector0 = [0u8; drivers::block::SECTOR_SIZE];
+    dev.read_sector(0, &mut sector0)
+        .map_err(|_| vfs::inode::VfsError::IoError)?;
+    if sector0.iter().all(|&b| b == 0) {
+        return vfs::racfs::Racfs::format_and_new(dev);
+    }
+    serial::serial_println!(
+        "[  0.000366] RACFS sda: holds a filesystem that is not racfs; refusing to auto-format. Run `mkfs.racfs sda` to claim this disk for RacOS (this DESTROYS its contents)."
+    );
+    Err(vfs::inode::VfsError::IoError)
+}
+
 /// Read a whole file through the VFS, whatever filesystem backs it.
 ///
 /// Used to copy the initramfs `/etc` defaults onto the persistent disk before
