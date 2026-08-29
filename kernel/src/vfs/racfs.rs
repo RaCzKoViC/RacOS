@@ -1,13 +1,21 @@
 // RaCore — racfs: block-device-backed writable filesystem (Phase B)
 //
 // On-disk layout (all sizes in 512-byte sectors):
-//   Sector 0:       Superblock (magic, version, counts, offsets)
-//   Sector 1..B:    Free-block bitmap (1 bit per data block)
-//   Sector B+1..I:  Inode table (fixed-size 128-byte inodes)
-//   Sector I+1..N:  Data blocks (512 bytes each)
+//   Sector 0:                    Superblock (magic, version, counts, offsets)
+//   [bitmap_start, inode_start): Free-block bitmap (1 bit per data block)
+//   [inode_start, data_start):   Inode table (fixed-size 128-byte inodes)
+//   [data_start, total_sectors): Data blocks (512 bytes each)
 //
-// MVP constraints:
-// - Max 128 inodes, max ~8 MiB data
+// The bitmap spans however many sectors it takes to describe every data
+// block. Its length is not a superblock field: it is `inode_start -
+// bitmap_start`, which the layout has always implied. Deriving it rather than
+// adding a field keeps images written by the single-sector version mountable
+// - they report a length of 1, which is exactly what they have.
+//
+// Constraints:
+// - Max 128 inodes
+// - Max file size (8 direct + 128 single-indirect + 128*128 double-indirect)
+//   * 512 B = 8.06 MiB
 // - Backed by a BlockDevice through BlockCache
 // - CLI/STI serialization (single-core)
 
@@ -16,7 +24,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::cell::UnsafeCell;
+use core::cell::{Cell, UnsafeCell};
 
 use super::inode::{
     DirEntry, FileMode, FileType, InodeMetadata, InodeNum, InodeOps, VfsError, VfsResult,
@@ -44,6 +52,21 @@ const MAX_NAME_LEN: usize = 60;
 /// Maximum direct block pointers per inode.
 const DIRECT_BLOCKS: usize = 8;
 
+/// Block pointers that fit in one indirect block (512 B / 4 B).
+const POINTERS_PER_BLOCK: usize = SECTOR_SIZE / 4; // 128
+
+/// Logical blocks reachable through the single-indirect pointer.
+const SINGLE_INDIRECT_BLOCKS: usize = POINTERS_PER_BLOCK; // 128
+
+/// Logical blocks reachable through the double-indirect pointer.
+const DOUBLE_INDIRECT_BLOCKS: usize = POINTERS_PER_BLOCK * POINTERS_PER_BLOCK; // 16384
+
+/// Highest logical block index a file can address, exclusive.
+const MAX_FILE_BLOCKS: usize = DIRECT_BLOCKS + SINGLE_INDIRECT_BLOCKS + DOUBLE_INDIRECT_BLOCKS;
+
+/// Data blocks one sector of allocation bitmap can describe.
+const BLOCKS_PER_BITMAP_SECTOR: usize = SECTOR_SIZE * 8; // 4096
+
 /// Inode type tags stored on disk.
 const ITYPE_FREE: u8 = 0;
 const ITYPE_FILE: u8 = 1;
@@ -68,6 +91,25 @@ struct Superblock {
     _pad: [u8; 512 - 40],
 }
 
+impl Superblock {
+    /// How many sectors the allocation bitmap occupies.
+    ///
+    /// Derived from the gap between `bitmap_start` and `inode_start` rather
+    /// than stored, so an image written before the bitmap could span more than
+    /// one sector still reads correctly: its gap is 1, which is what it has. A
+    /// stored field would have needed a format version bump, making every
+    /// existing disk unmountable to buy nothing.
+    fn bitmap_sectors(&self) -> u32 {
+        self.inode_start.saturating_sub(self.bitmap_start).max(1)
+    }
+
+    /// Data blocks the bitmap can actually describe. Anything past this is
+    /// unreachable: `alloc_block` never scans there.
+    fn addressable_blocks(&self) -> usize {
+        (self.bitmap_sectors() as usize).saturating_mul(BLOCKS_PER_BITMAP_SECTOR)
+    }
+}
+
 /// What a consistency check found. Counts rather than a verdict, so the
 /// caller decides whether to warn, repair, or refuse to mount.
 #[derive(Default, Clone, Copy, Debug)]
@@ -88,16 +130,26 @@ pub struct FsckReport {
     pub out_of_range_entries: u32,
     /// Superblock `free_blocks` minus what the bitmap actually says.
     ///
-    /// Note this counts only blocks the bitmap can describe. The bitmap is a
-    /// single sector, so on a device with more than `SECTOR_SIZE * 8` data
-    /// blocks the superblock's figure legitimately exceeds it — on a 16 MiB
-    /// disk that is 4096 usable blocks out of 32734. Reaching the rest needs
-    /// the multi-sector bitmap from ROADMAP §3.2's allocator item.
+    /// This counts only blocks the bitmap can describe. A disk formatted by
+    /// this version sizes its bitmap to cover every data block, so the two
+    /// agree. An image from the single-sector era has a bitmap covering the
+    /// first 4096 blocks only, and there the superblock's figure legitimately
+    /// exceeds it — the drift then reports a real, if harmless, disagreement
+    /// about blocks nothing can allocate.
     pub superblock_free_blocks_drift: i64,
+
+    /// Data blocks the allocation bitmap cannot describe, and which are
+    /// therefore unreachable. Zero on anything this version formatted;
+    /// non-zero on an image from the single-sector era.
+    pub unaddressable_blocks: u32,
 }
 
 impl FsckReport {
     /// Nothing at all was wrong.
+    ///
+    /// `unaddressable_blocks` is deliberately excluded: wasted capacity on a
+    /// legacy image is a fact about its layout, not damage, and reporting a
+    /// healthy old disk as unclean would train the reader to ignore the line.
     pub fn is_clean(&self) -> bool {
         self.leaked_blocks == 0
             && self.unallocated_in_use == 0
@@ -130,7 +182,11 @@ struct DiskInode {
     direct: [u32; DIRECT_BLOCKS], // 32 bytes
     /// Number of directory entries (for dirs).
     dir_entry_count: u32,
-    _reserved: [u8; 128 - 56],
+    /// Block holding POINTERS_PER_BLOCK further block indices, or 0.
+    indirect: u32,
+    /// Block holding POINTERS_PER_BLOCK single-indirect block indices, or 0.
+    double_indirect: u32,
+    _reserved: [u8; 128 - 64],
 }
 
 /// On-disk directory entry (64 bytes, stored in data blocks).
@@ -214,7 +270,12 @@ fn inode_from_bytes(buf: &[u8]) -> DiskInode {
         gid: read_u32_le(buf, 14),
         direct,
         dir_entry_count: read_u32_le(buf, 48),
-        _reserved: [0u8; 128 - 56],
+        // Bytes 52.. were reserved and always written as zero, so an inode
+        // from before indirect blocks existed decodes as "no indirect
+        // blocks" - which is exactly true of it.
+        indirect: read_u32_le(buf, 52),
+        double_indirect: read_u32_le(buf, 56),
+        _reserved: [0u8; 128 - 64],
     }
 }
 
@@ -230,6 +291,8 @@ fn inode_to_bytes(inode: &DiskInode) -> [u8; INODE_DISK_SIZE] {
         write_u32_le(&mut buf, 16 + i * 4, inode.direct[i]);
     }
     write_u32_le(&mut buf, 48, inode.dir_entry_count);
+    write_u32_le(&mut buf, 52, inode.indirect);
+    write_u32_le(&mut buf, 56, inode.double_indirect);
     buf
 }
 
@@ -269,6 +332,15 @@ fn direntry_to_bytes(de: &DiskDirEntry) -> [u8; DIR_ENTRY_SIZE] {
 pub struct Racfs {
     cache: UnsafeCell<BlockCache>,
     sb: UnsafeCell<Superblock>,
+    /// Data-block index where the next allocation scan starts (0-based).
+    ///
+    /// Purely an optimisation, and deliberately not on disk: a stale hint
+    /// costs one wasted scan, never a wrong answer, so there is nothing to
+    /// keep consistent across a crash. Without it every allocation restarts
+    /// from block 0 and re-reads the same full bitmap sectors, which on a
+    /// multi-sector bitmap is the difference between one sector read per
+    /// allocation and a dozen.
+    alloc_hint: Cell<u32>,
 }
 
 unsafe impl Send for Racfs {}
@@ -288,9 +360,21 @@ impl Racfs {
         if sb.magic != RACFS_MAGIC || sb.version != RACFS_VERSION {
             return Err(VfsError::IoError);
         }
+        // Layout sanity, checked because the bitmap's length is *derived*
+        // from these offsets. A superblock claiming `inode_start <=
+        // bitmap_start` would clamp the bitmap to one sector and leave
+        // `free_block` writing bits into the inode table. Refusing here turns
+        // that into a mount failure, which `open_or_format` handles.
+        if sb.bitmap_start == 0
+            || sb.inode_start <= sb.bitmap_start
+            || sb.data_start <= sb.inode_start
+        {
+            return Err(VfsError::IoError);
+        }
         Ok(Arc::new(Racfs {
             cache: UnsafeCell::new(cache),
             sb: UnsafeCell::new(sb),
+            alloc_hint: Cell::new(0),
         }))
     }
 
@@ -309,9 +393,30 @@ impl Racfs {
 
         // Layout calculation.
         let bitmap_start: u32 = 1;
-        // 1 bit per data block; we need ceiling division.
-        let inode_sectors = (MAX_INODES + INODES_PER_SECTOR - 1) / INODES_PER_SECTOR;
-        let inode_start = bitmap_start + 1; // 1 sector of bitmap = 4096 data blocks max
+        let inode_sectors = MAX_INODES.div_ceil(INODES_PER_SECTOR);
+
+        // Size the bitmap so it describes every data block, rather than
+        // fixing it at one sector and stranding the rest of the device.
+        //
+        // It is a fixed point because the bitmap's size and the data area's
+        // size each depend on the other: every sector added to the bitmap
+        // costs one data block and buys BLOCKS_PER_BITMAP_SECTOR of
+        // description. Growing the bitmap can only shrink the data area, so
+        // the requirement never rises after the first round and the loop
+        // settles in two passes; the iteration cap is a guard against a
+        // future edit breaking that monotonicity, not a real bound.
+        let mut bitmap_sectors: u32 = 1;
+        for _ in 0..8 {
+            let overhead = 1 + bitmap_sectors + inode_sectors as u32;
+            let data_blocks = total_sectors.saturating_sub(overhead) as usize;
+            let needed = data_blocks.div_ceil(BLOCKS_PER_BITMAP_SECTOR).max(1) as u32;
+            if needed <= bitmap_sectors {
+                break;
+            }
+            bitmap_sectors = needed;
+        }
+
+        let inode_start = bitmap_start + bitmap_sectors;
         let data_start = inode_start + inode_sectors as u32;
         let data_block_count = total_sectors.saturating_sub(data_start);
 
@@ -337,11 +442,15 @@ impl Racfs {
             .write_sector(0, &sb_buf)
             .map_err(|_| VfsError::IoError)?;
 
-        // Zero bitmap.
+        // Zero bitmap. Every sector of it: a stale sector left from a
+        // previous filesystem would read as "allocated" and quietly cost the
+        // new one 4096 blocks.
         let zero = [0u8; SECTOR_SIZE];
-        cache
-            .write_sector(bitmap_start as u64, &zero)
-            .map_err(|_| VfsError::IoError)?;
+        for s in 0..bitmap_sectors {
+            cache
+                .write_sector((bitmap_start + s) as u64, &zero)
+                .map_err(|_| VfsError::IoError)?;
+        }
 
         // Zero inode table.
         for s in 0..inode_sectors {
@@ -362,20 +471,24 @@ impl Racfs {
             gid: 0,
             direct: [0u32; DIRECT_BLOCKS],
             dir_entry_count: 0,
-            _reserved: [0u8; 128 - 56],
+            indirect: 0,
+            double_indirect: 0,
+            _reserved: [0u8; 128 - 64],
         };
         let fs = Arc::new(Racfs {
             cache: UnsafeCell::new(cache),
             sb: UnsafeCell::new(sb),
+            alloc_hint: Cell::new(0),
         });
         fs.write_inode(0, &root_inode)?;
         fs.cache_mut().flush().map_err(|_| VfsError::IoError)?;
 
         crate::serial::serial_println!(
-            "[  RACFS  ] Formatted: {} sectors, {} data blocks, {} inodes",
+            "[  RACFS  ] Formatted: {} sectors, {} data blocks, {} inodes, {} bitmap sectors",
             total_sectors,
             data_block_count,
-            MAX_INODES
+            MAX_INODES,
+            bitmap_sectors
         );
 
         Ok(fs)
@@ -400,9 +513,17 @@ impl Racfs {
     /// Block size is SECTOR_SIZE (512 B). Used by /proc/diskstats.
     pub fn stats(&self) -> (u32, u32, u32, u32) {
         let sb = self.sb();
+        // Report the blocks the bitmap can describe, not every block on the
+        // device. They are the same figure on anything this version
+        // formatted; on a single-sector-era image the rest is unreachable,
+        // and `df` promising 16 MiB where `alloc_block` will only ever find
+        // 2 MiB is a lie the user then has to debug.
+        let addressable = sb.addressable_blocks().min(u32::MAX as usize) as u32;
+        let total = sb.data_block_count.min(addressable);
+        let unreachable = sb.data_block_count.saturating_sub(addressable);
         (
-            sb.data_block_count,
-            sb.free_blocks,
+            total,
+            sb.free_blocks.saturating_sub(unreachable),
             sb.inode_count,
             sb.free_inodes,
         )
@@ -492,11 +613,10 @@ impl Racfs {
                 continue;
             }
 
-            for slot in 0..DIRECT_BLOCKS {
-                let block = di.direct[slot];
-                if block == 0 {
-                    continue; // 0 is the "no block" sentinel, not block zero
-                }
+            // Data blocks *and* the indirect blocks holding their pointers:
+            // both are allocated from the same bitmap, so counting only the
+            // data blocks would report every indirect block as leaked.
+            for block in self.owned_blocks(&di) {
                 // Data blocks are 1-based on disk.
                 let idx = (block - 1) as usize;
                 if idx >= total_blocks {
@@ -537,31 +657,37 @@ impl Racfs {
             }
         }
 
-        // Now the bitmap side.
-        let mut bitmap = [0u8; SECTOR_SIZE];
-        self.cache_mut()
-            .read_sector(sb.bitmap_start as u64, &mut bitmap)
-            .map_err(|_| VfsError::IoError)?;
-
-        // The allocation bitmap is a single sector, so it can only describe
-        // SECTOR_SIZE * 8 blocks however large the device is. `alloc_block`
-        // scans exactly that range, so blocks beyond it are simply never
-        // handed out — see FsckReport's docs and ROADMAP §3.2's allocator
-        // item. Comparing past this point would read off the end of `bitmap`.
-        let bitmap_capacity = SECTOR_SIZE * 8;
-        let tracked = total_blocks.min(bitmap_capacity);
+        // Now the bitmap side, one sector at a time. A disk this version
+        // formatted has a bitmap covering every data block; an image from the
+        // single-sector era covers only the first 4096, and the remainder is
+        // dead space that no allocation can ever reach.
+        let addressable = sb.addressable_blocks();
+        let tracked = total_blocks.min(addressable);
+        report.unaddressable_blocks = total_blocks.saturating_sub(addressable) as u32;
 
         let mut used_per_bitmap: i64 = 0;
-        for idx in 0..tracked {
-            let marked_used = bitmap[idx / 8] & (1 << (idx % 8)) != 0;
-            let referenced = refs[idx] > 0;
-            match (marked_used, referenced) {
-                (true, false) => report.leaked_blocks += 1,
-                (false, true) => report.unallocated_in_use += 1,
-                _ => {}
-            }
-            if marked_used {
-                used_per_bitmap += 1;
+        let mut idx = 0usize;
+        while idx < tracked {
+            let sector_no = idx / BLOCKS_PER_BITMAP_SECTOR;
+            let mut bitmap = [0u8; SECTOR_SIZE];
+            self.cache_mut()
+                .read_sector(sb.bitmap_start as u64 + sector_no as u64, &mut bitmap)
+                .map_err(|_| VfsError::IoError)?;
+
+            let sector_end = ((sector_no + 1) * BLOCKS_PER_BITMAP_SECTOR).min(tracked);
+            while idx < sector_end {
+                let bit = idx % BLOCKS_PER_BITMAP_SECTOR;
+                let marked_used = bitmap[bit / 8] & (1 << (bit % 8)) != 0;
+                let referenced = refs[idx] > 0;
+                match (marked_used, referenced) {
+                    (true, false) => report.leaked_blocks += 1,
+                    (false, true) => report.unallocated_in_use += 1,
+                    _ => {}
+                }
+                if marked_used {
+                    used_per_bitmap += 1;
+                }
+                idx += 1;
             }
         }
 
@@ -607,73 +733,115 @@ impl Racfs {
         di.itype = ITYPE_FREE;
         di.size = 0;
         di.dir_entry_count = 0;
-        for i in 0..DIRECT_BLOCKS {
-            if di.direct[i] != 0 {
-                self.free_block(di.direct[i])?;
-            }
-            di.direct[i] = 0;
-        }
+        self.free_block_map(&mut di);
         self.write_inode(ino, &di)?;
         self.sb_mut().free_inodes += 1;
         Ok(())
     }
 
-    /// Allocate a data block from the bitmap. Returns data-block index (0-based).
+    /// Allocate a data block from the bitmap. Returns a 1-based data-block
+    /// index (0 is the "no block" sentinel).
+    ///
+    /// Scans from `alloc_hint` to the end of the addressable range and then
+    /// wraps. The wrap is not optional: without it, a block freed below the
+    /// hint would stay unreachable until the next mount, and a filesystem
+    /// that churns files would report free space it refused to hand out.
     fn alloc_block(&self) -> VfsResult<u32> {
-        let sb = self.sb();
+        let sb = *self.sb();
         if sb.free_blocks == 0 {
             return Err(VfsError::NoSpace);
         }
-        let mut bitmap = [0u8; SECTOR_SIZE];
-        self.cache_mut()
-            .read_sector(sb.bitmap_start as u64, &mut bitmap)
-            .map_err(|_| VfsError::IoError)?;
+        // Blocks the bitmap cannot describe are not allocatable - there is no
+        // bit to set for them. On a disk this version formatted the two
+        // figures are equal; on a single-sector-era image the bitmap is
+        // smaller than the data area, and the excess is simply dead space.
+        let total = (sb.data_block_count as usize).min(sb.addressable_blocks());
+        if total == 0 {
+            return Err(VfsError::NoSpace);
+        }
+        let start = (self.alloc_hint.get() as usize).min(total - 1);
 
-        let total = sb.data_block_count as usize;
-        for byte_idx in 0..SECTOR_SIZE {
-            if byte_idx * 8 >= total {
-                break;
-            }
-            if bitmap[byte_idx] == 0xFF {
-                continue;
-            }
-            for bit in 0..8u8 {
-                let block_idx = byte_idx * 8 + bit as usize;
-                if block_idx >= total {
-                    return Err(VfsError::NoSpace);
-                }
-                if bitmap[byte_idx] & (1 << bit) == 0 {
-                    bitmap[byte_idx] |= 1 << bit;
-                    self.cache_mut()
-                        .write_sector(sb.bitmap_start as u64, &bitmap)
-                        .map_err(|_| VfsError::IoError)?;
-                    self.sb_mut().free_blocks -= 1;
-                    // Data block indices are 1-based (0 = "no block").
-                    return Ok(block_idx as u32 + 1);
-                }
+        // Two passes cover every block exactly once: [start, total), [0, start).
+        for (from, to) in [(start, total), (0, start)] {
+            if let Some(idx) = self.claim_first_free(from, to)? {
+                self.alloc_hint.set((idx as u32).saturating_add(1));
+                self.sb_mut().free_blocks -= 1;
+                return Ok(idx as u32 + 1);
             }
         }
         Err(VfsError::NoSpace)
     }
 
+    /// Claim the first free block in `[from, to)` and return its 0-based
+    /// index, or None if that range is full. Reads one bitmap sector at a
+    /// time so a bitmap larger than a sector costs reads in proportion to how
+    /// far the scan actually travels.
+    fn claim_first_free(&self, from: usize, to: usize) -> VfsResult<Option<usize>> {
+        let sb = *self.sb();
+        let mut idx = from;
+        while idx < to {
+            let sector_no = idx / BLOCKS_PER_BITMAP_SECTOR;
+            let sector = sb.bitmap_start as u64 + sector_no as u64;
+            let mut bitmap = [0u8; SECTOR_SIZE];
+            self.cache_mut()
+                .read_sector(sector, &mut bitmap)
+                .map_err(|_| VfsError::IoError)?;
+
+            let sector_end = ((sector_no + 1) * BLOCKS_PER_BITMAP_SECTOR).min(to);
+            while idx < sector_end {
+                let bit_in_sector = idx % BLOCKS_PER_BITMAP_SECTOR;
+                let byte = bit_in_sector / 8;
+                if bitmap[byte] == 0xFF {
+                    // Whole byte taken: step to the next byte boundary rather
+                    // than testing eight bits that cannot be free.
+                    idx += 8 - (bit_in_sector % 8);
+                    continue;
+                }
+                let bit = bit_in_sector % 8;
+                if bitmap[byte] & (1 << bit) == 0 {
+                    bitmap[byte] |= 1 << bit;
+                    self.cache_mut()
+                        .write_sector(sector, &bitmap)
+                        .map_err(|_| VfsError::IoError)?;
+                    return Ok(Some(idx));
+                }
+                idx += 1;
+            }
+        }
+        Ok(None)
+    }
+
     /// Free a data block (1-based index).
+    ///
+    /// Returns `InvalidArgument` for a block the bitmap cannot describe. That
+    /// only happens for a corrupt inode, and it used to index a 512-byte
+    /// array with a byte offset of up to 4091 and take the kernel down.
     fn free_block(&self, block: u32) -> VfsResult<()> {
         if block == 0 {
             return Ok(()); // no-block sentinel
         }
         let idx = (block - 1) as usize;
-        let sb = self.sb();
+        let sb = *self.sb();
+        if idx >= sb.addressable_blocks() || idx >= sb.data_block_count as usize {
+            return Err(VfsError::InvalidArgument);
+        }
+        let sector = sb.bitmap_start as u64 + (idx / BLOCKS_PER_BITMAP_SECTOR) as u64;
+        let bit_in_sector = idx % BLOCKS_PER_BITMAP_SECTOR;
         let mut bitmap = [0u8; SECTOR_SIZE];
         self.cache_mut()
-            .read_sector(sb.bitmap_start as u64, &mut bitmap)
+            .read_sector(sector, &mut bitmap)
             .map_err(|_| VfsError::IoError)?;
-        let byte_idx = idx / 8;
-        let bit = idx % 8;
-        bitmap[byte_idx] &= !(1u8 << bit);
+        bitmap[bit_in_sector / 8] &= !(1u8 << (bit_in_sector % 8));
         self.cache_mut()
-            .write_sector(sb.bitmap_start as u64, &bitmap)
+            .write_sector(sector, &bitmap)
             .map_err(|_| VfsError::IoError)?;
         self.sb_mut().free_blocks += 1;
+
+        // Reuse the hole before scanning past it, so a create/delete loop
+        // stays in the same bitmap sector instead of marching down the disk.
+        if (idx as u32) < self.alloc_hint.get() {
+            self.alloc_hint.set(idx as u32);
+        }
         Ok(())
     }
 
@@ -701,6 +869,198 @@ impl Racfs {
         self.cache_mut()
             .write_sector(self.data_sector(block), data)
             .map_err(|_| VfsError::IoError)
+    }
+
+    // --- Logical-to-physical block mapping ---------------------------------
+    //
+    // A file's blocks are addressed as 8 direct pointers in the inode, then
+    // 128 more through a single indirect block, then 128*128 through a double
+    // indirect block. Before this existed a file was 8 blocks - 4096 bytes -
+    // and nothing bigger could live on persistent storage at all.
+
+    /// Read pointer `slot` out of an indirect block.
+    fn read_pointer(&self, block: u32, slot: usize) -> VfsResult<u32> {
+        let mut sector = [0u8; SECTOR_SIZE];
+        self.read_data_block(block, &mut sector)?;
+        Ok(read_u32_le(&sector, slot * 4))
+    }
+
+    /// Write pointer `slot` into an indirect block.
+    fn write_pointer(&self, block: u32, slot: usize, value: u32) -> VfsResult<()> {
+        let mut sector = [0u8; SECTOR_SIZE];
+        self.read_data_block(block, &mut sector)?;
+        write_u32_le(&mut sector, slot * 4, value);
+        self.write_data_block(block, &sector)
+    }
+
+    /// Allocate a block and zero it.
+    ///
+    /// Zeroing is what makes an indirect block safe to read: every slot must
+    /// say "unallocated" rather than whatever the block's previous owner left
+    /// behind, or the first read walks straight into someone else's data.
+    fn alloc_zeroed_block(&self) -> VfsResult<u32> {
+        let block = self.alloc_block()?;
+        let zero = [0u8; SECTOR_SIZE];
+        self.write_data_block(block, &zero)?;
+        Ok(block)
+    }
+
+    /// Physical block backing logical block `idx`, or 0 if it is not mapped.
+    /// Never allocates, so it takes the inode by shared reference.
+    fn map_block(&self, inode: &DiskInode, idx: usize) -> VfsResult<u32> {
+        if idx < DIRECT_BLOCKS {
+            return Ok(inode.direct[idx]);
+        }
+        let idx = idx - DIRECT_BLOCKS;
+        if idx < SINGLE_INDIRECT_BLOCKS {
+            if inode.indirect == 0 {
+                return Ok(0);
+            }
+            return self.read_pointer(inode.indirect, idx);
+        }
+        let idx = idx - SINGLE_INDIRECT_BLOCKS;
+        if idx >= DOUBLE_INDIRECT_BLOCKS {
+            return Err(VfsError::NoSpace);
+        }
+        if inode.double_indirect == 0 {
+            return Ok(0);
+        }
+        let l1 = self.read_pointer(inode.double_indirect, idx / POINTERS_PER_BLOCK)?;
+        if l1 == 0 {
+            return Ok(0);
+        }
+        self.read_pointer(l1, idx % POINTERS_PER_BLOCK)
+    }
+
+    /// Physical block backing logical block `idx`, allocating it and every
+    /// indirect block on the way there.
+    ///
+    /// Mutates `inode.indirect` / `inode.double_indirect`, so the caller must
+    /// write the inode back. If a later step fails, the blocks allocated so
+    /// far are leaked rather than half-linked - which is the damage class
+    /// `check()` calls safe, and the one this ordering deliberately picks.
+    fn map_block_alloc(&self, inode: &mut DiskInode, idx: usize) -> VfsResult<u32> {
+        if idx >= MAX_FILE_BLOCKS {
+            return Err(VfsError::NoSpace);
+        }
+        if idx < DIRECT_BLOCKS {
+            if inode.direct[idx] == 0 {
+                inode.direct[idx] = self.alloc_zeroed_block()?;
+            }
+            return Ok(inode.direct[idx]);
+        }
+        let idx = idx - DIRECT_BLOCKS;
+        if idx < SINGLE_INDIRECT_BLOCKS {
+            if inode.indirect == 0 {
+                inode.indirect = self.alloc_zeroed_block()?;
+            }
+            let existing = self.read_pointer(inode.indirect, idx)?;
+            if existing != 0 {
+                return Ok(existing);
+            }
+            let block = self.alloc_zeroed_block()?;
+            self.write_pointer(inode.indirect, idx, block)?;
+            return Ok(block);
+        }
+        let idx = idx - SINGLE_INDIRECT_BLOCKS;
+        if inode.double_indirect == 0 {
+            inode.double_indirect = self.alloc_zeroed_block()?;
+        }
+        let l1_slot = idx / POINTERS_PER_BLOCK;
+        let mut l1 = self.read_pointer(inode.double_indirect, l1_slot)?;
+        if l1 == 0 {
+            l1 = self.alloc_zeroed_block()?;
+            self.write_pointer(inode.double_indirect, l1_slot, l1)?;
+        }
+        let slot = idx % POINTERS_PER_BLOCK;
+        let existing = self.read_pointer(l1, slot)?;
+        if existing != 0 {
+            return Ok(existing);
+        }
+        let block = self.alloc_zeroed_block()?;
+        self.write_pointer(l1, slot, block)?;
+        Ok(block)
+    }
+
+    /// Every block an inode owns: its data blocks, plus the indirect blocks
+    /// that hold their pointers. The indirect blocks come out of the same
+    /// bitmap, so omitting them would make `check()` report each one leaked.
+    fn owned_blocks(&self, inode: &DiskInode) -> Vec<u32> {
+        let mut out = Vec::new();
+        for i in 0..DIRECT_BLOCKS {
+            if inode.direct[i] != 0 {
+                out.push(inode.direct[i]);
+            }
+        }
+        if inode.indirect != 0 {
+            out.push(inode.indirect);
+            for slot in 0..POINTERS_PER_BLOCK {
+                // An unreadable pointer block means this inode's block list is
+                // already broken; report what can be seen rather than failing
+                // the whole check.
+                if let Ok(p) = self.read_pointer(inode.indirect, slot) {
+                    if p != 0 {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        if inode.double_indirect != 0 {
+            out.push(inode.double_indirect);
+            for slot in 0..POINTERS_PER_BLOCK {
+                let l1 = match self.read_pointer(inode.double_indirect, slot) {
+                    Ok(b) if b != 0 => b,
+                    _ => continue,
+                };
+                out.push(l1);
+                for inner in 0..POINTERS_PER_BLOCK {
+                    if let Ok(p) = self.read_pointer(l1, inner) {
+                        if p != 0 {
+                            out.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Free every block an inode owns and clear its block map.
+    ///
+    /// Errors from `free_block` are swallowed on purpose: this runs while
+    /// removing a file, and a pointer the bitmap cannot describe - a corrupt
+    /// inode - must not make the inode un-freeable. Being able to `rm` a
+    /// damaged file is exactly what the fsck warning tells the user to do.
+    fn free_block_map(&self, inode: &mut DiskInode) {
+        for i in 0..DIRECT_BLOCKS {
+            let _ = self.free_block(inode.direct[i]);
+            inode.direct[i] = 0;
+        }
+        if inode.indirect != 0 {
+            self.free_pointer_block(inode.indirect);
+            inode.indirect = 0;
+        }
+        if inode.double_indirect != 0 {
+            for slot in 0..POINTERS_PER_BLOCK {
+                if let Ok(l1) = self.read_pointer(inode.double_indirect, slot) {
+                    if l1 != 0 {
+                        self.free_pointer_block(l1);
+                    }
+                }
+            }
+            let _ = self.free_block(inode.double_indirect);
+            inode.double_indirect = 0;
+        }
+    }
+
+    /// Free every block an indirect block points at, then the block itself.
+    fn free_pointer_block(&self, block: u32) {
+        for slot in 0..POINTERS_PER_BLOCK {
+            if let Ok(p) = self.read_pointer(block, slot) {
+                let _ = self.free_block(p);
+            }
+        }
+        let _ = self.free_block(block);
     }
 
     // ─── High-level FS operations ───────────────────────────────────────────
@@ -740,7 +1100,9 @@ impl Racfs {
             gid: 0,
             direct: [0u32; DIRECT_BLOCKS],
             dir_entry_count: 0,
-            _reserved: [0u8; 128 - 56],
+            indirect: 0,
+            double_indirect: 0,
+            _reserved: [0u8; 128 - 64],
         };
         self.write_inode(new_ino, &new_inode)?;
 
@@ -844,10 +1206,12 @@ impl Racfs {
         while done < to_read {
             let block_idx = pos / SECTOR_SIZE;
             let block_off = pos % SECTOR_SIZE;
-            if block_idx >= DIRECT_BLOCKS {
-                break; // MVP: no indirect blocks
-            }
-            let block = inode.direct[block_idx];
+            // Past the addressable block map. Only a corrupt `size` can get
+            // here, since no write can produce a file that long; stop rather
+            // than fail, so the readable prefix still comes back.
+            let Ok(block) = self.map_block(&inode, block_idx) else {
+                break;
+            };
             let mut sector = [0u8; SECTOR_SIZE];
             self.read_data_block(block, &mut sector)?;
             let chunk = (SECTOR_SIZE - block_off).min(to_read - done);
@@ -866,19 +1230,19 @@ impl Racfs {
         }
 
         let end = offset as usize + data.len();
-        // Allocate blocks as needed.
-        let blocks_needed = (end + SECTOR_SIZE - 1) / SECTOR_SIZE;
-        if blocks_needed > DIRECT_BLOCKS {
-            return Err(VfsError::NoSpace); // MVP: direct blocks only
+        let blocks_needed = end.div_ceil(SECTOR_SIZE);
+        if blocks_needed > MAX_FILE_BLOCKS {
+            return Err(VfsError::NoSpace);
         }
 
-        for i in 0..blocks_needed {
-            if inode.direct[i] == 0 {
-                inode.direct[i] = self.alloc_block()?;
-                // Zero the new block.
-                let zero = [0u8; SECTOR_SIZE];
-                self.write_data_block(inode.direct[i], &zero)?;
-            }
+        // Blocks below the current size are already allocated - racfs has no
+        // holes, and this loop is what maintains that. Starting from the last
+        // block the file already has, rather than from 0, is what keeps a
+        // sequential write linear instead of quadratic in the file's length;
+        // at 8 blocks that distinction did not exist, at 16520 it does.
+        let already = inode.size as usize / SECTOR_SIZE;
+        for i in already..blocks_needed {
+            self.map_block_alloc(&mut inode, i)?;
         }
 
         // Write data across blocks.
@@ -887,7 +1251,7 @@ impl Racfs {
         while done < data.len() {
             let block_idx = pos / SECTOR_SIZE;
             let block_off = pos % SECTOR_SIZE;
-            let block = inode.direct[block_idx];
+            let block = self.map_block(&inode, block_idx)?;
             let mut sector = [0u8; SECTOR_SIZE];
             self.read_data_block(block, &mut sector)?;
             let chunk = (SECTOR_SIZE - block_off).min(data.len() - done);
@@ -922,11 +1286,12 @@ impl Racfs {
         // Each data block holds DIR_ENTRIES_PER_BLOCK entries.
         let block_idx = idx as usize / DIR_ENTRIES_PER_BLOCK;
         let entry_in_block = idx as usize % DIR_ENTRIES_PER_BLOCK;
-        if block_idx >= DIRECT_BLOCKS || inode.direct[block_idx] == 0 {
+        let block = self.map_block(inode, block_idx)?;
+        if block == 0 {
             return Err(VfsError::IoError);
         }
         let mut sector = [0u8; SECTOR_SIZE];
-        self.read_data_block(inode.direct[block_idx], &mut sector)?;
+        self.read_data_block(block, &mut sector)?;
         let off = entry_in_block * DIR_ENTRY_SIZE;
         Ok(direntry_from_bytes(&sector[off..off + DIR_ENTRY_SIZE]))
     }
@@ -938,16 +1303,11 @@ impl Racfs {
         let block_idx = idx as usize / DIR_ENTRIES_PER_BLOCK;
         let entry_in_block = idx as usize % DIR_ENTRIES_PER_BLOCK;
 
-        if block_idx >= DIRECT_BLOCKS {
-            return Err(VfsError::NoSpace);
-        }
-
-        // Allocate data block if needed.
-        if dir.direct[block_idx] == 0 {
-            dir.direct[block_idx] = self.alloc_block()?;
-            let zero = [0u8; SECTOR_SIZE];
-            self.write_data_block(dir.direct[block_idx], &zero)?;
-        }
+        // Directories share the file block map, so a directory is no longer
+        // capped at 8 blocks - 64 entries - either. `/home` and `/var/lib`
+        // hitting that cap was a v0.3 blocker nobody had run into yet only
+        // because nothing persistent had that many names in it.
+        let block = self.map_block_alloc(&mut dir, block_idx)?;
 
         // Build entry. name_len records what actually fits, not what was
         // asked for: `name.len() as u8` would wrap past 255 and, for anything
@@ -964,11 +1324,11 @@ impl Racfs {
 
         // Write entry into data block.
         let mut sector = [0u8; SECTOR_SIZE];
-        self.read_data_block(dir.direct[block_idx], &mut sector)?;
+        self.read_data_block(block, &mut sector)?;
         let off = entry_in_block * DIR_ENTRY_SIZE;
         let de_bytes = direntry_to_bytes(&de);
         sector[off..off + DIR_ENTRY_SIZE].copy_from_slice(&de_bytes);
-        self.write_data_block(dir.direct[block_idx], &sector)?;
+        self.write_data_block(block, &sector)?;
 
         dir.dir_entry_count += 1;
         self.write_inode(dir_ino, &dir)?;
@@ -996,12 +1356,13 @@ impl Racfs {
             // Write last entry to found's position.
             let block_idx = found as usize / DIR_ENTRIES_PER_BLOCK;
             let entry_in_block = found as usize % DIR_ENTRIES_PER_BLOCK;
+            let block = self.map_block(&dir, block_idx)?;
             let mut sector = [0u8; SECTOR_SIZE];
-            self.read_data_block(dir.direct[block_idx], &mut sector)?;
+            self.read_data_block(block, &mut sector)?;
             let off = entry_in_block * DIR_ENTRY_SIZE;
             let bytes = direntry_to_bytes(&last);
             sector[off..off + DIR_ENTRY_SIZE].copy_from_slice(&bytes);
-            self.write_data_block(dir.direct[block_idx], &sector)?;
+            self.write_data_block(block, &sector)?;
         }
 
         dir.dir_entry_count -= 1;
@@ -1243,6 +1604,9 @@ pub unsafe fn instance() -> &'static Arc<Racfs> {
 pub fn persistence_test(fs: &Racfs, label: &str) {
     use alloc::string::ToString;
     const NAME: &str = "boot-counter";
+    // (what the previous boot wrote, what this boot writes), or None if the
+    // counter could not be established at all.
+    let mut generation: Option<(u32, u32)> = None;
     match fs.lookup_path(NAME) {
         Ok(ino) => {
             let mut buf = [0u8; 16];
@@ -1259,6 +1623,7 @@ pub fn persistence_test(fs: &Racfs, label: &str) {
                 next,
                 value,
             );
+            generation = Some((value, next));
         }
         Err(_) => match fs.create_file(0, NAME) {
             Ok(ino) => {
@@ -1267,6 +1632,7 @@ pub fn persistence_test(fs: &Racfs, label: &str) {
                     "[ RACFS {} ] created boot-counter = 1 (first boot)",
                     label
                 );
+                generation = Some((0, 1));
             }
             Err(e) => crate::serial::serial_println!(
                 "[ RACFS {} ] create boot-counter failed: {:?}",
@@ -1274,5 +1640,117 @@ pub fn persistence_test(fs: &Racfs, label: &str) {
                 e
             ),
         },
+    }
+
+    if let Some((previous, current)) = generation {
+        big_probe(fs, label, previous, current);
+    }
+}
+
+/// The other half of the persistence probe: a file past the eight direct
+/// block pointers, so a reboot proves the *indirect* block map survives and
+/// not merely an inode's first block.
+///
+/// `boot-counter` is one byte long, so it only ever exercised `direct[0]`. It
+/// would have kept passing on a filesystem whose indirect blocks were written
+/// to the wrong place entirely, which is precisely the code v0.3 §3.2 added.
+///
+/// 8192 bytes is 16 blocks: 8 direct and 8 reached through the single
+/// indirect. The last 16 bytes carry the number of the boot that wrote them,
+/// and reading *those* is the point — they are the part only the indirect map
+/// can reach.
+fn big_probe(fs: &Racfs, label: &str, previous: u32, current: u32) {
+    const NAME: &str = "big-probe";
+    const LEN: usize = 8192;
+    const TAIL: usize = 16;
+
+    // "#" + 14 digits + "\n" is exactly TAIL bytes, so the marker always lands
+    // at the same offset however large the counter grows.
+    fn marker(n: u32) -> [u8; TAIL] {
+        let mut out = [b'0'; TAIL];
+        out[0] = b'#';
+        out[TAIL - 1] = b'\n';
+        let mut v = n;
+        let mut i = TAIL - 2;
+        loop {
+            out[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 || i == 1 {
+                break;
+            }
+            i -= 1;
+        }
+        out
+    }
+
+    fn parse(buf: &[u8]) -> Option<u32> {
+        if buf.len() != TAIL || buf[0] != b'#' {
+            return None;
+        }
+        let mut v: u32 = 0;
+        for &b in &buf[1..TAIL - 1] {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            v = v.wrapping_mul(10).wrapping_add((b - b'0') as u32);
+        }
+        Some(v)
+    }
+
+    let existing = fs.lookup_path(NAME).ok();
+
+    if let Some(ino) = existing {
+        let mut tail = [0u8; TAIL];
+        let n = fs
+            .read_file(ino, (LEN - TAIL) as u64, &mut tail)
+            .unwrap_or(0);
+        match parse(&tail[..n]) {
+            Some(found) if found == previous => crate::serial::serial_println!(
+                "[ RACFS {} ] big-probe tail = {} (expected {}, indirect blocks survived reboot)",
+                label,
+                found,
+                previous
+            ),
+            Some(found) => crate::serial::serial_println!(
+                "[ RACFS {} ] big-probe tail MISMATCH: got {}, expected {}",
+                label,
+                found,
+                previous
+            ),
+            None => crate::serial::serial_println!(
+                "[ RACFS {} ] big-probe tail unreadable ({} bytes at offset {})",
+                label,
+                n,
+                LEN - TAIL
+            ),
+        }
+    }
+
+    let ino = match existing {
+        Some(ino) => ino,
+        None => match fs.create_file(0, NAME) {
+            Ok(ino) => {
+                crate::serial::serial_println!(
+                    "[ RACFS {} ] created big-probe ({} B, past the direct blocks)",
+                    label,
+                    LEN
+                );
+                ino
+            }
+            Err(e) => {
+                crate::serial::serial_println!(
+                    "[ RACFS {} ] create big-probe failed: {:?}",
+                    label,
+                    e
+                );
+                return;
+            }
+        },
+    };
+
+    let mut body = alloc::vec![b'.'; LEN];
+    body[LEN - TAIL..].copy_from_slice(&marker(current));
+    if let Err(e) = fs.write_file(ino, 0, &body) {
+        crate::serial::serial_println!("[ RACFS {} ] big-probe write failed: {:?}", label, e);
     }
 }
