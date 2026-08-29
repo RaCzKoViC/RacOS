@@ -32,6 +32,7 @@ mod boot;
 mod drivers;
 mod elf;
 mod fb_console;
+mod gfx;
 mod interrupts;
 mod mm;
 mod net;
@@ -71,11 +72,21 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Initialize serial output first — all diagnostics depend on it
     serial::init();
 
-    // Initialize framebuffer console if available
+    // Claim the framebuffer, then start its first two clients: the text
+    // console (which asks the owner for its region rather than assuming it
+    // owns the screen) and the status bar (rendered through a real Surface).
+    // Ordering matters: the console's init clears its region, so the bar is
+    // presented after.
     // SAFETY: boot-once; boot_info points at the bootloader-supplied region.
     unsafe {
+        gfx::init(boot_info);
         fb_console::init(boot_info);
     }
+    // The status bar is drawn later, once the heap exists: a Surface is a
+    // heap allocation, and this point of kernel_main is a hundred lines
+    // before mm::heap::init. The first version called it here and the bar
+    // silently never appeared - caught by the graphics smoke's screendump,
+    // not by any log line, which is exactly why that smoke dumps pixels.
 
     println!(
         "RACORE: RacOS kernel starting (Build {})",
@@ -140,6 +151,10 @@ pub extern "C" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         mm::heap::init().expect("Failed to initialize kernel heap");
         tty::vt::init();
     }
+
+    // First heap user with visible output: the gfx owner's status bar
+    // (surface -> present), deliberately right after the heap comes up.
+    gfx::draw_status_bar();
 
     // ACPI/MADT discovery now that the heap can hold parsed topology
     // (CPU + IOAPIC vectors). The arch layer intentionally leaves this for

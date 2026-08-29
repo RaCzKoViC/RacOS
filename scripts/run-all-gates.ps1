@@ -12,6 +12,7 @@
 #   8 racos-test       130 assertions driven through racsh in a live guest
 #   9 usb-boot         boot from a real MBR+FAT32 image over USB (3.4)
 #  10 milestone-v03    two boots: history + installed rpkg survive (3.5)
+#  11 graphics         framebuffer claimed + screendump pixel diversity (4.4)
 #
 # Usage:
 #   powershell -File scripts/run-all-gates.ps1 [-SkipQemu] [-Smp 4]
@@ -76,7 +77,7 @@ $started = Get-Date
 
 # ---- 1. build -----------------------------------------------------------
 Write-Host ""
-Write-Host "[1/10] build" -ForegroundColor Cyan
+Write-Host "[1/11] build" -ForegroundColor Cyan
 $env:RUSTFLAGS = $KernelFlags
 cargo build --package racore --target x86_64-unknown-none 2>&1 | Out-Null
 $kernelOk = ($LASTEXITCODE -eq 0)
@@ -86,7 +87,7 @@ Record "build" ($kernelOk -and $bootOk) "kernel + bootloader"
 
 # ---- 2. host tests ------------------------------------------------------
 Write-Host ""
-Write-Host "[2/10] host tests" -ForegroundColor Cyan
+Write-Host "[2/11] host tests" -ForegroundColor Cyan
 $env:RUSTFLAGS = ""   # these are host binaries: the kernel flags break them
 $out = cargo test -p racsh -p rpkg -p rapt -p init -p racterm 2>&1 | Out-String
 $passed = 0; $failed = 0
@@ -98,13 +99,13 @@ Record "host-tests" (($failed -eq 0) -and ($passed -gt 0)) "$passed passed, $fai
 
 # ---- 3. rustfmt ---------------------------------------------------------
 Write-Host ""
-Write-Host "[3/10] rustfmt" -ForegroundColor Cyan
+Write-Host "[3/11] rustfmt" -ForegroundColor Cyan
 cargo fmt --all -- --check 2>&1 | Out-Null
 Record "fmt" ($LASTEXITCODE -eq 0) "no drift"
 
 # ---- 4. clippy (advisory) -----------------------------------------------
 Write-Host ""
-Write-Host "[4/10] clippy (advisory)" -ForegroundColor Cyan
+Write-Host "[4/11] clippy (advisory)" -ForegroundColor Cyan
 $env:RUSTFLAGS = $KernelFlags
 $c = cargo clippy --package racore --target x86_64-unknown-none -- -W clippy::all 2>&1 | Out-String
 $errs  = ([regex]::Matches($c, '(?m)^error')).Count
@@ -113,7 +114,7 @@ Record "clippy" ($errs -eq 0) "$errs errors, $warns warnings"
 
 # ---- 5. unsafe-safety lint ----------------------------------------------
 Write-Host ""
-Write-Host "[5/10] unsafe-safety lint" -ForegroundColor Cyan
+Write-Host "[5/11] unsafe-safety lint" -ForegroundColor Cyan
 $u = & $BashExe scripts/check-unsafe-safety.sh --strict 2>&1 | Out-String
 $uOk = ($LASTEXITCODE -eq 0)
 $uSummary = (($u -split "`n") | Where-Object { $_ -match 'scanned' } | Select-Object -First 1)
@@ -156,14 +157,14 @@ if ($SkipQemu) {
 
     # ---- 6. kernel smoke ------------------------------------------------
     Write-Host ""
-    Write-Host "[6/10] kernel smoke (QEMU, isa-debug-exit)" -ForegroundColor Cyan
+    Write-Host "[6/11] kernel smoke (QEMU, isa-debug-exit)" -ForegroundColor Cyan
     $s = powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "run-ci-smoke.ps1") `
             -TimeoutSec 150 -Disk -Smp $Smp 2>&1 | Out-String
     Record "kernel-smoke" ($s -match "SMOKE PASS") "exit 33, AHCI + SMP $Smp"
 
     # ---- 7. persistence -------------------------------------------------
     Write-Host ""
-    Write-Host "[7/10] persistence (two boots)" -ForegroundColor Cyan
+    Write-Host "[7/11] persistence (two boots)" -ForegroundColor Cyan
     Stage-PlainKernel   # undo the ci-smoke kernel gate 6 left in the ESP
     $b = powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test-persistence.ps1") `
             -BootSeconds 45 -Smp $Smp 2>&1 | Out-String
@@ -172,7 +173,7 @@ if ($SkipQemu) {
 
     # ---- 8. racos-test --------------------------------------------------
     Write-Host ""
-    Write-Host "[8/10] racos-test (in-guest suite)" -ForegroundColor Cyan
+    Write-Host "[8/11] racos-test (in-guest suite)" -ForegroundColor Cyan
     Stage-PlainKernel
     $t = powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test-racos-test.ps1") `
             -BootWaitMax 90 -TestBudget 200 2>&1 | Out-String
@@ -186,18 +187,26 @@ if ($SkipQemu) {
 
     # ---- 9. USB boot (ROADMAP 3.4) --------------------------------------
     Write-Host ""
-    Write-Host "[9/10] usb-boot (real ESP image over USB mass storage)" -ForegroundColor Cyan
+    Write-Host "[9/11] usb-boot (real ESP image over USB mass storage)" -ForegroundColor Cyan
     $u9 = powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test-usb-boot.ps1") `
             -BootWaitMax 120 2>&1 | Out-String
     Record "usb-boot" ($u9 -match "USB-BOOT PASS") "MBR+FAT32 image, XHCI"
 
     # ---- 10. v0.3 milestone (ROADMAP 3.5) -------------------------------
     Write-Host ""
-    Write-Host "[10/10] milestone-v03 (history + rpkg survive a reboot)" -ForegroundColor Cyan
+    Write-Host "[10/11] milestone-v03 (history + rpkg survive a reboot)" -ForegroundColor Cyan
     $m = powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test-milestone-v03.ps1") `
             -BootWaitMax 90 2>&1 | Out-String
     $mDetail = if ($m -match "MILESTONE-V0\.3-OK") { "guest printed MILESTONE-V0.3-OK" } else { "marker missing" }
     Record "milestone-v03" ($m -match "MILESTONE-V0\.3 SMOKE PASS") $mDetail
+
+    # ---- 11. graphics smoke (ROADMAP 4.4) -------------------------------
+    Write-Host ""
+    Write-Host "[11/11] graphics (claim line + QMP screendump)" -ForegroundColor Cyan
+    $g = powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test-graphics.ps1") `
+            -BootWaitMax 90 2>&1 | Out-String
+    $gDetail = if ($g -match "screendump has (\d+) distinct") { $Matches[1] + " distinct pixel values" } else { "no dump" }
+    Record "graphics" ($g -match "GRAPHICS-SMOKE PASS") $gDetail
 }
 
 # ---- summary ------------------------------------------------------------
