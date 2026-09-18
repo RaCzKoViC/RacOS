@@ -29,6 +29,9 @@ pub struct OpenFile {
     pub inode: Arc<dyn InodeOps>,
     pub flags: u32,
     pub offset: AtomicU64,
+    /// `st_dev` for fstat: the mount this file was opened on
+    /// (`MountTable::device_id`), 0 for pipes and sockets.
+    pub dev: u64,
 }
 
 impl OpenFile {
@@ -38,6 +41,7 @@ impl OpenFile {
             inode,
             flags,
             offset: AtomicU64::new(0),
+            dev: 0,
         }
     }
 

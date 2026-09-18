@@ -10,13 +10,20 @@ use libc_lite;
 /// kończył się zerem — wypisywał "No such file or directory" na stderr, a
 /// mimo to `cat missing && echo ok` drukowało `ok`, przez co każdy skrypt
 /// rozgałęziający się na powodzeniu `cat` cicho brał złą gałąź.
+///
+/// Zapis na stdout idzie przez `write_all`: pipe mieści 4 KiB, a `write`
+/// bierze tyle, ile się mieści (albo odmawia EAGAIN) — `cat big | wc -c`
+/// odpowiadało 4096 dla pliku 8320 B, bo reszta szła w `let _ =`. Błąd
+/// zapisu (np. `> /dev/full`) kończy z komunikatem i statusem 1.
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     let mut status = 0;
 
     if argc <= 1 {
         // No arguments — copy stdin to stdout
-        cat_fd(0);
+        if !cat_fd(0) {
+            status = 1;
+        }
     } else {
         for i in 1..argc {
             let arg_ptr = unsafe { *argv.add(i as usize) };
@@ -31,13 +38,17 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
                 }
             }
             if len == 1 && unsafe { *arg_ptr } == b'-' {
-                cat_fd(0); // "-" means stdin
+                if !cat_fd(0) {
+                    status = 1; // "-" means stdin
+                }
             } else {
                 // Build null-terminated path
                 let path = unsafe { core::slice::from_raw_parts(arg_ptr, len + 1) }; // includes null
                 match libc_lite::open(path, 0, 0) {
                     Ok(fd) => {
-                        cat_fd(fd);
+                        if !cat_fd(fd) {
+                            status = 1;
+                        }
                         let _ = libc_lite::close(fd);
                     }
                     Err(_) => {
@@ -53,15 +64,21 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     status
 }
 
-fn cat_fd(fd: i32) {
-    let mut buf = [0u8; 512];
+/// Copy `fd` to stdout. Returns false if a write failed - the error is
+/// reported once and the rest of this operand is skipped, since every
+/// further write would fail the same way.
+fn cat_fd(fd: i32) -> bool {
+    let mut buf = [0u8; 4096];
     loop {
         match libc_lite::read(fd, &mut buf) {
-            Ok(0) => break,
+            Ok(0) => return true,
             Ok(n) => {
-                let _ = libc_lite::write(1, &buf[..n]);
+                if libc_lite::write_all(1, &buf[..n]).is_err() {
+                    let _ = libc_lite::write_all(2, b"cat: write error\n");
+                    return false;
+                }
             }
-            Err(_) => break,
+            Err(_) => return true,
         }
     }
 }

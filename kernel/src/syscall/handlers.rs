@@ -833,7 +833,10 @@ pub fn sys_open(path: *const u8, flags: u32, _mode: u32) -> SyscallResult {
         }
     }
 
-    let of = alloc::sync::Arc::new(crate::vfs::file::OpenFile::new(ino, inode, flags));
+    let mut of = crate::vfs::file::OpenFile::new(ino, inode, flags);
+    // SAFETY: mount_table singleton, read-only use.
+    of.dev = unsafe { crate::vfs::mount::mount_table().device_id(&fs) };
+    let of = alloc::sync::Arc::new(of);
 
     // SAFETY: cli/sti window around fd allocation; closure runs synchronously.
     unsafe {
@@ -1569,9 +1572,11 @@ pub fn sys_stat(path: *const u8, buf: *mut u8) -> SyscallResult {
     };
     let inode = fs.get_inode(ino).map_err(map_vfs_error)?;
     let meta = inode.metadata().map_err(map_vfs_error)?;
+    // SAFETY: mount_table singleton, read-only use.
+    let dev = unsafe { crate::vfs::mount::mount_table().device_id(&fs) };
 
     let stat = StatBuf {
-        st_dev: 0,
+        st_dev: dev,
         st_ino: meta.ino,
         st_mode: meta.file_type as u32 | meta.mode.0,
         st_nlink: meta.nlink,
@@ -2669,7 +2674,7 @@ pub fn sys_fstat(fd: i32, buf: *mut u8) -> SyscallResult {
             let file = fds.get(fd).map_err(map_vfs_error)?;
             let meta = file.inode.metadata().map_err(map_vfs_error)?;
             let stat = StatBuf {
-                st_dev: 0,
+                st_dev: file.dev,
                 st_ino: meta.ino,
                 st_mode: meta.file_type as u32 | meta.mode.0,
                 st_nlink: meta.nlink,
