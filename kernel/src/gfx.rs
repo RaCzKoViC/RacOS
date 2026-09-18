@@ -3,12 +3,19 @@
 // This module OWNS the GOP framebuffer. Nothing else in the kernel writes a
 // pixel except through it: clients get a region or a `Surface` and the owner
 // decides where those bytes land. The console is the first such client — it
-// asks for its region instead of assuming it owns the screen — and the
-// status bar at the bottom is the first client rendered through a real
-// off-screen `Surface`. That inversion is deliberate (§6b): a terminal that
-// owns the screen has to be taken apart again the day a second window
-// exists, and this way v0.4's work is the bottom of a compositor rather
-// than a nicer terminal.
+// asks for its region instead of assuming it owns the screen — and the VT
+// layer renders every text row through an off-screen `Surface` that the
+// owner presents. That inversion is deliberate (§6b): a terminal that owns
+// the screen has to be taken apart again the day a second window exists,
+// and this way v0.4's work is the bottom of a compositor rather than a
+// nicer terminal.
+//
+// Until 2026-09 the owner also reserved a 24 px strip at the bottom for a
+// status bar - a hue gradient with the OS name, whose real job was to be
+// the graphics smoke's evidence (>= 1000 distinct pixel values in a
+// screendump, which text alone never yields). Test scaffolding in the
+// user's face; the smoke now checks the console it renders instead, and
+// the console gets the whole screen.
 //
 // ── The §4.1 format invariant, confirmed and handled ───────────────────────
 //
@@ -32,11 +39,6 @@ extern crate alloc;
 
 use crate::boot::{BootInfo, PixelFormat};
 use alloc::vec::Vec;
-
-/// Height of the status strip the owner reserves at the bottom of the
-/// screen. Two character rows would be 32 px; one row plus padding reads
-/// better and costs the console at most one text row.
-const STATUS_H: u32 = 24;
 
 /// Everything the owner knows about the claimed framebuffer.
 #[derive(Clone, Copy)]
@@ -124,17 +126,12 @@ pub fn encode(r: u8, g: u8, b: u8) -> u32 {
     }
 }
 
-/// The region a full-screen text console may use: the whole width, and the
-/// height minus the owner's status strip. Clients ask; they do not assume.
+/// The region a full-screen text console may use: today the whole screen.
+/// Clients ask; they do not assume - the day a second client needs a
+/// strip, this is the one place that hands it out.
 pub fn console_region() -> Option<(u32, u32)> {
     let i = info()?;
-    let h = if i.height > STATUS_H * 3 {
-        i.height - STATUS_H
-    } else {
-        // A screen too short for a strip gives everything to the console.
-        i.height
-    };
-    Some((i.width, h))
+    Some((i.width, i.height))
 }
 
 /// An off-screen pixel buffer a client draws into and then presents.
@@ -173,21 +170,6 @@ impl Surface {
             }
         }
     }
-
-    /// Draw ASCII text with the console font. Non-ASCII falls back to '?',
-    /// which is the same policy the console applies.
-    pub fn draw_text(&mut self, x: u32, y: u32, text: &str, fg: u32) {
-        let mut cx = x;
-        for ch in text.chars() {
-            let idx = if ch.is_ascii() {
-                ch as usize
-            } else {
-                b'?' as usize
-            };
-            self.draw_glyph(cx, y, &crate::fb_console::FONT[idx], fg);
-            cx += 8;
-        }
-    }
 }
 
 /// Copy a surface onto the screen with its top-left corner at (x, y).
@@ -214,62 +196,5 @@ pub fn present(surface: &Surface, x: u32, y: u32) {
         unsafe {
             core::ptr::copy_nonoverlapping(src.as_ptr(), fb.add(dst_off), cols);
         }
-    }
-}
-
-/// Draw the owner's status bar: a hue gradient with the OS name over it,
-/// presented into the reserved strip at the bottom of the screen.
-///
-/// The gradient is not decoration only — it is the §4.4 acceptance
-/// evidence. A text console produces a handful of distinct pixel values;
-/// the DoD asks for >= 1000 of them, which only per-pixel shading yields,
-/// and the smoke counts them in a QMP screendump. It also exercises
-/// `Surface`/`present` with real content, which is the §6b point.
-pub fn draw_status_bar() {
-    let Some(i) = info() else { return };
-    if i.height <= STATUS_H * 3 {
-        return;
-    }
-    let mut bar = Surface::new(i.width, STATUS_H);
-
-    for x in 0..i.width {
-        // Hue sweep across the width, dimmed toward the strip's edges so
-        // vertical position changes the value too.
-        let (r, g, b) = hue(x * 1536 / i.width.max(1));
-        for y in 0..STATUS_H {
-            let shade = 160 + ((y * 96) / STATUS_H) as u32; // 160..=255
-            let px = encode(
-                ((r as u32 * shade) / 256) as u8,
-                ((g as u32 * shade) / 256) as u8,
-                ((b as u32 * shade) / 256) as u8,
-            );
-            bar.put(x, y, px);
-        }
-    }
-
-    let label = concat!("RacOS ", env!("CARGO_PKG_VERSION"));
-    bar.draw_text(8, (STATUS_H - 16) / 2, label, encode(0, 0, 0));
-    bar.draw_text(7, (STATUS_H - 16) / 2 - 1, label, encode(255, 255, 255));
-
-    present(&bar, 0, i.height - STATUS_H);
-    crate::serial::serial_println!(
-        "[  GFX   ] status bar presented ({}x{} surface at y={})",
-        i.width,
-        STATUS_H,
-        i.height - STATUS_H
-    );
-}
-
-/// Map 0..1536 to a color wheel point (six 256-wide segments).
-fn hue(pos: u32) -> (u8, u8, u8) {
-    let seg = (pos / 256) % 6;
-    let t = (pos % 256) as u8;
-    match seg {
-        0 => (255, t, 0),
-        1 => (255 - t, 255, 0),
-        2 => (0, 255, t),
-        3 => (0, 255 - t, 255),
-        4 => (t, 0, 255),
-        _ => (255, 0, 255 - t),
     }
 }
