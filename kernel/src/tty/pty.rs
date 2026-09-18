@@ -193,15 +193,27 @@ impl PtyMaster {
     }
 
     /// Slave writes to the PTY (output goes to master for rendering).
+    ///
+    /// Output processing happens here (`line_discipline::onlcr`): the
+    /// master side is a terminal emulator and reads CR LF where the slave
+    /// wrote a bare LF. A CR LF pair is queued whole or not at all, so the
+    /// returned count is always a number of input bytes fully delivered.
     pub fn slave_write(&mut self, data: &[u8]) -> usize {
         let mut count = 0;
-        for &b in data {
-            if self.master_buf.len() < PTY_BUF_SIZE {
-                self.master_buf.push_back(b);
-                count += 1;
-            } else {
+        for (consumed, chunk) in super::line_discipline::onlcr(data) {
+            let free = PTY_BUF_SIZE.saturating_sub(self.master_buf.len());
+            if chunk.len() > free {
+                if consumed == 1 && chunk.len() > 1 {
+                    // The CR LF pair does not fit: stop before the LF.
+                    break;
+                }
+                // A partial run still counts byte for byte.
+                self.master_buf.extend(chunk[..free].iter().copied());
+                count += free;
                 break;
             }
+            self.master_buf.extend(chunk.iter().copied());
+            count += consumed;
         }
         count
     }
