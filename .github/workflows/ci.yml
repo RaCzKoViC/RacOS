@@ -374,10 +374,25 @@ jobs:
           name: smoke-log
           path: smoke.log
 
-  interactive-smoke:
-    name: QEMU interactive shell (TCP serial)
+  guest-suite:
+    # The in-guest `racos-test` suite (176 assertions across 39 groups) on
+    # the canonical machine: q35, 2 vCPU, 512 MiB, a zeroed 16 MiB AHCI disk
+    # (racfs on /mnt, /home, /etc, /var/log) and a legacy VirtIO-net NIC on
+    # slirp. The machine, the readiness logic and the verdict live in
+    # scripts/guest-suite.py, the same driver scripts/test-racos-test.ps1
+    # runs on Windows - so the local gate and this job cannot drift apart.
+    #
+    # History: the previous form of this job (interactive-smoke) booted with
+    # no disk and no NIC, slept a fixed 70 s and grepped nine markers. It went
+    # red on a tree that passes 176/0 locally (run 33229859931: every /mnt and
+    # ping assertion failed, the suite was cut off in group 22 of 39) and it
+    # would have stayed green on a log that says "1 failed". The driver now
+    # requires the suite's own tally, its exit status as seen by the shell,
+    # and every device it needs - or it reports which one is missing.
+    name: QEMU guest suite (racos-test on AHCI + VirtIO-net)
     runs-on: ubuntu-latest
     needs: build
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -385,94 +400,49 @@ jobs:
           toolchain: nightly-2026-05-21
           components: rust-src, llvm-tools-preview
           targets: x86_64-unknown-none, x86_64-unknown-uefi
-      - name: Install QEMU, OVMF, nasm, python, ncat
+      - name: Install QEMU, OVMF, nasm, python
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 ovmf nasm mtools python3 ncat
+          sudo apt-get install -y qemu-system-x86 ovmf nasm mtools python3
 
-      - name: Build kernel + bootloader, stage ESP
-        # Same static-relocation requirement as boot-smoke (kernel must not
-        # be PIE or the bootloader hands it off with unfixed RIP-relative
-        # GOT addresses).
+      - name: Build kernel + userland + bootloader from this checkout, stage ESP
+        # build-image.sh builds the kernel with the static/no-pie flags the
+        # bootloader needs and every userland binary from source, then packs
+        # esp/initramfs.img. Nothing here comes from the prebuilt binaries
+        # tracked under initramfs-root/bin.
         run: |
           cargo build --package racos-boot --target x86_64-unknown-uefi
           bash scripts/build-image.sh
           mkdir -p esp/EFI/BOOT
           cp target/x86_64-unknown-uefi/debug/bootx64.efi esp/EFI/BOOT/BOOTX64.EFI
           cp target/x86_64-unknown-none/debug/racore esp/racore.elf
+          ls -la esp/ esp/EFI/BOOT/
 
-      - name: Boot + drive racsh over TCP-serial
-        run: |
-          for cand in \
-            /usr/share/OVMF/OVMF_CODE.fd \
-            /usr/share/OVMF/OVMF_CODE_4M.fd \
-            /usr/share/qemu/OVMF.fd; do
-            if [ -f "$cand" ]; then OVMF="$cand"; break; fi
-          done
-          if [ -z "$OVMF" ]; then echo "FAIL: no OVMF firmware"; exit 1; fi
-          echo "Using OVMF=$OVMF"
-          qemu-system-x86_64 \
-            -machine q35 -cpu qemu64,+smep,+smap -m 512M \
-            -drive if=pflash,format=raw,file=$OVMF,readonly=on \
-            -drive file=fat:rw:esp,format=raw \
-            -chardev socket,id=ser,host=127.0.0.1,port=4444,server=on,wait=off \
-            -serial chardev:ser \
-            -display none -no-reboot \
-            > qemu-host.log 2>&1 &
-          QEMU_PID=$!
-          # Give QEMU/UEFI time to boot to the racsh prompt. TCG under
-          # ubuntu-latest is highly variable — measured boot has gone from
-          # ~3s to ~12s across runs, which is why this job alternated
-          # pass/fail historically. 15s here makes it tolerant.
-          sleep 15
-          # Drive racsh: send a few commands with generous spacing, then
-          # leave the channel open ~5s so trailing kernel log + prompt make
-          # it back into shell.log. timeout caps the whole exchange.
-          (
-            sleep 2; printf '\n'
-            sleep 2; printf 'pwd\n'
-            sleep 2; printf 'pwd\n'
-            sleep 2; printf 'echo ci-smoke-ok\n'
-            sleep 2; printf 'cat /proc/version\n'
-            sleep 2; printf 'racos-test\n'
-            sleep 70
-          ) | timeout 100 ncat 127.0.0.1 4444 > shell.log || true
-          kill $QEMU_PID 2>/dev/null || true
-          wait $QEMU_PID 2>/dev/null || true
-          echo "--- qemu-host.log (whatever QEMU printed before being killed) ---"
-          cat qemu-host.log || true
-          echo "--- shell.log ---"
-          cat shell.log
+      - name: Grader self-test (fixture logs, no QEMU)
+        # Proves the grader rejects what the old job accepted: a log with all
+        # nine legacy markers and "1 failed", a truncated run, a clean tally
+        # followed by a kernel panic, a 0-failed tally with exit status 1,
+        # and a boot without the AHCI disk.
+        run: python3 scripts/guest-suite.py --self-test
 
-      - name: Assert shell responded
-        run: |
-          tr -d '\r' < shell.log > shell.normalized.log
-          grep -q "racsh\\$" shell.normalized.log \
-            || (echo "FAIL: racsh prompt not seen" && exit 1)
-          grep -q "^/$" shell.normalized.log \
-            || (echo "FAIL: pwd did not return /" && exit 1)
-          grep -q "ci-smoke-ok" shell.normalized.log \
-            || (echo "FAIL: echo did not roundtrip" && exit 1)
-          grep -q "RacOS version" shell.normalized.log \
-            || (echo "FAIL: cat /proc/version did not return content" && exit 1)
-          grep -q "PHASE21-SIGNAL-TERM-OK" shell.normalized.log \
-            || (echo "FAIL: Phase 2.1 signal default-action test did not pass" && exit 1)
-          grep -q "PHASE21-SIGCHLD-WAIT-OK" shell.normalized.log \
-            || (echo "FAIL: Phase 2.1 SIGCHLD wait test did not pass" && exit 1)
-          grep -q "PHASE21-EXEC-LOOP-OK" shell.normalized.log \
-            || (echo "FAIL: Phase 2.1 exec-loop cleanup test did not pass" && exit 1)
-          grep -q "POLL-TIMEOUT-OK" shell.normalized.log \
-            || (echo "FAIL: poll timeout test did not pass" && exit 1)
-          grep -q "TTY-IOCTL-OK" shell.normalized.log \
-            || (echo "FAIL: TTY ioctl state test did not pass" && exit 1)
-          echo "Interactive shell PASSED"
+      - name: Boot the canonical machine and run racos-test to its verdict
+        # Readiness-driven: waits for the racsh prompt, checks the boot log
+        # for sda + /mnt + NETSTACK, sends each command and waits for its
+        # prompt, then waits for `RACOS-TEST-EXIT=<n>`. The budget is an upper
+        # bound, not a sleep: a healthy run returns as soon as the suite does
+        # (2 min 16 s of suite under TCG on the dev box). 90 s of serial
+        # silence is treated as a hang; the driver prints the longest pause
+        # it saw so the limit can be tuned from evidence. Exit 0 only on
+        # `N passed, 0 failed` + exit 0 + no kernel panic + every device
+        # present.
+        run: python3 scripts/guest-suite.py --smp 2 --boot-timeout 240 --suite-timeout 1200 --silence 90
 
-      - name: Upload shell log
+      - name: Upload guest serial log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shell-log
-          path: shell.log
+          name: guest-suite-log
+          path: racos-racostest.log
 
   lint:
     name: Format + clippy (advisory)
