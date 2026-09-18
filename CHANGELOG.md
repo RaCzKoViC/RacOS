@@ -11,6 +11,35 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Fixed — `sleep` waits in the kernel instead of stopping the machine
+
+- **`sleep 2` at the prompt stopped the guest dead.** No prompt, no
+  output, nothing — on any kernel in the tree. `/bin/sleep` read the
+  clock in a tight loop and never yielded, and this kernel cannot preempt
+  a process that does not yield: the timer IRQ handler sends the PIC its
+  end-of-interrupt *after* calling the scheduler, and the scheduler
+  switches tasks inside the handler and never returns to send it. The
+  preempted task owes an EOI it can only pay when it is scheduled again,
+  and until then the PIC delivers no further IRQ0 — no clock, no
+  preemption. A process that never yields is never switched back to, so
+  nothing ever pays it, and the deadline it spins on can never arrive.
+  Diagnosed from the guest: IRQ0 firing ~1000/s (`info irq`: 5442 →
+  11465 in six seconds) while the kernel's tick counter stayed at 80.
+- **`/bin/sleep` now calls `nanosleep`**, which blocks in the kernel —
+  so it no longer burns a core, and no longer relies on being preempted.
+  The same change fixes a second defect: the old loop compared **whole
+  seconds**, so `sleep 1` starting at 10.99 s returned 10 ms later.
+- **Regression test `T44-PREEMPT-OK`**: a busy child finishes and is
+  reaped with the clock still running, and `/bin/sleep 1` returns with
+  status 0 having waited about a second (red twice over: the suite hung
+  on the first, and the second failed once it did not).
+- **The kernel defect is not fixed here** — see ROADMAP §0. Reordering
+  the two lines is one thing; surviving the preemption it switches on for
+  the first time is another, and the first attempt already found two more
+  problems (console writes that interleave mid-line, and a hang in
+  `/bin/ln`). It needs its own change, with the stabilisation that goes
+  with it.
+
 ### Fixed — exec, signals and path lookup authorize before they act
 
 - **Four promises the kernel made and did not keep**, one of which hid

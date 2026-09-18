@@ -82,12 +82,35 @@ being asked; PR #39 is not closed without an assessment against `main`.
   the system. Also the `#PF` handler decodes its frame through
   `TSS.RSP0-40`, which is wrong for a fault taken in ring 0, so its
   `RIP`/`CS` in the log are garbage for nested faults.
-- **`/bin/sleep` wedges the guest.** It busy-waits on `clock_gettime`
-  with no yield; a shell running `sleep 2`, or any process letting it run
-  to completion, stops the whole machine - no further output, on
-  `main`'s kernel as much as on a branch. The suite never caught it
-  because its one user (`test_signal_default_terminate`) kills it within
-  a moment. Its own PR, together with a real `nanosleep` for userland.
+- **The kernel cannot preempt a process that does not yield.**
+  Diagnosed 2026-09-19 while fixing `/bin/sleep`, which was the only
+  program in the tree that never yielded (fixed separately: it calls
+  `nanosleep` now).
+
+  `arch::idt::timer_handler` sends the PIC its end-of-interrupt *after*
+  `scheduler::timer_tick()`, and `timer_tick` → `schedule()` performs the
+  context switch inside the handler, which therefore never returns. The
+  preempted task owes the EOI and can only pay it when it is next
+  scheduled; until then the PIC, still holding IRQ0 in service, delivers
+  no further timer interrupt. So the first tick that preempts anything
+  leaves the system with no clock and no preemption, and what keeps it
+  alive is that processes block or yield often enough to get the
+  preempted one running again. Evidence from the guest: `info irq` shows
+  IRQ0 firing ~1000/s (5442 → 11465 over six seconds) while the kernel's
+  `TICK_COUNT` sits at 80, and `/proc`-visible time stands still.
+
+  **The fix is not just the reorder.** Putting `send_eoi(0)` before the
+  scheduler call makes the timer real — and preemption with it, for the
+  first time in this kernel. Two things broke immediately: a console
+  write is no longer atomic (`racsh ` ... `racinit: started PID ` ...
+  `0.1.0` interleaved on the first boot), which a critical section around
+  `SerialDevice::write` fixes; and the suite then hung in `/bin/ln`,
+  somewhere not yet identified. Whatever else assumes it will not be
+  preempted has never been found, because nothing ever preempted it. The
+  change is worth doing and needs to be done as its own piece of work,
+  with the audit that goes with it: spinlocks held across a switch, the
+  block and network drivers, and `sys_wait`'s and the device read loops'
+  yield paths.
 - **A process killed by a signal exits with status -1**, so a parent
   cannot tell it from a process that returned -1; POSIX encodes the
   signal in the wait status.
