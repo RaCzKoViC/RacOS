@@ -63,7 +63,7 @@ The VFS layer is in place and load-bearing. Most of §Decision is shipped; the r
   - **initramfs** at `/` (read-only, from the bootloader-supplied binary blob)
   - **devfs** at `/dev` (`/dev/null`, `/dev/zero`, `/dev/console`)
   - **tmpfs** at `/tmp` (in-memory R/W)
-  - **procfs** at `/proc` (`status`, `cmdline`, `cpuinfo`, `uptime`, `mounts`, `cachestats`, `diskstats`)
+  - **procfs** at `/proc` (`status`, `cmdline`, `cpuinfo`, `uptime`, `mounts`, `cachestats`, `diskstats`, and one directory per live PID — `readdir` walks the scheduler's task table)
   - **racfs** at `/var` (ramdisk-backed, ephemeral)
 * Two extra filesystems mounted opportunistically:
   - **fat32** at `/fat` (volatile, formatted fresh each boot on ram1) — `kernel/src/main.rs:296`

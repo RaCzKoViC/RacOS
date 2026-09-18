@@ -11,6 +11,25 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Fixed — `/proc` lists running processes, so `ps` and `top` show them
+
+- **`ps` printed its header and nothing else; `top` reported
+  "tasks: 0".** `/proc`'s `readdir` emitted the well-known files and
+  directories and then, where the scheduler scan belonged, a comment —
+  so no listing ever named a PID, even though every `/proc/<pid>` lookup
+  worked (the name parses straight to an inode). `ls /proc` showed no
+  process at all. Found in a manual session on 2026-09-18.
+- **`scheduler::live_pids()`** returns every PID in the task table except
+  the idle task (zombies included — they exist until reaped, and `/proc`
+  shows them as such); procfs walks it under `cli/sti` and adds one
+  directory entry per PID, with the same inode the lookup path uses.
+- **The regression is the test's fault too:** "`/bin/ps` lists running
+  processes" only asserted exit 0, which an empty table satisfies. It
+  now reads the output — `ls /proc` names a numeric directory, `ps`
+  lists flushd (PID 1), `/sbin/init` and racos-test itself, the table
+  has more than its header, and `top`'s count is above zero. Red 273/6,
+  green 279/0.
+
 ### Changed — no status bar; the graphics smoke checks the console it renders
 
 - **The rainbow strip at the bottom of the screen is gone** and the
