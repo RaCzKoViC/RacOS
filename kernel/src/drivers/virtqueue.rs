@@ -111,8 +111,8 @@ const _: () = {
 
 /// In-memory handle to a virtqueue. Pointers are physical and identity-mapped.
 pub struct Virtqueue {
-    base_phys: u64, // 1st page (desc + avail)
-    used_phys: u64, // 2nd page (used)
+    base_phys: u64, // start of the descriptor table
+    used_phys: u64, // dynamically aligned start of the used ring
     desc: *mut VirtqDesc,
     avail: *mut VirtqAvail,
     used: *mut VirtqUsed,
@@ -195,7 +195,7 @@ impl Virtqueue {
             return None;
         }
         let head = self.free_head;
-        // SAFETY: head < size; descriptor table size is QUEUE_SIZE.
+        // SAFETY: head < size; the descriptor table has `size` entries.
         let next = unsafe { (*self.desc.add(head as usize)).next };
         self.free_head = next;
         self.num_free -= 1;
