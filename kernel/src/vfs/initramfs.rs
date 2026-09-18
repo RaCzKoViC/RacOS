@@ -279,6 +279,10 @@ impl InodeOps for InitramfsInode {
         Err(VfsError::PermissionDenied) // Read-only filesystem
     }
 
+    fn truncate(&self, _len: u64) -> VfsResult<()> {
+        Err(VfsError::PermissionDenied) // Read-only filesystem
+    }
+
     fn metadata(&self) -> VfsResult<InodeMetadata> {
         let entry = &self.fs.entries[self.entry_idx];
         let mut meta = InodeMetadata::new(entry.ino, entry.file_type);

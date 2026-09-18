@@ -408,6 +408,73 @@ impl Fat32Fs {
         self.data_offset + ((cluster as u64 - 2) * self.bpb.sectors_per_cluster as u64)
     }
 
+    /// Shorten the chain starting at `head` so it holds `new_size` bytes:
+    /// the cluster the new end falls in becomes the last one, every cluster
+    /// after it is freed, and the bytes of that last cluster past `new_size`
+    /// are zeroed so a later extension reads back zeros, not old data.
+    ///
+    /// The head cluster is never released, even for `new_size == 0`: this
+    /// layer uses the first cluster as the file's inode number and as the
+    /// key of its parent/size caches, so a zero-length FAT file keeps one
+    /// (zeroed) cluster. The directory entry's size is the caller's job.
+    fn cut_chain(&self, head: u32, new_size: u64) -> VfsResult<()> {
+        if !(2..FAT_ENTRY_EOC_MIN).contains(&head) {
+            return Ok(());
+        }
+        let cluster_size = self.cluster_size;
+        let keep = if new_size == 0 {
+            1
+        } else {
+            new_size.div_ceil(cluster_size)
+        };
+
+        // Walk to the last cluster that stays. A chain shorter than the
+        // size claimed is a pre-existing inconsistency; there is nothing
+        // past it to free, so stop at its real end.
+        let mut last = head;
+        let mut idx: u64 = 1;
+        while idx < keep {
+            let next = self.next_cluster(last)?;
+            if !(2..FAT_ENTRY_EOC_MIN).contains(&next) {
+                break;
+            }
+            last = next;
+            idx += 1;
+        }
+
+        let tail = self.next_cluster(last)?;
+        self.write_fat_entry(last, FAT_ENTRY_EOC)?;
+        if (2..FAT_ENTRY_EOC_MIN).contains(&tail) {
+            self.free_chain(tail)?;
+        }
+
+        // Zero [new_size % cluster_size, cluster_size) of the last cluster;
+        // for an empty file that is the whole cluster. A new end exactly on
+        // a cluster boundary leaves the last cluster full and untouched.
+        let off = new_size % cluster_size;
+        if new_size == 0 || off != 0 {
+            let lba0 = self.cluster_to_lba(last);
+            for s in 0..self.bpb.sectors_per_cluster as u64 {
+                let sector_start = s * SECTOR_SIZE as u64;
+                let sector_end = sector_start + SECTOR_SIZE as u64;
+                if off >= sector_end {
+                    continue;
+                }
+                let mut sector = [0u8; SECTOR_SIZE];
+                if off > sector_start {
+                    self.device
+                        .read_sector(lba0 + s, &mut sector)
+                        .map_err(|_| VfsError::IoError)?;
+                    sector[(off - sector_start) as usize..].fill(0);
+                }
+                self.device
+                    .write_sector(lba0 + s, &sector)
+                    .map_err(|_| VfsError::IoError)?;
+            }
+        }
+        Ok(())
+    }
+
     // ─── Read / write through cluster chains ───────────────────────────────
 
     pub fn read_chain(&self, start_cluster: u32, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
@@ -949,6 +1016,35 @@ impl InodeOps for FatInode {
             m.size = sz;
         }
         Ok(m)
+    }
+
+    fn truncate(&self, len: u64) -> VfsResult<()> {
+        if self.metadata.file_type == FileType::Directory {
+            return Err(VfsError::IsADirectory);
+        }
+        if len > u32::MAX as u64 {
+            // FAT stores the size in a 32-bit directory field.
+            return Err(VfsError::NoSpace);
+        }
+        let old = self
+            .fs
+            .cached_size(self.metadata.ino)
+            .unwrap_or(self.metadata.size);
+        if len < old {
+            self.fs.cut_chain(self.cluster, len)?;
+        } else if len > old {
+            // Growing: touching the last byte makes write_chain allocate
+            // every cluster up to it. New clusters come zeroed, and the bytes
+            // between `old` and the end of its cluster are zero as well -
+            // never written, or zeroed by an earlier cut.
+            self.fs.write_chain(self.cluster, len - 1, &[0u8])?;
+        }
+        self.fs.set_cached_size(self.metadata.ino, len);
+        if let Some(parent) = self.fs.get_parent(self.cluster) {
+            self.fs
+                .update_dir_entry_size(parent, self.cluster, len as u32)?;
+        }
+        Ok(())
     }
 
     fn set_metadata(&self, _meta: &InodeMetadata) -> VfsResult<()> {

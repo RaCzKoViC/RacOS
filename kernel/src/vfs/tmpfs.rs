@@ -343,6 +343,32 @@ impl InodeOps for TmpfsInode {
         Ok(buf.len())
     }
 
+    fn truncate(&self, len: u64) -> VfsResult<()> {
+        let nodes = self.fs.nodes_mut();
+        let node = nodes.get_mut(self.ino as usize).ok_or(VfsError::NotFound)?;
+        if node.removed {
+            return Err(VfsError::NotFound);
+        }
+        if node.file_type == FileType::Directory {
+            return Err(VfsError::IsADirectory);
+        }
+        let new_len = len as usize;
+        let old_len = node.data.len();
+        let total = self.fs.total_bytes();
+        if new_len > old_len && total + (new_len - old_len) > TMPFS_MAX_SIZE {
+            return Err(VfsError::NoSpace);
+        }
+        // Growing pads with zeros; shrinking drops the tail and gives the
+        // bytes back to the filesystem's budget.
+        node.data.resize(new_len, 0);
+        if new_len < old_len {
+            node.data.shrink_to_fit();
+        }
+        self.fs
+            .set_total_bytes((total + new_len).saturating_sub(old_len));
+        Ok(())
+    }
+
     fn metadata(&self) -> VfsResult<InodeMetadata> {
         let nodes = self.fs.nodes();
         let node = nodes.get(self.ino as usize).ok_or(VfsError::NotFound)?;

@@ -819,6 +819,18 @@ pub fn sys_open(path: *const u8, flags: u32, _mode: u32) -> SyscallResult {
 
     if flags & crate::vfs::file::flags::O_TRUNC != 0 {
         require_dac_access(&meta, crate::security::dac::Access::Write)?;
+        // O_TRUNC means "the file is empty after this open". It applies to
+        // regular files opened for writing; on a device node it is ignored
+        // (POSIX), and with O_RDONLY it has no defined meaning, so it is
+        // ignored there too rather than emptying a file through a read-only
+        // descriptor. Until 2026-09 this branch was the DAC check alone, so
+        // `echo X > f` left the old tail of f in place.
+        if meta.file_type == crate::vfs::inode::FileType::Regular
+            && access_mode != crate::vfs::file::flags::O_RDONLY
+            && !created
+        {
+            inode.truncate(0).map_err(map_vfs_error)?;
+        }
     }
 
     let of = alloc::sync::Arc::new(crate::vfs::file::OpenFile::new(ino, inode, flags));
@@ -2608,9 +2620,37 @@ pub fn sys_nanosleep(req: *const u8, _rem: *mut u8) -> SyscallResult {
 // Syscall 38: sys_truncate
 // ─────────────────────────────────────────────────
 
-pub fn sys_truncate(_path: *const u8, _length: u64) -> SyscallResult {
-    crate::serial::serial_println!("[ SYSC ] truncate() not implemented yet");
-    Err(SyscallError::ENOSYS)
+/// Set the length of the file at `path` to `length` (POSIX truncate(2)).
+///
+/// Only a regular file has a length to set: a directory is EISDIR, any
+/// other node EINVAL. Write permission is required, as for open(O_WRONLY).
+/// A filesystem without truncate support answers with its own error (the
+/// initramfs, being read-only, EACCES) - never a silent success.
+pub fn sys_truncate(path: *const u8, length: u64) -> SyscallResult {
+    let path_len = validate_user_string(path as u64)?;
+    // SAFETY: validate_user_string above confirmed [path, path+path_len) is
+    // user-mapped and NUL-terminated.
+    let path_str = unsafe {
+        core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
+            .map_err(|_| SyscallError::EINVAL)?
+    };
+
+    // SAFETY: mount_table singleton - same as sys_chmod.
+    let (fs, ino) = unsafe {
+        crate::vfs::mount::mount_table()
+            .lookup_path(path_str)
+            .map_err(map_vfs_error)?
+    };
+    let inode = fs.get_inode(ino).map_err(map_vfs_error)?;
+    let meta = inode.metadata().map_err(map_vfs_error)?;
+    match meta.file_type {
+        crate::vfs::inode::FileType::Regular => {}
+        crate::vfs::inode::FileType::Directory => return Err(SyscallError::EISDIR),
+        _ => return Err(SyscallError::EINVAL),
+    }
+    require_dac_access(&meta, crate::security::dac::Access::Write)?;
+    inode.truncate(length).map_err(map_vfs_error)?;
+    Ok(0)
 }
 
 // ─────────────────────────────────────────────────
@@ -3552,8 +3592,35 @@ pub fn sys_fsync(fd: i32) -> SyscallResult {
         result
     }
 }
-pub fn sys_ftruncate(_fd: i32, _length: u64) -> SyscallResult {
-    Ok(0)
+
+/// Set the length of the open file `fd` to `length` (POSIX ftruncate(2)).
+///
+/// The descriptor must be open for writing and refer to a regular file;
+/// otherwise EINVAL, as POSIX specifies. The file offset is not moved. This
+/// returned 0 without doing anything until 2026-09; a stub that reports
+/// success is the one thing this must never be again.
+pub fn sys_ftruncate(fd: i32, length: u64) -> SyscallResult {
+    // SAFETY: cli/sti window for the fd-table lookup + inode.truncate, the
+    // same pattern as sys_write and sys_fsync.
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+        let result = crate::task::scheduler::with_current_fd_table(|fds| {
+            let file = fds.get(fd).map_err(map_vfs_error)?;
+            let access = file.flags & crate::vfs::file::flags::ACCESS_MODE_MASK;
+            if access == crate::vfs::file::flags::O_RDONLY {
+                return Err(SyscallError::EINVAL);
+            }
+            let meta = file.inode.metadata().map_err(map_vfs_error)?;
+            if meta.file_type != crate::vfs::inode::FileType::Regular {
+                return Err(SyscallError::EINVAL);
+            }
+            file.inode.truncate(length).map_err(map_vfs_error)?;
+            Ok(0i64)
+        })
+        .unwrap_or(Err(SyscallError::EBADF));
+        core::arch::asm!("sti", options(nomem, nostack));
+        result
+    }
 }
 
 // ─────────────────────────────────────────────────

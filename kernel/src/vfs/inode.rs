@@ -154,6 +154,17 @@ pub trait InodeOps: Send + Sync {
     fn sync(&self) -> VfsResult<()> {
         Err(VfsError::NotImplemented)
     }
+
+    /// Set the file's length to `len` bytes. A shorter length discards the
+    /// tail and releases the storage it used; a longer one pads with zeros.
+    ///
+    /// This is what `O_TRUNC`, `ftruncate` and `truncate` come down to, so a
+    /// filesystem that can write must implement it: the default is an error,
+    /// never a silent success, because `echo X > f` leaving the old tail in
+    /// place is data corruption that looks like a working write.
+    fn truncate(&self, _len: u64) -> VfsResult<()> {
+        Err(VfsError::NotImplemented)
+    }
 }
 
 /// A directory entry.

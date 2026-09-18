@@ -1357,6 +1357,146 @@ impl Racfs {
         let _ = self.free_block(block);
     }
 
+    /// Free the blocks that slots `from..` of pointer block `block` point at,
+    /// zeroing each slot as it goes. The pointer block itself is the caller's
+    /// to free or keep, depending on whether anything below `from` survives.
+    ///
+    /// Unlike `free_pointer_block`, errors propagate: this runs inside a
+    /// truncate transaction, and a pointer the bitmap cannot describe should
+    /// abort and roll back rather than leave the map half-edited. Removing a
+    /// damaged file is still `rm`'s job, and `rm` keeps its lenient path.
+    fn free_pointer_block_from(&self, block: u32, from: usize) -> VfsResult<()> {
+        for slot in from..POINTERS_PER_BLOCK {
+            let p = self.read_pointer(block, slot)?;
+            if p != 0 {
+                self.free_block(p)?;
+                self.write_pointer(block, slot, 0)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Release every block of `inode` at logical index `keep` and above, plus
+    /// each pointer block that no longer holds a live pointer, and unhook
+    /// them from the inode. `keep == 0` releases the whole map.
+    ///
+    /// Layout reminder: logical blocks `0..8` are direct, `8..136` go through
+    /// the single-indirect block, `136..16520` through the double-indirect
+    /// block and its 128 second-level blocks of 128 pointers each. A pointer
+    /// block is freed exactly when its first kept slot is 0, i.e. nothing
+    /// under it survives; the block on the boundary keeps its low slots and
+    /// has the rest zeroed.
+    fn free_blocks_from(&self, inode: &mut DiskInode, keep: usize) -> VfsResult<()> {
+        for i in keep.min(DIRECT_BLOCKS)..DIRECT_BLOCKS {
+            if inode.direct[i] != 0 {
+                self.free_block(inode.direct[i])?;
+                inode.direct[i] = 0;
+            }
+        }
+
+        if inode.indirect != 0 {
+            let keep_in = keep
+                .saturating_sub(DIRECT_BLOCKS)
+                .min(SINGLE_INDIRECT_BLOCKS);
+            self.free_pointer_block_from(inode.indirect, keep_in)?;
+            if keep_in == 0 {
+                self.free_block(inode.indirect)?;
+                inode.indirect = 0;
+            }
+        }
+
+        if inode.double_indirect != 0 {
+            let keep_in = keep
+                .saturating_sub(DIRECT_BLOCKS + SINGLE_INDIRECT_BLOCKS)
+                .min(DOUBLE_INDIRECT_BLOCKS);
+            // The second-level block holding the boundary, and how many of
+            // its pointers stay live. Every second-level block before it is
+            // untouched; every one after it goes entirely.
+            let boundary_l1 = keep_in / POINTERS_PER_BLOCK;
+            let keep_in_boundary = keep_in % POINTERS_PER_BLOCK;
+            for slot in boundary_l1..POINTERS_PER_BLOCK {
+                let l1 = self.read_pointer(inode.double_indirect, slot)?;
+                if l1 == 0 {
+                    continue;
+                }
+                let keep_here = if slot == boundary_l1 {
+                    keep_in_boundary
+                } else {
+                    0
+                };
+                self.free_pointer_block_from(l1, keep_here)?;
+                if keep_here == 0 {
+                    self.free_block(l1)?;
+                    self.write_pointer(inode.double_indirect, slot, 0)?;
+                }
+            }
+            if keep_in == 0 {
+                self.free_block(inode.double_indirect)?;
+                inode.double_indirect = 0;
+            }
+        }
+        Ok(())
+    }
+
+    /// Set the length of file `ino` to `len` bytes, as one journalled
+    /// transaction. This is what `O_TRUNC`, `ftruncate` and `truncate` come
+    /// down to on racfs.
+    ///
+    /// Shrinking releases every block past the new end - the data blocks and
+    /// the pointer blocks that emptied - and zeroes the tail of the block the
+    /// new end lands in, so a later extension never resurrects old bytes.
+    /// Growing allocates zeroed blocks through the same `map_block_alloc`
+    /// path `write_file` extends by, so the file reads back as zeros without
+    /// a hole (racfs has none).
+    ///
+    /// Block map, bitmap, superblock counters and the size land in one
+    /// commit, the way `unlink` and `create` do: a crash between "size says
+    /// 2 bytes" and "bitmap says those 33 blocks are free" would leave an
+    /// inode owning blocks the allocator hands out again - the damage class
+    /// `check()` calls dangerous.
+    pub fn truncate_file(&self, ino: u32, len: u64) -> VfsResult<()> {
+        let mut inode = self.read_inode(ino)?;
+        if inode.itype != ITYPE_FILE {
+            return Err(VfsError::IsADirectory);
+        }
+        if len > (MAX_FILE_BLOCKS * SECTOR_SIZE) as u64 {
+            return Err(VfsError::NoSpace);
+        }
+        let new_size = len as u32;
+        let old_size = inode.size;
+        if new_size == old_size {
+            return Ok(());
+        }
+        let keep = (new_size as usize).div_ceil(SECTOR_SIZE);
+
+        self.transaction(|| {
+            if new_size < old_size {
+                self.free_blocks_from(&mut inode, keep)?;
+                let tail = new_size as usize % SECTOR_SIZE;
+                if tail != 0 {
+                    let block = self.map_block(&inode, keep - 1)?;
+                    if block != 0 {
+                        let mut sector = [0u8; SECTOR_SIZE];
+                        self.read_data_block(block, &mut sector)?;
+                        sector[tail..].fill(0);
+                        self.write_data_block(block, &sector)?;
+                    }
+                }
+            } else {
+                // Same starting point as write_file: the block holding the
+                // old end is already mapped, map_block_alloc keeps it.
+                let already = old_size as usize / SECTOR_SIZE;
+                for i in already..keep {
+                    self.map_block_alloc(&mut inode, i)?;
+                }
+            }
+            inode.size = new_size;
+            self.write_inode(ino, &inode)
+        })?;
+        self.cache_mut().flush().map_err(|_| VfsError::IoError)?;
+        Ok(())
+    }
+
     // ─── High-level FS operations ───────────────────────────────────────────
 
     /// Create a file in a directory. Returns new inode number.
@@ -1935,6 +2075,10 @@ impl InodeOps for RacfsInode {
 
     fn ioctl(&self, _request: u64, _arg: u64) -> VfsResult<i64> {
         Err(VfsError::NotImplemented)
+    }
+
+    fn truncate(&self, len: u64) -> VfsResult<()> {
+        self.fs.truncate_file(self.ino, len)
     }
 }
 
