@@ -84,6 +84,8 @@ The RaCore kernel ABI defines the binary interface between user space processes 
 | 15 | sys_chdir | path: *const u8 | 0 or error | Stable |
 | 18 | sys_getcwd | buf: *mut u8, size: usize | 0 or error | Stable |
 | 16 | sys_ioctl | fd: i32, request: u64, arg: u64 | 0 or error | Unstable |
+| 38 | sys_truncate | path: *const u8, length: u64 | 0 or error (EISDIR for a directory, EINVAL for a non-regular file, EACCES without write permission or on a read-only filesystem) | Stable |
+| 70 | sys_ftruncate | fd: i32, length: u64 | 0 or error (EINVAL unless fd is a regular file open for writing) | Stable |
 
 ### 5.3 Memory Management
 

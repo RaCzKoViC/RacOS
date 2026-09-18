@@ -11,6 +11,59 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Fixed — overwriting a file now shortens it: truncate, ftruncate and O_TRUNC
+
+- **`echo X > f` left the old tail in place.** `sys_open` treated `O_TRUNC`
+  as a permission check and nothing else, `sys_ftruncate` returned 0
+  without touching the inode, `sys_truncate` was ENOSYS, and `InodeOps`
+  had no truncate operation at all. An 11-byte file overwritten with `X`
+  stayed 11 bytes, the old `CDEFGHIJ` showing after the X - through every
+  `>` in racsh, the history rewrite, `cp`, `mv` and `tee`, all of which
+  open with `O_TRUNC`. The review of 2026-09-18 reproduced it in QEMU
+  (item C, P1); this is stage R2's first change.
+
+- **The fix is in `InodeOps` and each filesystem, not in cat or the
+  shell.** `InodeOps::truncate(len)` defaults to an error, never to a
+  silent success. racfs implements it as one journalled transaction:
+  every block past the new end is released - data blocks and the pointer
+  blocks that emptied, cut at any depth of the direct / single-indirect /
+  double-indirect map - the tail of the block the new end lands in is
+  zeroed, and size, block map, bitmap and superblock counters land in the
+  same commit, so a crash cannot leave an inode owning blocks the
+  allocator will hand out again. Growing allocates zeroed blocks through
+  the same path `write_file` extends by. tmpfs resizes in place and
+  returns the bytes to its budget. FAT32 cuts the cluster chain after the
+  cluster holding the new end and frees the rest; the head cluster is the
+  file's identity in that layer and stays, so an empty FAT file keeps one
+  zeroed cluster. The initramfs answers EACCES, as it does for write.
+
+- **The syscalls mean what POSIX says.** `O_TRUNC` truncates a regular
+  file opened for writing, is ignored on a device node and with
+  `O_RDONLY`; `ftruncate` is EINVAL unless the descriptor is a regular
+  file open for writing; `truncate` is EISDIR on a directory, EINVAL on
+  any other non-regular node, EACCES without write permission. libc-lite
+  gained `truncate()` and `ftruncate()`.
+
+- **Regression test first: `T36-TRUNCATE-OK`, 22 assertions, red on the
+  tree before the fix (17 of 22 fail; 181 passed, 17 failed) and green
+  after.** The review's reproduction verbatim on tmpfs, racfs and FAT32;
+  an append after the truncating overwrite continuing at the new end;
+  exact block accounting
+  through `/proc/diskstats` on racfs - a 16640-byte file owns 33 data
+  blocks plus one indirect block, `ftruncate` to 4096 keeps 8 and frees
+  26, to 4095 cuts inside a block, to 0 returns everything, to 1024
+  extends with zeros; a 133120-byte file (260 data + 3 pointer blocks) cut
+  inside the double-indirect range, at the single/double boundary, inside
+  the single-indirect range and to zero, each freeing exactly the blocks
+  and pointer blocks that emptied; `truncate(path)` shrinking and
+  growing; and the refusals - read-only fd, directory, initramfs, missing
+  path - plus `O_TRUNC` on `/dev/null` still opening. The suite is
+  198/0; the disk it leaves behind mounts fsck-clean on the next boot.
+
+- `scripts/guest-suite.py --keep-disk --boot-only` boots the previous
+  run's disk and stops at the prompt, exit status = the mount-time fsck
+  verdict; the driver now prints that verdict on every run.
+
 ### Changed — CI: the guest suite boots the canonical machine and is graded on its verdict
 
 - **One driver for the in-guest suite, on both platforms:

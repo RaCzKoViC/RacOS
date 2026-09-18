@@ -863,6 +863,30 @@ pub fn sleep_ms(ms: u64) -> Result<(), i64> {
     nanosleep(ms / 1000, (ms % 1000) * 1_000_000)
 }
 
+/// Set the length of the file at `path` (NUL-terminated) to `length` bytes:
+/// shorter files lose their tail, longer ones are padded with zeros.
+pub fn truncate(path: &[u8], length: u64) -> Result<(), i64> {
+    // SAFETY: syscall ABI; path pointer comes from a &[u8].
+    let ret = unsafe { syscall2(SYS_TRUNCATE, path.as_ptr() as u64, length) };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
+}
+
+/// Set the length of the open file `fd` to `length` bytes. The descriptor
+/// must be open for writing; the file offset is left where it was.
+pub fn ftruncate(fd: i32, length: u64) -> Result<(), i64> {
+    // SAFETY: syscall ABI; scalar args only.
+    let ret = unsafe { syscall2(SYS_FTRUNCATE, fd as u64, length) };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
+}
+
 /// Stat a file by fd.
 pub fn fstat(fd: i32, buf: &mut [u8; 80]) -> Result<(), i64> {
     // SAFETY: syscall ABI; buf pointer comes from a &mut [u8; 80].

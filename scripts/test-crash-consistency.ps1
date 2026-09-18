@@ -6,10 +6,10 @@
 # never the recovery path.
 #
 # Each iteration boots RacOS, starts a shell loop that does nothing but churn
-# metadata (mkdir / create / link / unlink / rmdir), lets it run, then kills
-# QEMU outright - no sync, no shutdown, the power-cord case. The next boot has
-# to come up with a filesystem that fsck calls clean, replaying a transaction
-# if one was in flight.
+# metadata (mkdir / create / extend / truncate / link / unlink / rmdir), lets
+# it run, then kills QEMU outright - no sync, no shutdown, the power-cord
+# case. The next boot has to come up with a filesystem that fsck calls
+# clean, replaying a transaction if one was in flight.
 #
 # The disk is deliberately NOT recreated between iterations: damage that a
 # single crash leaves behind is easy to miss, and damage that accumulates over
@@ -175,7 +175,22 @@ for ($i = 1; $i -le $Iterations; $i++) {
         continue
     }
 
-    $churn = 'while true; do mkdir /mnt/cd; echo x > /mnt/cd/f; ln /mnt/cd/f /mnt/cd/g; rm /mnt/cd/g; rm /mnt/cd/f; rmdir /mnt/cd; done'
+    # The seed is three blocks long so that `echo x > f` over it is a
+    # truncate that releases blocks - the transaction type added with
+    # O_TRUNC support - not just a size change inside one block. Built once
+    # per boot, outside the loop, so the loop body stays metadata-heavy.
+    Send-Line $p "echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef > /mnt/seed1; cat /mnt/seed1 /mnt/seed1 /mnt/seed1 /mnt/seed1 > /mnt/seed2; cat /mnt/seed2 /mnt/seed2 /mnt/seed2 /mnt/seed2 > /mnt/seed1; cat /mnt/seed1 /mnt/seed2 > /mnt/seed; echo SEED-READY"
+    # Same rule as CHURN-ARMED: a seed that never got built would turn the
+    # truncating step into a plain create and the run would still look green.
+    $seeded = Pump $p $st 40 'SEED-READY'
+    if (-not $seeded) {
+        Write-Host "  FAIL  the seed file was not built; the truncating churn never ran" -ForegroundColor Red
+        $results += @{ Iter = $i; Ok = $false; Detail = "seed never built" }
+        $fail++
+        if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+        continue
+    }
+    $churn = 'while true; do mkdir /mnt/cd; cat /mnt/seed > /mnt/cd/f; echo x > /mnt/cd/f; ln /mnt/cd/f /mnt/cd/g; rm /mnt/cd/g; rm /mnt/cd/f; rmdir /mnt/cd; done'
     Send-Line $p $churn
 
     Pump $p $st $churnSeconds $null | Out-Null
