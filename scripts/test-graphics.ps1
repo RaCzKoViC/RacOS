@@ -1,16 +1,22 @@
-# RacOS - graphics smoke (ROADMAP 4.4, first slice of v0.4).
+# RacOS - graphics smoke (ROADMAP 4.4).
 #
-# Boots with -vga std and asserts two things:
+# Boots with -vga std and asserts, from the serial log and from a QMP
+# `screendump` of the emulated display:
 #
-#   1. The kernel CLAIMED the framebuffer - the serial log carries the gfx
-#      owner's claim line with geometry and channel order (section 4.1).
-#   2. Real pixels reached the screen: a QMP `screendump` is taken and the
-#      PPM is required to contain >= 1000 DISTINCT non-zero pixel values.
-#      A text console alone produces a handful of values; only the status
-#      bar's per-pixel gradient (drawn through a gfx Surface and presented
-#      by the owner - the section 6b path) yields a thousand. So this
-#      number is not a vanity metric: it can only be reached if the
-#      Surface/present machinery actually works.
+#   1. The kernel CLAIMED the framebuffer - the gfx owner's claim line with
+#      geometry and channel order (section 4.1).
+#   2. The VT layer took the console region over (rendered from RacTerm
+#      buffers through gfx Surfaces - the section 6b path).
+#   3. The console it renders is on the screen: the dump holds a text-sized
+#      amount of lit pixels (not none, not a flood), and lines start at the
+#      left edge - glyph pixels in the leftmost 8 px on several distinct
+#      16 px text rows. A staircase console (LF without CR) fails this, a
+#      blank one fails this, a Surface presented in the wrong place fails
+#      this.
+#   4. Nothing but the console: the bottom 24 rows are black. The owner
+#      used to reserve them for a rainbow status bar whose real job was to
+#      be this smoke's evidence (>= 1000 distinct pixel values); the smoke
+#      now checks the console instead and the console has the whole screen.
 #
 # The screendump is the assertion the serial log cannot make. A kernel that
 # claims the framebuffer and then draws nothing, or draws into the wrong
@@ -92,7 +98,7 @@ $psi.CreateNoWindow  = $true
 $p = [System.Diagnostics.Process]::Start($psi)
 Write-Host "QEMU PID=$($p.Id), QMP on 127.0.0.1:$QmpPort"
 
-# Pump serial until racsh (the status bar is drawn long before that).
+# Pump serial until racsh: by then the VT holds init's lines and the prompt.
 $text = ""
 $buf = New-Object byte[] 8192
 $pending = $null
@@ -152,17 +158,21 @@ if ($text -match '\[  GFX   \] claimed (\d+)x(\d+)x32 (BGRX|RGBX) framebuffer') 
     $fail++
 }
 
-# 2. The status bar was presented through a Surface.
-if ($text -match 'status bar presented') {
-    Write-Host "  PASS  status bar surface presented"
+# 2. The VT layer owns the console region (rows go through gfx Surfaces).
+if ($text -match '\[  VT  \] \d+ terminals, rendered from RacTerm buffers') {
+    Write-Host "  PASS  VT layer rendering the console"
 } else {
-    Write-Host "  FAIL  status bar was never presented" -ForegroundColor Red
+    Write-Host "  FAIL  VT layer never took the console over" -ForegroundColor Red
     $fail++
 }
 
-# 3. >= 1000 distinct non-zero pixel values in the actual display output.
+# 3 + 4. What the display actually shows. The Python prints four numbers:
+#   lit       - non-black pixels in the whole dump
+#   total     - pixels in the dump
+#   leftrows  - distinct 16 px text rows with a lit pixel in the leftmost 8 px
+#   bottomlit - non-black pixels in the bottom 24 rows
 if (Test-Path $DumpReal) {
-    $count = python -c @"
+    $stats = python -c @"
 import sys
 with open(r'$DumpReal','rb') as f:
     data = f.read()
@@ -179,17 +189,41 @@ while len(tok) < 3:
     while data[j] not in b' \t\r\n': j += 1
     tok.append(int(data[i:j])); i = j
 i += 1  # single whitespace after maxval
+w, h = tok[0], tok[1]
 px = data[i:]
-seen = set()
-for o in range(0, len(px) - 2, 3):
-    v = (px[o] << 16) | (px[o+1] << 8) | px[o+2]
-    if v: seen.add(v)
-print(len(seen))
+lit = 0
+leftrows = set()
+bottomlit = 0
+for y in range(h):
+    row = px[y * w * 3:(y + 1) * w * 3]
+    for x in range(w):
+        o = x * 3
+        if row[o] or row[o + 1] or row[o + 2]:
+            lit += 1
+            if x < 8:
+                leftrows.add(y // 16)
+            if y >= h - 24:
+                bottomlit += 1
+print(lit, w * h, len(leftrows), bottomlit)
 "@
-    if ([int]$count -ge 1000) {
-        Write-Host ("  PASS  screendump has " + $count + " distinct non-zero pixel values (>= 1000)")
+    $parts = "$stats".Trim() -split '\s+'
+    $lit = [int]$parts[0]; $total = [int]$parts[1]; $leftrows = [int]$parts[2]; $bottomlit = [int]$parts[3]
+    if ($lit -ge 1000 -and $lit -le ($total / 4)) {
+        Write-Host ("  PASS  console text on screen: " + $lit + " lit pixels of " + $total)
     } else {
-        Write-Host ("  FAIL  screendump has only " + $count + " distinct non-zero pixel values") -ForegroundColor Red
+        Write-Host ("  FAIL  lit pixels = " + $lit + " of " + $total + " (expected a text-sized amount: 1000 .. 25%)") -ForegroundColor Red
+        $fail++
+    }
+    if ($leftrows -ge 3) {
+        Write-Host ("  PASS  lines start at the left edge: " + $leftrows + " text rows lit in the leftmost 8 px")
+    } else {
+        Write-Host ("  FAIL  only " + $leftrows + " text rows lit in the leftmost 8 px (staircase or blank console)") -ForegroundColor Red
+        $fail++
+    }
+    if ($bottomlit -eq 0) {
+        Write-Host "  PASS  bottom 24 rows black: nothing but the console on screen"
+    } else {
+        Write-Host ("  FAIL  bottom 24 rows have " + $bottomlit + " lit pixels (status bar?)") -ForegroundColor Red
         $fail++
     }
 } else {

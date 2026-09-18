@@ -11,6 +11,25 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Changed — no status bar; the graphics smoke checks the console it renders
+
+- **The rainbow strip at the bottom of the screen is gone** and the
+  console has the whole screen. The gfx owner reserved 24 px for a hue
+  gradient with the OS name whose real job was to be the graphics
+  smoke's evidence (≥ 1000 distinct pixel values, which text never
+  yields) and the first `Surface`/`present` client. The VT has rendered
+  every text row through the same path since v0.4 §4.2, so the bar
+  proved nothing the console does not - test scaffolding in the user's
+  face. `console_region()` stays the one place that would hand out a
+  strip if a second client ever needs one.
+- **`scripts/test-graphics.ps1` (gate 11)** now asserts what the display
+  should show: the VT took the console over, a text-sized amount of lit
+  pixels (1000 .. 25% of the screen), lines starting at the left edge
+  (glyph pixels in the leftmost 8 px on ≥ 3 text rows - a staircase
+  console fails this), and the bottom 24 rows black. Red on the old
+  kernel (30 574 lit pixels in the strip), green now (2 917 lit pixels
+  of text, 8 rows at the left edge).
+
 ### Fixed — a bare LF returns the carriage on the framebuffer console and on a PTY
 
 - **Every line on the VT console started where the previous one ended.**
