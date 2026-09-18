@@ -22,6 +22,7 @@ fn map_vfs_error(err: VfsError) -> SyscallError {
         VfsError::TooManyOpenFiles => SyscallError::EMFILE,
         VfsError::BrokenPipe => SyscallError::EIO,
         VfsError::WouldBlock => SyscallError::EAGAIN,
+        VfsError::DirectoryNotEmpty => SyscallError::ENOTEMPTY,
         VfsError::IoError | VfsError::NotImplemented => SyscallError::EIO,
     }
 }
@@ -91,6 +92,26 @@ impl WritableStore {
             WritableStore::Tmpfs(t) => t.unlink(parent_ino, name),
             WritableStore::Racfs(r, _) => r.unlink(parent_ino as u32, name),
             WritableStore::Fat32(f) => f.unlink(parent_ino as u32, name),
+        }
+    }
+
+    /// rename(2) inside one store: `old_name` in `old_parent` becomes
+    /// `new_name` in `new_parent`; the inode keeps its number.
+    fn rename(
+        &self,
+        old_parent: u64,
+        old_name: &str,
+        new_parent: u64,
+        new_name: &str,
+    ) -> crate::vfs::inode::VfsResult<()> {
+        match self {
+            WritableStore::Tmpfs(t) => t.rename(old_parent, old_name, new_parent, new_name),
+            WritableStore::Racfs(r, _) => {
+                r.rename(old_parent as u32, old_name, new_parent as u32, new_name)
+            }
+            WritableStore::Fat32(f) => {
+                f.rename(old_parent as u32, old_name, new_parent as u32, new_name)
+            }
         }
     }
 
@@ -2973,6 +2994,13 @@ pub fn sys_readlink(_path: *const u8, _buf: *mut u8, _bufsiz: usize) -> SyscallR
     Err(SyscallError::ENOSYS)
 }
 
+/// rename(2): give the file `old` names the name `new`, atomically where
+/// the filesystem can (racfs: one journalled transaction), keeping its
+/// inode; an existing `new` is replaced; directories move with their
+/// contents. Both paths must lie on the same mount - EXDEV otherwise, and
+/// `mv` falls back to a copy. Until 2026-09 this read the file into memory,
+/// created a new one and unlinked the old, and did not move an empty file
+/// at all.
 pub fn sys_rename(old: *const u8, new: *const u8) -> SyscallResult {
     let old_len = validate_user_string(old as u64)?;
     let new_len = validate_user_string(new as u64)?;
@@ -2987,49 +3015,38 @@ pub fn sys_rename(old: *const u8, new: *const u8) -> SyscallResult {
             .map_err(|_| SyscallError::EINVAL)?
     };
 
-    // Only writable tmpfs/racfs filesystems supported.
     // SAFETY: mount_table is a kernel singleton.
     let mt = unsafe { crate::vfs::mount::mount_table() };
-    let (mount, _) = mt.resolve(old_str).ok_or(SyscallError::ENOENT)?;
-    let store = writable_store_from_mount(mount).ok_or(SyscallError::EACCES)?;
+    let (old_mount, old_rem) = mt.resolve(old_str).ok_or(SyscallError::ENOENT)?;
+    let (new_mount, new_rem) = mt.resolve(new_str).ok_or(SyscallError::ENOENT)?;
+    if old_mount.path != new_mount.path {
+        return Err(SyscallError::EXDEV);
+    }
+    if old_rem.is_empty() || new_rem.is_empty() {
+        // A mount point itself is not renameable.
+        return Err(SyscallError::EINVAL);
+    }
+    let store = writable_store_from_mount(old_mount).ok_or(SyscallError::EACCES)?;
 
-    let (old_parent_ino, _old_leaf) = store.split_parent_leaf(old_str).map_err(map_vfs_error)?;
-    let old_parent_inode = mount.fs.get_inode(old_parent_ino).map_err(map_vfs_error)?;
+    // Paths are relative to the mount from here on: a subtree mount such
+    // as /home enters its filesystem at its own root inode.
+    let (old_parent, old_leaf) = store.split_parent_leaf(old_rem).map_err(map_vfs_error)?;
+    let (new_parent, new_leaf) = store.split_parent_leaf(new_rem).map_err(map_vfs_error)?;
+
+    let old_parent_inode = old_mount.fs.get_inode(old_parent).map_err(map_vfs_error)?;
     let old_parent_meta = old_parent_inode.metadata().map_err(map_vfs_error)?;
     require_dac_access(&old_parent_meta, crate::security::dac::Access::Write)?;
     require_dac_access(&old_parent_meta, crate::security::dac::Access::Execute)?;
-
-    // Read old file content
-    let (fs, ino) = { mt.lookup_path(old_str).map_err(|_| SyscallError::ENOENT)? };
-    let inode = fs.get_inode(ino).map_err(map_vfs_error)?;
-    let meta = inode.metadata().map_err(map_vfs_error)?;
-    require_dac_access(&meta, crate::security::dac::Access::Read)?;
-    let size = meta.size as usize;
-
-    if size > 0 {
-        let mut buf = alloc::vec![0u8; size];
-        inode.read(0, &mut buf).map_err(map_vfs_error)?;
-
-        // Create new file with same content.
-        let (new_parent, new_leaf) = store.split_parent_leaf(new_str).map_err(map_vfs_error)?;
-        let new_parent_inode = mount.fs.get_inode(new_parent).map_err(map_vfs_error)?;
+    if new_parent != old_parent {
+        let new_parent_inode = new_mount.fs.get_inode(new_parent).map_err(map_vfs_error)?;
         let new_parent_meta = new_parent_inode.metadata().map_err(map_vfs_error)?;
         require_dac_access(&new_parent_meta, crate::security::dac::Access::Write)?;
         require_dac_access(&new_parent_meta, crate::security::dac::Access::Execute)?;
-        let _new_ino = store
-            .create_file(new_parent, new_leaf)
-            .map_err(map_vfs_error)?;
-        // Write via mount table lookup for the new path
-        let (new_fs, new_ino_found) =
-            { mt.lookup_path(new_str).map_err(|_| SyscallError::ENOENT)? };
-        let new_inode = new_fs.get_inode(new_ino_found).map_err(map_vfs_error)?;
-        new_inode.write(0, &buf).map_err(map_vfs_error)?;
-
-        // Unlink old
-        let (old_parent, old_leaf) = store.split_parent_leaf(old_str).map_err(map_vfs_error)?;
-        store.unlink(old_parent, old_leaf).map_err(map_vfs_error)?;
     }
 
+    store
+        .rename(old_parent, old_leaf, new_parent, new_leaf)
+        .map_err(map_vfs_error)?;
     Ok(0)
 }
 

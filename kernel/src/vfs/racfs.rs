@@ -1646,6 +1646,130 @@ impl Racfs {
         Ok(())
     }
 
+    /// Rename `old_name` in `old_parent` to `new_name` in `new_parent`, as
+    /// one journalled transaction. This is rename(2): the inode keeps its
+    /// number and its blocks, an existing target is replaced, a directory
+    /// moves with everything under it.
+    ///
+    /// The new entry is written before the old one is removed, and both
+    /// land in the same commit, so a crash leaves the file under exactly
+    /// one of its names - never neither, never both. Until 2026-09 the
+    /// syscall behind this read the file into memory, created a new one
+    /// and unlinked the old: three operations, nothing for the journal to
+    /// hold together, and an empty file was not moved at all.
+    pub fn rename(
+        &self,
+        old_parent: u32,
+        old_name: &str,
+        new_parent: u32,
+        new_name: &str,
+    ) -> VfsResult<()> {
+        self.transaction(|| self.rename_inner(old_parent, old_name, new_parent, new_name))
+    }
+
+    fn rename_inner(
+        &self,
+        old_parent: u32,
+        old_name: &str,
+        new_parent: u32,
+        new_name: &str,
+    ) -> VfsResult<()> {
+        if new_name.is_empty() || new_name.len() > MAX_NAME_LEN - 4 {
+            return Err(VfsError::InvalidArgument);
+        }
+        let op = self.read_inode(old_parent)?;
+        if op.itype != ITYPE_DIR {
+            return Err(VfsError::NotADirectory);
+        }
+        let np = self.read_inode(new_parent)?;
+        if np.itype != ITYPE_DIR {
+            return Err(VfsError::NotADirectory);
+        }
+        let src_ino = self.dir_lookup(&op, old_name)?.ok_or(VfsError::NotFound)?;
+        let src = self.read_inode(src_ino)?;
+        let src_is_dir = src.itype == ITYPE_DIR;
+
+        // Every refusal is decided before anything is written.
+        let existing = self.dir_lookup(&np, new_name)?;
+        if let Some(dst_ino) = existing {
+            // Two names of one inode (hard links, or the very same path):
+            // POSIX says do nothing and report success.
+            if dst_ino == src_ino {
+                return Ok(());
+            }
+            let dst = self.read_inode(dst_ino)?;
+            let dst_is_dir = dst.itype == ITYPE_DIR;
+            match (src_is_dir, dst_is_dir) {
+                (true, false) => return Err(VfsError::NotADirectory),
+                (false, true) => return Err(VfsError::IsADirectory),
+                (true, true) if dst.dir_entry_count > 0 => return Err(VfsError::DirectoryNotEmpty),
+                _ => {}
+            }
+        }
+        // A directory cannot be moved into itself or below itself: that
+        // would cut the subtree off from the root with no way back. racfs
+        // directories carry no `..`, so the check walks down from the
+        // source instead of up from the destination.
+        if src_is_dir
+            && old_parent != new_parent
+            && (new_parent == src_ino || self.is_below(src_ino, new_parent)?)
+        {
+            return Err(VfsError::InvalidArgument);
+        }
+
+        // Replace the target: drop its entry and release it exactly the way
+        // unlink does.
+        if let Some(dst_ino) = existing {
+            self.dir_remove_entry(new_parent, new_name)?;
+            let mut dst = self.read_inode(dst_ino)?;
+            if dst.itype == ITYPE_DIR || dst.nlink <= 1 {
+                self.free_inode(dst_ino)?;
+            } else {
+                dst.nlink -= 1;
+                self.write_inode(dst_ino, &dst)?;
+            }
+        }
+
+        // New name first, old name second: at no point, not even inside
+        // the transaction's own ordering, is the inode nameless.
+        self.dir_add_entry(new_parent, src_ino, new_name)?;
+        self.dir_remove_entry(old_parent, old_name)?;
+
+        self.flush_sb()?;
+        self.cache_mut().flush().map_err(|_| VfsError::IoError)?;
+        Ok(())
+    }
+
+    /// True if directory `dir` lies anywhere below directory `top`.
+    /// Depth-first over the subtree, bounded by the inode count so a
+    /// corrupt cycle cannot spin forever.
+    fn is_below(&self, top: u32, dir: u32) -> VfsResult<bool> {
+        let mut stack: Vec<u32> = Vec::new();
+        stack.push(top);
+        let mut visited = 0usize;
+        while let Some(cur) = stack.pop() {
+            visited += 1;
+            if visited > self.sb().inode_count as usize + 1 {
+                return Err(VfsError::IoError);
+            }
+            let inode = self.read_inode(cur)?;
+            if inode.itype != ITYPE_DIR {
+                continue;
+            }
+            for i in 0..inode.dir_entry_count {
+                let de = self.read_direntry(&inode, i)?;
+                if de.ino == dir {
+                    return Ok(true);
+                }
+                let child = self.read_inode(de.ino)?;
+                if child.itype == ITYPE_DIR {
+                    stack.push(de.ino);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Read file data.
     pub fn read_file(&self, ino: u32, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
         let inode = self.read_inode(ino)?;

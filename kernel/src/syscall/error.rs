@@ -27,7 +27,10 @@ pub enum SyscallError {
     ERANGE = -34,
     ENAMETOOLONG = -36,
     ENOSYS = -38,
-    ENOEXEC = -39,
+    /// Linux's value. This was -39 until 2026-09, which is ENOTEMPTY's
+    /// number on every POSIX system; nothing in userland matched on it.
+    ENOEXEC = -8,
+    ENOTEMPTY = -39,
     ECHILD = -10,
     EPIPE = -32,
     ENOTTY = -25,
