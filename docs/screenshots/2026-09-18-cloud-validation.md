@@ -5,8 +5,8 @@ The CI-equivalent host test set passed 120 tests with no failures. The
 in-guest `racos-test` suite passed 269 checks with no failures and reported
 32 `OK` markers.
 
-The accompanying pull request contains the seven externally hosted
-screenshots captured during this validation:
+The public documentation branch contains the seven screenshots captured
+during this validation:
 
 1. Build in progress
 2. Successful build and staged UEFI image
