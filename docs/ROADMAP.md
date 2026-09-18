@@ -82,6 +82,9 @@ being asked; PR #39 is not closed without an assessment against `main`.
   the system. Also the `#PF` handler decodes its frame through
   `TSS.RSP0-40`, which is wrong for a fault taken in ring 0, so its
   `RIP`/`CS` in the log are garbage for nested faults.
+- **`exec` with threads** frees the page table under the siblings of a
+  `CLONE_VM` group and leaves them holding the old mapping record; POSIX
+  terminates them. Whole-group teardown is its own change.
 - **Ring-0 page-fault recovery** (an exception table) so a user pointer
   that goes bad between check and access ends in EFAULT rather than a
   kernel fault; usercopy's interrupts-off window is the guarantee
@@ -115,9 +118,8 @@ being asked; PR #39 is not closed without an assessment against `main`.
   status bar at the bottom of the screen was test scaffolding in the
   UI (removed: `gfx: no status bar`); `ps`/`top` showed no processes
   because `/proc` readdir never listed a PID (fixed: `procfs: /proc
-  lists every live task`); `Task.vm` is not replaced on `exec`
-  (`replace_current_image` keeps the old image's mapping record; only
-  fork+exec - racterm - is affected, `spawn` builds a fresh task).
+  lists every live task`); `exec` kept the old image's mapping record
+  (fixed: `vm: exec installs the new image's mapping record`).
 
 ---
 
