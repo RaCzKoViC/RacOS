@@ -21,7 +21,7 @@ use crate::arch::{inb, inl, inw, outb, outl, outw};
 use crate::mm::phys::{self, FRAME_SIZE};
 
 use super::pci::PciDevice;
-use super::virtqueue::{Virtqueue, QUEUE_SIZE};
+use super::virtqueue::{Virtqueue, MAX_QUEUE_SIZE};
 
 // --- PCI identity ---
 const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
@@ -51,9 +51,9 @@ const VIRTIO_NET_F_MAC: u32 = 1 << 5;
 const RX_QUEUE: u16 = 0;
 const TX_QUEUE: u16 = 1;
 
-/// How many RX buffers to keep posted. Much smaller than QUEUE_SIZE — we
-/// just need enough to absorb a burst without dropping while the kernel
-/// polls. Each buffer is one 4 KiB page.
+/// How many RX buffers to keep posted. Much smaller than the device-reported
+/// queue size — we just need enough to absorb a burst without dropping while
+/// the kernel polls. Each buffer is one 4 KiB page.
 const RX_BUF_COUNT: usize = 16;
 
 /// Legacy virtio-net header preceding each frame on the wire.
@@ -200,8 +200,9 @@ impl VirtioNet {
         unsafe {
             outw(io_base + REG_QUEUE_SELECT, idx);
         }
-        // Legacy I/O queue size is device-dictated and read-only. Our virtqueue
-        // layout MUST match exactly or the device reads/writes outside it.
+        // Legacy I/O queue size is device-dictated and read-only. Allocate the
+        // split-ring layout for exactly this size or the device will read/write
+        // outside it.
         // SAFETY: queue-size register read.
         let dev_size = unsafe { inw(io_base + REG_QUEUE_SIZE) };
         crate::serial::serial_println!(
@@ -209,22 +210,27 @@ impl VirtioNet {
             idx,
             dev_size,
         );
-        if (dev_size as usize) != QUEUE_SIZE {
+        if !Virtqueue::supports_size(dev_size) {
             crate::serial::serial_println!(
-                "[ VIRTIO ] queue {} size mismatch (device={}, driver={}); refusing",
+                "[ VIRTIO ] queue {} unsupported size={} (expected power of two, 1..={}); refusing",
                 idx,
                 dev_size,
-                QUEUE_SIZE,
+                MAX_QUEUE_SIZE,
             );
             return Err(VirtioNetError::QueueAlloc);
         }
-        let vq = Virtqueue::new().map_err(|_| VirtioNetError::QueueAlloc)?;
+        let vq = Virtqueue::new(dev_size).map_err(|_| VirtioNetError::QueueAlloc)?;
         // Tell device where the queue lives. Legacy I/O uses PFN.
         // SAFETY: queue-address write tells the device our virtqueue PFN.
         unsafe {
             outl(io_base + REG_QUEUE_ADDRESS, vq.pfn());
         }
         Ok(vq)
+    }
+
+    /// Device-reported size of the receive queue.
+    pub fn queue_size(&self) -> u16 {
+        self.rx.size
     }
 
     fn post_initial_rx(&mut self) -> Result<(), VirtioNetError> {

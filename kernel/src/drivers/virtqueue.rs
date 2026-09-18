@@ -1,26 +1,32 @@
 // RaCore — Split Virtqueue (VirtIO 0.9.5 / legacy layout)
 //
 // A virtqueue is the producer/consumer ring that a VirtIO device shares
-// with the driver. Legacy I/O queue size is device-dictated (read-only)
-// and equals 256 for QEMU virtio-net. The layout is then:
+// with the driver. Legacy I/O queue size is device-dictated (read-only), so
+// the allocation has to follow the size reported by each device queue. QEMU
+// versions in use report either 256 or 1024 entries. The split-ring layout is:
 //
-//     page 0 (offset 0..4096):      Descriptor table  — 16 * 256 = 4096 B
-//     page 1 (offset 4096..8192):   Available ring    — header 4 + 256*2 + 2
-//     page 2 (offset 8192..12288):  Used ring         — header 4 + 256*8 + 2
+//     descriptor table: 16 * queue_size bytes
+//     available ring:   4 + queue_size*2 + 2 bytes
+//     used ring:        4 + queue_size*8 + 2 bytes, aligned to 4096
 //
-// We allocate three contiguous 4 KiB frames per queue and hand the PFN
-// (page frame number = phys_addr >> 12) to the device via the
-// queue-address I/O port. The device infers avail/used locations from the
-// fixed layout above.
+// We allocate enough contiguous 4 KiB frames for that layout and hand the PFN
+// (page frame number = phys_addr >> 12) to the device via the queue-address
+// I/O port. The device infers avail/used locations from the reported size.
 
 use core::sync::atomic::{fence, Ordering};
 
 use crate::mm::phys::{self, FRAME_SIZE};
 
-/// Queue size for QEMU virtio-net legacy: device dictates 256 and the
-/// driver cannot lower it through the legacy I/O register.
-pub const QUEUE_SIZE: usize = 256;
-const QUEUE_FRAMES: usize = 3;
+/// Largest legacy split queue this driver is willing to allocate.
+///
+/// QEMU 8/9 commonly expose 256 entries and QEMU 10 can expose 1024. Keeping
+/// a bound prevents a malformed device from forcing an excessive contiguous
+/// physical allocation during boot.
+pub const MAX_QUEUE_SIZE: usize = 1024;
+
+const AVAIL_HEADER_BYTES: usize = 4;
+const USED_HEADER_BYTES: usize = 4;
+const EVENT_FIELD_BYTES: usize = 2;
 
 /// Descriptor flags.
 pub const VRING_DESC_F_NEXT: u16 = 1;
@@ -39,8 +45,6 @@ pub struct VirtqDesc {
 pub struct VirtqAvail {
     pub flags: u16,
     pub idx: u16,
-    pub ring: [u16; QUEUE_SIZE],
-    pub used_event: u16,
 }
 
 #[repr(C)]
@@ -54,9 +58,56 @@ pub struct VirtqUsedElem {
 pub struct VirtqUsed {
     pub flags: u16,
     pub idx: u16,
-    pub ring: [VirtqUsedElem; QUEUE_SIZE],
-    pub avail_event: u16,
 }
+
+#[derive(Clone, Copy)]
+struct VirtqLayout {
+    avail_offset: usize,
+    used_offset: usize,
+    frame_count: usize,
+}
+
+const fn align_up(value: usize, alignment: usize) -> usize {
+    (value + alignment - 1) & !(alignment - 1)
+}
+
+const fn layout_for(queue_size: u16) -> Option<VirtqLayout> {
+    let size = queue_size as usize;
+    if size == 0 || size > MAX_QUEUE_SIZE || size & (size - 1) != 0 {
+        return None;
+    }
+
+    let avail_offset = core::mem::size_of::<VirtqDesc>() * size;
+    let avail_bytes = AVAIL_HEADER_BYTES + core::mem::size_of::<u16>() * size + EVENT_FIELD_BYTES;
+    let used_offset = align_up(avail_offset + avail_bytes, FRAME_SIZE);
+    let used_bytes =
+        USED_HEADER_BYTES + core::mem::size_of::<VirtqUsedElem>() * size + EVENT_FIELD_BYTES;
+    let frame_count = align_up(used_offset + used_bytes, FRAME_SIZE) / FRAME_SIZE;
+
+    Some(VirtqLayout {
+        avail_offset,
+        used_offset,
+        frame_count,
+    })
+}
+
+// Compile-time regression checks for the legacy layouts exposed by supported
+// QEMU versions. These also guard against accidentally accepting unsafe sizes.
+const _: () = {
+    let q256 = layout_for(256).unwrap();
+    assert!(q256.avail_offset == 4096);
+    assert!(q256.used_offset == 8192);
+    assert!(q256.frame_count == 3);
+
+    let q1024 = layout_for(1024).unwrap();
+    assert!(q1024.avail_offset == 16384);
+    assert!(q1024.used_offset == 20480);
+    assert!(q1024.frame_count == 8);
+
+    assert!(layout_for(0).is_none());
+    assert!(layout_for(255).is_none());
+    assert!(layout_for(2048).is_none());
+};
 
 /// In-memory handle to a virtqueue. Pointers are physical and identity-mapped.
 pub struct Virtqueue {
@@ -76,26 +127,36 @@ unsafe impl Send for Virtqueue {}
 #[derive(Debug)]
 pub enum VqError {
     OutOfMemory,
+    InvalidSize,
     NoFreeDescriptors,
 }
 
 impl Virtqueue {
-    /// Allocate a fresh virtqueue.
-    ///
-    /// Returns ownership of two contiguous frames; freeing is not implemented
-    /// (queues live for the lifetime of the kernel).
-    pub fn new() -> Result<Self, VqError> {
-        // 3 contiguous frames: page 0 = desc (exactly 4 KiB),
-        //                     page 1 = avail, page 2 = used.
-        let frame = phys::alloc_contiguous(QUEUE_FRAMES).map_err(|_| VqError::OutOfMemory)?;
-        let base_phys = frame.addr();
-        let avail_phys = base_phys + FRAME_SIZE as u64;
-        let used_phys = base_phys + (2 * FRAME_SIZE) as u64;
+    /// Whether a device-reported legacy queue size is safe to use.
+    pub const fn supports_size(queue_size: u16) -> bool {
+        layout_for(queue_size).is_some()
+    }
 
-        // Zero the whole 12 KiB region.
+    /// Allocate a fresh virtqueue for a device-reported size.
+    ///
+    /// Returns ownership of contiguous frames; freeing is not implemented
+    /// (queues live for the lifetime of the kernel).
+    pub fn new(queue_size: u16) -> Result<Self, VqError> {
+        let layout = layout_for(queue_size).ok_or(VqError::InvalidSize)?;
+        let frame =
+            phys::alloc_contiguous(layout.frame_count).map_err(|_| VqError::OutOfMemory)?;
+        let base_phys = frame.addr();
+        let avail_phys = base_phys + layout.avail_offset as u64;
+        let used_phys = base_phys + layout.used_offset as u64;
+
+        // Zero the entire device-visible allocation.
         // SAFETY: identity-mapped, exclusive owner.
         unsafe {
-            core::ptr::write_bytes(base_phys as *mut u8, 0, QUEUE_FRAMES * FRAME_SIZE);
+            core::ptr::write_bytes(
+                base_phys as *mut u8,
+                0,
+                layout.frame_count * FRAME_SIZE,
+            );
         }
 
         let desc = base_phys as *mut VirtqDesc;
@@ -103,15 +164,15 @@ impl Virtqueue {
         let used = used_phys as *mut VirtqUsed;
 
         // Build the free-descriptor list: 0 → 1 → … → Q-1 → END.
-        // SAFETY: desc points to QUEUE_SIZE valid slots zeroed above.
+        // SAFETY: desc points to queue_size valid slots zeroed above.
         unsafe {
-            for i in 0..(QUEUE_SIZE as u16) {
+            for i in 0..queue_size {
                 (*desc.add(i as usize)).next = i + 1;
                 (*desc.add(i as usize)).flags = VRING_DESC_F_NEXT;
             }
             // The tail entry has no successor.
-            (*desc.add(QUEUE_SIZE - 1)).flags = 0;
-            (*desc.add(QUEUE_SIZE - 1)).next = 0;
+            (*desc.add(queue_size as usize - 1)).flags = 0;
+            (*desc.add(queue_size as usize - 1)).next = 0;
         }
 
         Ok(Virtqueue {
@@ -120,9 +181,9 @@ impl Virtqueue {
             desc,
             avail,
             used,
-            size: QUEUE_SIZE as u16,
+            size: queue_size,
             free_head: 0,
-            num_free: QUEUE_SIZE as u16,
+            num_free: queue_size,
             last_used_idx: 0,
         })
     }
@@ -222,7 +283,8 @@ impl Virtqueue {
         unsafe {
             let avail = &mut *self.avail;
             let slot = (avail.idx as usize) & (self.size as usize - 1);
-            avail.ring[slot] = head;
+            let ring = (self.avail as *mut u16).add(2);
+            *ring.add(slot) = head;
             // Ensure descriptor writes are visible before idx update.
             fence(Ordering::Release);
             avail.idx = avail.idx.wrapping_add(1);
@@ -241,8 +303,14 @@ impl Virtqueue {
         }
         fence(Ordering::Acquire);
         let slot = (self.last_used_idx as usize) & (self.size as usize - 1);
-        // SAFETY: same.
-        let elem = unsafe { (*self.used).ring[slot] };
+        // SAFETY: the used-ring element array follows its two-u16 header and
+        // contains `self.size` entries.
+        let elem = unsafe {
+            let ring = (self.used as *const u8)
+                .add(USED_HEADER_BYTES)
+                .cast::<VirtqUsedElem>();
+            *ring.add(slot)
+        };
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
         Some((elem.id as u16, elem.len))
     }
