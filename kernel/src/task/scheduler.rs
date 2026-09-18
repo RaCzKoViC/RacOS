@@ -582,8 +582,11 @@ impl Scheduler {
     }
 
     /// Replace the current task's execution image in-place (for sys_exec).
-    /// Preserves: pid, parent_pid, pgid, session_id, fd_table.
-    /// Replaces: context, kernel_stack, page_table, name, signals (reset).
+    /// Preserves: pid, parent_pid, pgid, session_id, fd_table, creds, cwd.
+    /// Replaces: context, kernel_stack, page_table, name, signals (reset),
+    /// and the mapping record - which belongs to the image, not to the
+    /// process: the old one describes an address space whose page table is
+    /// freed two lines below.
     pub fn replace_current_image(&mut self, new_task: &Task) {
         let idx = self.current;
         if let Some(ref mut task) = self.tasks[idx] {
@@ -616,6 +619,11 @@ impl Scheduler {
             task.signals = super::signal::SignalState::new();
             task.name = new_task.name;
             task.name_len = new_task.name_len;
+            // from_elf built the record for the new image (its segments and
+            // its stack); without this the process kept the old image's,
+            // and so owned pages that no longer exist while not owning the
+            // ones it runs on.
+            task.vm = new_task.vm.clone();
         }
     }
 
