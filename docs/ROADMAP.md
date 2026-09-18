@@ -113,7 +113,9 @@ being asked; PR #39 is not closed without an assessment against `main`.
 - **Found during manual testing (2026-09-18):** the VT console showed a
   staircase (fixed: `tty: output processing (ONLCR)`); the rainbow
   status bar at the bottom of the screen was test scaffolding in the
-  UI (removed: `gfx: no status bar`); `Task.vm` is not replaced on `exec`
+  UI (removed: `gfx: no status bar`); `ps`/`top` showed no processes
+  because `/proc` readdir never listed a PID (fixed: `procfs: /proc
+  lists every live task`); `Task.vm` is not replaced on `exec`
   (`replace_current_image` keeps the old image's mapping record; only
   fork+exec - racterm - is affected, `spawn` builds a fresh task).
 
