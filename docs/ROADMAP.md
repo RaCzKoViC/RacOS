@@ -112,8 +112,8 @@ being asked; PR #39 is not closed without an assessment against `main`.
   vs release vs ABI version numbering.
 - **Found during manual testing (2026-09-18):** the VT console showed a
   staircase (fixed: `tty: output processing (ONLCR)`); the rainbow
-  status bar at the bottom of the screen is test scaffolding in the
-  UI (its own PR); `Task.vm` is not replaced on `exec`
+  status bar at the bottom of the screen was test scaffolding in the
+  UI (removed: `gfx: no status bar`); `Task.vm` is not replaced on `exec`
   (`replace_current_image` keeps the old image's mapping record; only
   fork+exec - racterm - is affected, `spawn` builds a fresh task).
 
@@ -478,8 +478,11 @@ moves to the parallel tracks as nice-to-have.
   Nothing in the kernel writes a pixel except through it: clients get a
   region or a `Surface`, and the owner decides where the bytes land. The
   console asks for its region (`console_region()`) instead of assuming it
-  owns the screen; the status bar at the bottom is the first client
-  rendered through a real off-screen surface (`Surface` + `present`).
+  owns the screen; the VT renders every text row through an off-screen
+  surface (`Surface` + `present`). A status bar at the bottom was the
+  first such client; it was removed in 2026-09 once the VT exercised the
+  same path (it had become test scaffolding on the user's screen), and
+  the console has the whole screen.
 
   The format invariant, confirmed and handled: GOP hands over 32bpp
   linear in **BGRX** (QEMU OVMF, always) or **RGBX** (possible on real
@@ -497,11 +500,12 @@ moves to the parallel tracks as nice-to-have.
   coverage beyond ASCII needs a bigger font and is still open.
 
   Verified by gate 11 (`scripts/test-graphics.ps1`): the claim line with
-  geometry and channel order, plus a **QMP screendump** required to
-  contain ≥ 1000 distinct non-zero pixel values — 25 571 in practice.
-  The dump is the assertion the serial log cannot make: the first version
-  of this slice drew the status bar before the heap existed, the bar
-  silently never appeared, and every log line still looked perfect.
+  geometry and channel order, plus a **QMP screendump** that must show
+  the console - a text-sized amount of lit pixels, lines starting at the
+  left edge, nothing below the console. The dump is the assertion the
+  serial log cannot make: the first version of this slice drew the (then)
+  status bar before the heap existed, the bar silently never appeared,
+  and every log line still looked perfect.
 
 ### 4.2 Graphical RacTerm
 
@@ -557,8 +561,11 @@ the GOP framebuffer.
 ### 4.4 Acceptance criteria (DoD for v0.4)
 
 - ✅ The graphics smoke exists as gate 11: boots with `-vga std`, asserts
-  the claim line (geometry + channel order) and ≥ 1000 distinct non-zero
-  pixel values in a QMP screendump of the actual display.
+  the claim line (geometry + channel order), that the VT took the console
+  over, and from a QMP screendump of the actual display that the console
+  is what it shows (text-sized lit pixel count, lines at the left edge,
+  bottom rows black). The original "≥ 1000 distinct pixel values" needed
+  a gradient to exist and was replaced when the status bar was removed.
 - ⏳ `MILESTONE-V0.4-OK` — not yet: §4.2's RacTerm-from-buffer rendering
   and mouse tracking are still open, and the milestone marker waits for
   them.
