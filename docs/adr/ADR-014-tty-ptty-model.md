@@ -29,6 +29,10 @@ TTY and pseudo-terminal (PTY) support is required for interactive shells, termin
 - Shell (racsh) reads from PTY slave, receives signals from TTY layer
 - Terminal (RacTerm) holds PTY master, sends input, receives output
 - Line discipline handles backspace, echo, Ctrl-C in canonical mode
+- Output processing (`OPOST|ONLCR`, `line_discipline::onlcr`): a bare LF
+  written to a PTY slave or to the console reaches the terminal - a PTY
+  master or the kernel VT - as CR LF. No per-tty `oflag` yet; ONLCR is
+  the only output mode, and an explicit CR LF is not collapsed
 - Process groups enable signal delivery to foreground job
 - TTY layer is in kernel; rendering is in userland (RacTerm)
 
