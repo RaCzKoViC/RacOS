@@ -114,6 +114,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_network_tools();
     test_fsck_reports_clean();
     test_large_files_and_dirs();
+    test_truncate_semantics();
     test_persistent_mount_layout();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
@@ -951,6 +952,376 @@ fn test_large_files_and_dirs() {
         && wide_bitmap == Some(0)
     {
         println("T34-BIGFILE-OK");
+    }
+}
+
+/// Size of the file at `path` via stat, or None if stat fails.
+fn stat_size(path: &[u8]) -> Option<u64> {
+    let mut raw = [0u8; 80];
+    stat(path, &mut raw).ok()?;
+    // SAFETY: the kernel filled `raw` with a StatBuf (80 bytes, repr(C)).
+    let st = unsafe { &*(raw.as_ptr() as *const StatBuf) };
+    Some(st.st_size)
+}
+
+/// Size of the open file `fd` via fstat, or None if fstat fails.
+fn fstat_size(fd: i32) -> Option<u64> {
+    let mut raw = [0u8; 80];
+    fstat(fd, &mut raw).ok()?;
+    // SAFETY: as in stat_size.
+    let st = unsafe { &*(raw.as_ptr() as *const StatBuf) };
+    Some(st.st_size)
+}
+
+/// Free 512-byte blocks on the racfs mounted at /mnt, read from
+/// /proc/diskstats ("<mount> <total> <used> <free> <inodes> <free inodes>").
+/// The exact count is what makes a leak visible: a truncate that shrinks the
+/// size but keeps the block map would leave this number where it was.
+fn racfs_free_blocks() -> Option<u64> {
+    let fd = open(b"/proc/diskstats\0", 0, 0).ok()?;
+    let mut buf = [0u8; 1024];
+    let n = read(fd, &mut buf).unwrap_or(0);
+    let _ = close(fd);
+    let text = &buf[..n];
+    let mut line_start = 0usize;
+    while line_start < text.len() {
+        let mut line_end = line_start;
+        while line_end < text.len() && text[line_end] != b'\n' {
+            line_end += 1;
+        }
+        let line = &text[line_start..line_end];
+        if line.starts_with(b"/mnt ") {
+            // Field 4, space separated.
+            let mut field = 0usize;
+            let mut i = 0usize;
+            while i < line.len() {
+                if line[i] == b' ' {
+                    field += 1;
+                    i += 1;
+                    continue;
+                }
+                if field == 3 {
+                    let mut v: u64 = 0;
+                    while i < line.len() && line[i].is_ascii_digit() {
+                        v = v * 10 + (line[i] - b'0') as u64;
+                        i += 1;
+                    }
+                    return Some(v);
+                }
+                i += 1;
+            }
+            return None;
+        }
+        line_start = line_end + 1;
+    }
+    None
+}
+
+/// Overwriting a file must shorten it. Before this group existed, `O_TRUNC`
+/// in `sys_open` was a permission check that truncated nothing, `ftruncate`
+/// returned 0 without touching the inode, and `truncate` was ENOSYS - so
+/// `echo X > f` on an 11-byte file left 11 bytes with the old tail showing
+/// after the X. Every `>` in racsh, the history rewrite, cp, mv and tee open
+/// with O_TRUNC, so this was the common case, not a corner.
+///
+/// The fix lives in InodeOps and each filesystem, not in cat or the shell;
+/// hence one reproduction per writable filesystem, and block accounting on
+/// racfs to show the freed blocks really return to the bitmap.
+fn test_truncate_semantics() {
+    println("\n[test] truncate + O_TRUNC");
+
+    // The review's reproduction, verbatim, on tmpfs, racfs and FAT32.
+    let tmpfs = shell_run(
+        b"echo ABCDEFGHIJ > /tmp/tr1; echo X > /tmp/tr1; \
+          n=$(wc -c < /tmp/tr1); c=$(cat /tmp/tr1); \
+          test \"$n\" -eq 2 && test \"$c\" = X\0",
+    );
+    check!(
+        "echo X > f shortens an 11-byte file on tmpfs",
+        tmpfs == Some(0)
+    );
+    let racfs = shell_run(
+        b"echo ABCDEFGHIJ > /mnt/tr1; echo X > /mnt/tr1; \
+          n=$(wc -c < /mnt/tr1); c=$(cat /mnt/tr1); \
+          test \"$n\" -eq 2 && test \"$c\" = X\0",
+    );
+    check!(
+        "echo X > f shortens an 11-byte file on racfs",
+        racfs == Some(0)
+    );
+    let fat = shell_run(
+        b"echo ABCDEFGHIJ > /fat/tr1; echo X > /fat/tr1; \
+          n=$(wc -c < /fat/tr1); c=$(cat /fat/tr1); \
+          test \"$n\" -eq 2 && test \"$c\" = X\0",
+    );
+    check!(
+        "echo X > f shortens an 11-byte file on FAT32",
+        fat == Some(0)
+    );
+
+    // O_APPEND takes the size from the inode at write time, so an append
+    // after a truncating overwrite must continue at the new end, not the old.
+    let append = shell_run(
+        b"echo ABCDEFGHIJ > /mnt/tr2; echo X > /mnt/tr2; echo Y >> /mnt/tr2; \
+          n=$(wc -c < /mnt/tr2); l=$(wc -l < /mnt/tr2); \
+          test \"$n\" -eq 4 && test \"$l\" -eq 2\0",
+    );
+    check!(
+        "append after truncate continues at the new end",
+        append == Some(0)
+    );
+
+    // --- racfs block accounting through ftruncate -------------------------
+    // A 65-byte line (64 characters + newline; the seed line the big-file
+    // group uses is 64 bytes, which would land exactly on a block boundary
+    // and hide an off-by-one), times 256: 16640 bytes = 33 data blocks,
+    // 8 direct + 25 through one single-indirect block = 34 blocks owned.
+    //
+    // The three directory entries exist before the baseline is taken (a new
+    // entry can cost the directory a block of its own), and the two seed
+    // files are left alone until the end, so every difference measured below
+    // is tr3c's data and its indirect block, nothing else.
+    let seeded = shell_run(
+        b"echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef > /mnt/tr3a; \
+          cat /mnt/tr3a /mnt/tr3a /mnt/tr3a /mnt/tr3a > /mnt/tr3b; \
+          cat /mnt/tr3b /mnt/tr3b /mnt/tr3b /mnt/tr3b > /mnt/tr3a; \
+          cat /mnt/tr3a /mnt/tr3a /mnt/tr3a /mnt/tr3a > /mnt/tr3b; \
+          touch /mnt/tr3c /mnt/tr5\0",
+    );
+    let free0 = racfs_free_blocks();
+    let built = shell_run(b"cat /mnt/tr3b /mnt/tr3b /mnt/tr3b /mnt/tr3b > /mnt/tr3c\0");
+    let path = b"/mnt/tr3c\0";
+    let size_ok = seeded == Some(0) && built == Some(0) && stat_size(path) == Some(16640);
+    check!("a 16640-byte racfs file is in place (33 blocks)", size_ok);
+    let free1 = racfs_free_blocks();
+    let owns_34 = match (free0, free1) {
+        (Some(a), Some(b)) => a == b + 34,
+        _ => false,
+    };
+    check!("it owns 33 data blocks plus one indirect block", owns_34);
+
+    // --- the double-indirect map, cut at three different depths -----------
+    // 8 x 16640 = 133120 bytes = 260 blocks: 8 direct, 128 through the
+    // single-indirect block, 124 through the double-indirect block and one
+    // second-level block. Owned: 260 + 1 + 1 + 1 = 263, on top of tr3c's 34.
+    let dbl_built = shell_run(
+        b"cat /mnt/tr3c /mnt/tr3c /mnt/tr3c /mnt/tr3c \
+              /mnt/tr3c /mnt/tr3c /mnt/tr3c /mnt/tr3c > /mnt/tr5\0",
+    );
+    let p5 = b"/mnt/tr5\0";
+    let fd1 = racfs_free_blocks();
+    let dbl_ok = dbl_built == Some(0)
+        && stat_size(p5) == Some(133120)
+        && matches!((free0, fd1), (Some(a), Some(b)) if a == b + 34 + 263);
+    check!(
+        "a 133120-byte file owns 260 data + 3 pointer blocks",
+        dbl_ok
+    );
+    let mut dbl_cuts = false;
+    if let Ok(fd) = open(p5, O_RDWR, 0) {
+        // 70000 bytes = 137 blocks: one pointer left in the second-level
+        // block, 123 data blocks freed, every pointer block still needed.
+        // Owned: 137 + 3 = 140.
+        let c1 = ftruncate(fd, 70000);
+        let f = racfs_free_blocks();
+        let cut1 = c1.is_ok()
+            && fstat_size(fd) == Some(70000)
+            && matches!((free0, f), (Some(a), Some(b)) if a == b + 34 + 140);
+        check!(
+            "cut inside the double-indirect range keeps its pointer blocks",
+            cut1
+        );
+
+        // 69632 bytes = exactly 136 blocks: nothing under the double-indirect
+        // block survives, so it and its second-level block go too.
+        // Owned: 136 + 1 = 137.
+        let c2 = ftruncate(fd, 69632);
+        let f = racfs_free_blocks();
+        let cut2 = c2.is_ok()
+            && fstat_size(fd) == Some(69632)
+            && matches!((free0, f), (Some(a), Some(b)) if a == b + 34 + 137);
+        check!(
+            "cut at the single/double boundary frees the emptied pointer blocks",
+            cut2
+        );
+
+        // 5000 bytes = 10 blocks: 8 direct + 2 through the single-indirect
+        // block, which therefore stays. Owned: 10 + 1 = 11.
+        let c3 = ftruncate(fd, 5000);
+        let f = racfs_free_blocks();
+        let cut3 = c3.is_ok()
+            && fstat_size(fd) == Some(5000)
+            && matches!((free0, f), (Some(a), Some(b)) if a == b + 34 + 11);
+        check!(
+            "cut inside the single-indirect range keeps that pointer block",
+            cut3
+        );
+
+        let c4 = ftruncate(fd, 0);
+        let f = racfs_free_blocks();
+        let cut4 = c4.is_ok()
+            && fstat_size(fd) == Some(0)
+            && matches!((free0, f), (Some(a), Some(b)) if a == b + 34);
+        check!("cut to zero returns all 263 blocks", cut4);
+        let _ = close(fd);
+        dbl_cuts = cut1 && cut2 && cut3 && cut4;
+    } else {
+        check!("open /mnt/tr5 O_RDWR for the double-indirect cuts", false);
+    }
+
+    let mut acct_ok = false;
+    if let Ok(fd) = open(path, O_RDWR, 0) {
+        // Down to exactly the direct blocks: 25 data + the indirect block go
+        // back, 8 stay.
+        let t1 = ftruncate(fd, 4096);
+        let s1 = fstat_size(fd);
+        let f2 = racfs_free_blocks();
+        let step1 = t1.is_ok()
+            && s1 == Some(4096)
+            && matches!((free0, f2), (Some(a), Some(b)) if a == b + 8);
+        check!("ftruncate to 4096 keeps 8 blocks, frees 26", step1);
+
+        // One byte short of a block boundary: same 8 blocks, the byte before
+        // the cut is still the original, nothing reads back past the cut.
+        let t2 = ftruncate(fd, 4095);
+        let s2 = fstat_size(fd);
+        let f3 = racfs_free_blocks();
+        let mut last = [0u8; 4];
+        let _ = lseek(fd, 4094, SEEK_SET);
+        let n = read(fd, &mut last).unwrap_or(99);
+        // Byte 4094 is offset 4094 % 65 = 64 into the pattern line: '\n'.
+        let step2 = t2.is_ok() && s2 == Some(4095) && f3 == f2 && n == 1 && last[0] == b'\n';
+        check!("ftruncate to 4095 cuts inside a block", step2);
+
+        // To zero: every block returns; the file is still there.
+        let t3 = ftruncate(fd, 0);
+        let s3 = fstat_size(fd);
+        let f4 = racfs_free_blocks();
+        let step3 = t3.is_ok() && s3 == Some(0) && f4 == free0;
+        check!("ftruncate to 0 returns every block to the bitmap", step3);
+
+        // Extending pads with zeros and allocates only what the new length
+        // needs: 1024 bytes = 2 blocks.
+        let t4 = ftruncate(fd, 1024);
+        let s4 = fstat_size(fd);
+        let f5 = racfs_free_blocks();
+        let mut zeros = [0xAAu8; 1024];
+        let _ = lseek(fd, 0, SEEK_SET);
+        let n = read(fd, &mut zeros).unwrap_or(0);
+        let all_zero = n == 1024 && zeros.iter().all(|&b| b == 0);
+        let step4 = t4.is_ok()
+            && s4 == Some(1024)
+            && matches!((free0, f5), (Some(a), Some(b)) if a == b + 2)
+            && all_zero;
+        check!("ftruncate past the end extends with zeros", step4);
+        let _ = close(fd);
+        acct_ok = step1 && step2 && step3 && step4;
+    } else {
+        check!("open /mnt/tr3c O_RDWR for ftruncate", false);
+    }
+
+    // --- truncate(2) by path ----------------------------------------------
+    let p2 = b"/mnt/tr4\0";
+    let mut by_path = false;
+    if let Ok(fd) = open(p2, O_RDWR | O_CREAT | O_TRUNC, 0o644) {
+        let _ = write(fd, b"0123456789");
+        let _ = close(fd);
+        let t = truncate(p2, 5);
+        let s = stat_size(p2);
+        let mut head = [0u8; 16];
+        let n = open(p2, 0, 0)
+            .ok()
+            .map(|fd| {
+                let n = read(fd, &mut head).unwrap_or(0);
+                let _ = close(fd);
+                n
+            })
+            .unwrap_or(0);
+        let cut = t.is_ok() && s == Some(5) && n == 5 && &head[..5] == b"01234";
+        check!("truncate(path, 5) keeps the first five bytes", cut);
+        let t2 = truncate(p2, 12);
+        let s2 = stat_size(p2);
+        let mut back = [0xAAu8; 16];
+        let n2 = open(p2, 0, 0)
+            .ok()
+            .map(|fd| {
+                let n = read(fd, &mut back).unwrap_or(0);
+                let _ = close(fd);
+                n
+            })
+            .unwrap_or(0);
+        let grown = t2.is_ok()
+            && s2 == Some(12)
+            && n2 == 12
+            && &back[..5] == b"01234"
+            && back[5..12].iter().all(|&b| b == 0);
+        check!("truncate(path, 12) pads bytes 5..12 with zeros", grown);
+        by_path = cut && grown;
+    } else {
+        check!("create /mnt/tr4 for truncate(path)", false);
+    }
+
+    // --- refusals: a wrong call must fail, never report success ------------
+    let ro = open(p2, 0, 0);
+    let ro_refused = match ro {
+        Ok(fd) => {
+            let r = ftruncate(fd, 0);
+            let _ = close(fd);
+            r == Err(-22) && stat_size(p2) == Some(12)
+        }
+        Err(_) => false,
+    };
+    check!(
+        "ftruncate on a read-only fd is EINVAL and changes nothing",
+        ro_refused
+    );
+
+    let dir_refused = truncate(b"/mnt\0", 0) == Err(-21);
+    check!("truncate on a directory is EISDIR", dir_refused);
+
+    let rofs_size = stat_size(b"/bin/true\0");
+    let rofs = truncate(b"/bin/true\0", 0);
+    let rofs_refused = rofs.is_err()
+        && stat_size(b"/bin/true\0") == rofs_size
+        && run_bin(b"/bin/true\0", &[b"true\0"]) == Some(0);
+    check!(
+        "truncate on the read-only initramfs fails and leaves /bin/true intact",
+        rofs_refused
+    );
+
+    let missing = truncate(b"/mnt/does-not-exist\0", 0) == Err(-2);
+    check!("truncate on a missing path is ENOENT", missing);
+
+    // O_TRUNC on a device node is ignored, as POSIX says; opening must work.
+    let dev = open(b"/dev/null\0", 1 | O_TRUNC, 0);
+    let dev_ok = dev.is_ok();
+    if let Ok(fd) = dev {
+        let _ = close(fd);
+    }
+    check!("open(/dev/null, O_WRONLY|O_TRUNC) still succeeds", dev_ok);
+
+    let _ = shell_run(
+        b"rm /mnt/tr1 /mnt/tr2 /mnt/tr3a /mnt/tr3b /mnt/tr3c /mnt/tr4 /mnt/tr5 \
+          /tmp/tr1 /fat/tr1\0",
+    );
+
+    if tmpfs == Some(0)
+        && racfs == Some(0)
+        && fat == Some(0)
+        && append == Some(0)
+        && size_ok
+        && owns_34
+        && dbl_ok
+        && dbl_cuts
+        && acct_ok
+        && by_path
+        && ro_refused
+        && dir_refused
+        && rofs_refused
+        && missing
+        && dev_ok
+    {
+        println("T36-TRUNCATE-OK");
     }
 }
 
