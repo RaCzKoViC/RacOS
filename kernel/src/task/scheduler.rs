@@ -511,6 +511,18 @@ impl Scheduler {
             .map(|t| t.pgid)
     }
 
+    /// Every PID in the task table except the idle task (PID 0), in slot
+    /// order. Zombies are included: they exist until reaped, and /proc
+    /// shows them as such.
+    pub fn live_pids(&self) -> alloc::vec::Vec<Pid> {
+        self.tasks
+            .iter()
+            .flatten()
+            .filter(|t| t.pid != 0)
+            .map(|t| t.pid)
+            .collect()
+    }
+
     /// Collect all PIDs in a given process group.
     pub fn pids_in_group(&self, pgid: Pid) -> alloc::vec::Vec<Pid> {
         self.tasks
@@ -958,6 +970,17 @@ pub unsafe fn pids_in_group(pgid: Pid) -> alloc::vec::Vec<Pid> {
     (*core::ptr::addr_of!(SCHEDULER))
         .as_ref()
         .map(|s| s.pids_in_group(pgid))
+        .unwrap_or_default()
+}
+
+/// Every PID in the task table except the idle task - what /proc lists.
+///
+/// # Safety
+/// Must be called with interrupts disabled.
+pub unsafe fn live_pids() -> alloc::vec::Vec<Pid> {
+    (*core::ptr::addr_of!(SCHEDULER))
+        .as_ref()
+        .map(|s| s.live_pids())
         .unwrap_or_default()
 }
 

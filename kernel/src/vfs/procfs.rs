@@ -186,8 +186,26 @@ impl InodeOps for ProcRootInode {
             ino: INO_CACHESTATS,
             file_type: FileType::Regular,
         });
-        // Add entries for known PIDs
-        // We scan the scheduler for live tasks
+        // One directory per live task. Until 2026-09 this was a comment
+        // and nothing else: every /proc/<pid> lookup worked, but readdir
+        // never named one, so `ps` printed its header alone and `top`
+        // counted zero tasks - and the suite, checking exit status only,
+        // agreed with both.
+        // SAFETY: cli/sti window so the task-table walk sees a consistent
+        // table; the PIDs are copied out before interrupts return.
+        let pids = unsafe {
+            core::arch::asm!("cli", options(nomem, nostack));
+            let pids = crate::task::scheduler::live_pids();
+            core::arch::asm!("sti", options(nomem, nostack));
+            pids
+        };
+        for pid in pids {
+            entries.push(DirEntry {
+                name: format!("{}", pid),
+                ino: pid_dir_ino(pid),
+                file_type: FileType::Directory,
+            });
+        }
         Ok(entries)
     }
 }

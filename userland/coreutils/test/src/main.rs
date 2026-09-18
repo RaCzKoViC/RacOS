@@ -2250,25 +2250,32 @@ fn test_ps_lists_running_processes() {
 
     // Exit 0 with an empty table is what ps did for months: /proc never
     // listed a single PID directory (readdir had a comment where the
-    // scheduler scan should have been), so `ps` printed the header and
-    // `top` reported "tasks: 0" while lookups of /proc/<pid> worked. The
-    // table has to show the processes that exist while ps runs: init
-    // (PID 1), this test, and ps itself.
-    // (grep here is RacOS's: literal match, always exit 0, no -q - so the
-    // verdicts come from the text it prints.)
-    let proc_lists_1 = shell_run(b"test \"$(ls /proc | sort | head -1)\" = 1\0");
-    check!("/proc lists PID 1", proc_lists_1 == Some(0));
-    let ps_init = shell_run(b"test -n \"$(ps | grep init)\"\0");
-    check!("ps lists init", ps_init == Some(0));
-    let ps_self = shell_run(b"test -n \"$(ps | grep racos-test)\"\0");
+    // scheduler scan should have been), so `ps` printed its header alone
+    // and `top` reported "tasks: 0" while lookups of /proc/<pid> still
+    // worked. The table has to name the processes that exist while ps runs:
+    // flushd (the kernel daemon at PID 1), /sbin/init, this test, /bin/sh
+    // and /bin/ps.
+    //
+    // Every check reads the pipeline's text through an assignment: racsh
+    // expands $(...) in `x=$(...)` but not inside quotes ("$(...)" stays
+    // literal), and RacOS's grep is a literal matcher that always exits 0,
+    // so the verdict is the line count wc prints, not grep's status.
+    let proc_lists_pid = shell_run(b"f=$(ls /proc | sort | head -1); test \"$f\" = 1\0");
+    check!(
+        "ls /proc names a PID directory (1)",
+        proc_lists_pid == Some(0)
+    );
+    let ps_flushd = shell_run(b"n=$(ps | grep flushd | wc -l); test \"$n\" -gt 0\0");
+    check!("ps lists flushd, the task at PID 1", ps_flushd == Some(0));
+    let ps_init = shell_run(b"n=$(ps | grep init | wc -l); test \"$n\" -gt 0\0");
+    check!("ps lists /sbin/init", ps_init == Some(0));
+    let ps_self = shell_run(b"n=$(ps | grep racos-test | wc -l); test \"$n\" -gt 0\0");
     check!("ps lists racos-test itself", ps_self == Some(0));
     let ps_rows = shell_run(b"n=$(ps | wc -l); test \"$n\" -gt 3\0");
     check!(
-        "ps prints more than the header (init, test, sh, ps)",
+        "ps prints more than the header (flushd, init, sh, test, ps)",
         ps_rows == Some(0)
     );
-    let ps_pid1 = shell_run(b"test \"$(ps | grep init | awk '{print $1}')\" = 1\0");
-    check!("init is PID 1 in the table", ps_pid1 == Some(0));
     let top_tasks =
         shell_run(b"t=$(/bin/top | grep tasks: | cut -d ' ' -f 2); test \"$t\" -gt 0\0");
     check!("top counts the tasks it lists", top_tasks == Some(0));
