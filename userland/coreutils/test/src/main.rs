@@ -134,6 +134,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_env_inherits_shell_vars();
     test_exec_loop_memory_cleanup();
     test_tty_ioctl_state();
+    test_tty_output_processing();
     test_chdir_getcwd();
     test_security_syscalls();
 
@@ -2908,6 +2909,65 @@ fn test_tty_ioctl_state() {
     {
         println("TTY-IOCTL-OK");
     }
+}
+
+/// A PTY must do output processing (termios OPOST|ONLCR): the bare LF a
+/// program writes to the slave reaches the master as CR LF, the way every
+/// terminal emulator on the master side expects it. Before this group the
+/// master read back exactly the bytes written, so racterm's own emulator
+/// drew each line one row down at the column the previous one ended - the
+/// same staircase the kernel VT showed on the framebuffer.
+fn test_tty_output_processing() {
+    println("\n[test] TTY output processing (ONLCR on the PTY)");
+
+    let master_fd = open(b"/dev/ptmx\0", O_RDWR, 0);
+    let slave_fd = open(b"/dev/pts0\0", O_RDWR, 0);
+    let (master_fd, slave_fd) = match (master_fd, slave_fd) {
+        (Ok(m), Ok(s)) => (m, s),
+        (m, s) => {
+            check!("open /dev/ptmx and /dev/pts0 for ONLCR", false);
+            if let Ok(m) = m {
+                let _ = close(m);
+            }
+            if let Ok(s) = s {
+                let _ = close(s);
+            }
+            return;
+        }
+    };
+
+    // A line: the LF grows a CR in front of it.
+    let _ = write(slave_fd, b"ab\n");
+    let mut buf = [0u8; 16];
+    let n = read(master_fd, &mut buf).unwrap_or(0);
+    check!(
+        "slave 'ab\\n' reads back on the master as 'ab\\r\\n'",
+        &buf[..n] == b"ab\r\n"
+    );
+
+    // Bytes that are not LF pass unchanged, and an explicit CR LF is not
+    // collapsed (Linux ONLCR does not either).
+    let _ = write(slave_fd, b"x\r\ny");
+    let n = read(master_fd, &mut buf).unwrap_or(0);
+    check!(
+        "slave 'x\\r\\ny' reads back as 'x\\r\\r\\ny'",
+        &buf[..n] == b"x\r\r\ny"
+    );
+
+    // The canonical-mode echo of Enter goes the same way: typing a line on
+    // the master echoes it back with the LF processed.
+    let _ = write(master_fd, b"hi\n");
+    let n = read(master_fd, &mut buf).unwrap_or(0);
+    check!("echo of a typed line ends in CR LF", &buf[..n] == b"hi\r\n");
+    let n = read(slave_fd, &mut buf).unwrap_or(0);
+    check!(
+        "the shell side still reads the bare line",
+        &buf[..n] == b"hi\n"
+    );
+
+    let _ = close(slave_fd);
+    let _ = close(master_fd);
+    println("T41-TTY-ONLCR-OK");
 }
 
 fn test_chdir_getcwd() {

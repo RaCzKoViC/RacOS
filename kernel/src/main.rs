@@ -1760,6 +1760,34 @@ fn run_ci_smoke_and_exit() -> ! {
         check!("vfs::mount /mnt", mt.is_mounted("/mnt"));
     }
 
+    // 2b. TTY output processing on the VT console. A process ends a line
+    //     with a bare LF; the terminal emulator behind the VT does exactly
+    //     what a terminal does with LF - down one row, same column - so
+    //     the byte stream must carry CR LF by the time it reaches it
+    //     (termios OPOST|ONLCR). Without that every line starts where the
+    //     previous one ended and the screen becomes a staircase. The grid
+    //     is read back directly: the only assertion about what the screen
+    //     shows that needs no screendump.
+    if tty::vt::is_active() {
+        tty::vt::vt_print("\rvt-onlcr-x\ny");
+        let cursor = tty::vt::probe_cursor();
+        let cell0 = cursor.and_then(|(row, _)| tty::vt::probe_cell(row, 0));
+        let ok = matches!(cursor, Some((_, 1))) && cell0 == Some('y');
+        if ok {
+            serial::serial_println!("[ SMOKE ] PASS vt::onlcr_bare_lf_returns_carriage");
+        } else {
+            serial::serial_println!(
+                "[ SMOKE ] FAIL vt::onlcr_bare_lf_returns_carriage (cursor={:?}, col0={:?})",
+                cursor,
+                cell0
+            );
+            all_pass = false;
+        }
+        tty::vt::vt_print("\n");
+    } else {
+        serial::serial_println!("[ SMOKE ] SKIP vt::onlcr_bare_lf_returns_carriage (no VT)");
+    }
+
     // 3. racfs round-trip on ram0 (file create + write + read + unlink).
     {
         // SAFETY: racfs::instance singleton.

@@ -318,6 +318,36 @@ pub fn vt_print(s: &str) {
     }
 }
 
+/// Where the active VT's cursor is, as (row, col). CI smoke only: the
+/// smoke feeds bytes through `vt_print` and reads the grid back, the one
+/// way to assert what the screen shows without a screendump.
+#[cfg(feature = "ci-smoke")]
+pub fn probe_cursor() -> Option<(usize, usize)> {
+    // SAFETY: VT_MANAGER is a boot-once singleton; single-CPU MVP.
+    unsafe {
+        VT_MANAGER.as_ref().map(|mgr| {
+            let term = &mgr.vts[mgr.current_vt].term;
+            (term.cursor.row, term.cursor.col)
+        })
+    }
+}
+
+/// The character in the active VT's cell (row, col). CI smoke only.
+#[cfg(feature = "ci-smoke")]
+pub fn probe_cell(row: usize, col: usize) -> Option<char> {
+    // SAFETY: VT_MANAGER is a boot-once singleton; single-CPU MVP.
+    unsafe {
+        VT_MANAGER.as_ref().and_then(|mgr| {
+            let term = &mgr.vts[mgr.current_vt].term;
+            if row < term.buffer.rows && col < term.buffer.cols {
+                Some(term.buffer.get(row, col).character)
+            } else {
+                None
+            }
+        })
+    }
+}
+
 pub fn vt_clear_current() {
     // SAFETY: VT_MANAGER is a boot-once singleton; single-CPU MVP.
     unsafe {
