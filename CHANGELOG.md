@@ -52,12 +52,26 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
   `cat | tail -1`; mv/cp/cat/tee into /dev/full failing with the source
   intact and tee's stdout still fed; a plain mv still moving.
 
+- **`build-image.sh` builds userland with debug assertions off, as
+  `build-image.ps1` always did.** The first CI run of this change died
+  with `EXCEPTION #6: Invalid Opcode` in racsh, on the second `$(...)` of
+  a session - and only in CI. A user-stack dump from the #UD handler
+  traced it to compiler_builtins' `compare_bytes` (the memcmp build-std
+  compiles): its 16-byte unaligned-read path trips `core::ptr::read`'s
+  alignment precondition check on this nightly, and that check is a UD2.
+  The Windows script had turned the checks off for exactly this symptom
+  ("false-positive on this nightly"); the Linux script had not, so CI
+  and the local gates were running different userlands. One flag on both
+  hosts now, and the reason is written down.
+
 - Known and deliberately left for their own changes: the pipe write end
   returns a short count or EAGAIN on a blocking descriptor instead of
-  waiting for room as the read end does (stage R3); other tools with
-  large stdout output (`sed`, `awk`, `grep`, `head`, `tail`, `sort`)
-  still use bare `write`; racsh's `test ! -e` returns 1 whether or not
-  the file exists; `ls` of a missing path lists `/`.
+  waiting for room as the read end does (stage R3); a user-mode #UD or
+  #GP parks the CPU instead of killing the process the way a user-mode
+  page fault does (one `ud2` in any program halts the system); other
+  tools with large stdout output (`sed`, `awk`, `grep`, `head`, `tail`,
+  `sort`) still use bare `write`; racsh's `test ! -e` returns 1 whether
+  or not the file exists; `ls` of a missing path lists `/`.
 
 ### Fixed — overwriting a file now shortens it: truncate, ftruncate and O_TRUNC
 

@@ -88,7 +88,14 @@ for pkg in "${COREUTILS[@]}"; do
     if [[ "$pkg" == "racterm" ]]; then
         EXTRA_FEATURES=(--features bin-target)
     fi
-    RUSTFLAGS="$OLD_RUSTFLAGS" \
+    # Userland is built with debug assertions off, as build-image.ps1 does.
+    # With them on, the compiler_builtins memcmp that build-std compiles
+    # (compare_bytes) reads 16-byte chunks through a path that trips
+    # core::ptr::read's alignment precondition check on this nightly, and
+    # that check is a UD2: racsh died with "EXCEPTION #6: Invalid Opcode"
+    # on the second `$(...)` of a session - in CI only, because the two
+    # scripts disagreed on this flag. One flag, one userland, on both hosts.
+    RUSTFLAGS="$OLD_RUSTFLAGS -C debug-assertions=off" \
         cargo build --package "$pkg" "${EXTRA_FEATURES[@]}" "${CARGO_FLAGS[@]}" \
             -Z build-std=core,alloc \
             -Z build-std-features=compiler-builtins-mem
