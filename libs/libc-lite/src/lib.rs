@@ -1179,6 +1179,52 @@ pub const PROT_READ: u32 = 1;
 pub const PROT_WRITE: u32 = 2;
 pub const PROT_EXEC: u32 = 4;
 
+pub const MAP_PRIVATE: u32 = 0x02;
+pub const MAP_FIXED: u32 = 0x10;
+pub const MAP_ANONYMOUS: u32 = 0x20;
+
+/// Map `len` bytes of anonymous memory (rounded up to whole pages) with
+/// the access `prot` allows. `addr` is a hint, or the exact address with
+/// MAP_FIXED. Returns the address of the mapping.
+pub fn mmap(
+    addr: u64,
+    len: usize,
+    prot: u32,
+    flags: u32,
+    fd: i32,
+    offset: u64,
+) -> Result<u64, i64> {
+    // SAFETY: syscall ABI; scalar args only - the kernel validates them.
+    let ret = unsafe {
+        syscall6(
+            SYS_MMAP,
+            addr,
+            len as u64,
+            prot as u64,
+            flags as u64,
+            fd as u64,
+            offset,
+        )
+    };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as u64)
+    }
+}
+
+/// Remove the mapping(s) covering `[addr, addr + len)`; every page of the
+/// range must belong to a mapping of this process.
+pub fn munmap(addr: u64, len: usize) -> Result<(), i64> {
+    // SAFETY: syscall ABI; scalar args only - the kernel validates them.
+    let ret = unsafe { syscall2(SYS_MUNMAP, addr, len as u64) };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
+}
+
 // ─────────────────────────────────────────────────
 // Networking helpers (Phase D MVP)
 // ─────────────────────────────────────────────────
