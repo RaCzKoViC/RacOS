@@ -72,6 +72,10 @@ the boot log. Exit 1 is a verdict failure or a missing device (named in the
 output); exit 2 means the harness could not run (no QEMU/OVMF, ESP not
 staged). The serial log is `racos-racostest.log`.
 
+`python3 scripts/guest-suite.py --keep-disk --boot-only` boots the disk the
+last run left behind and stops after the prompt: its exit status is the
+mount-time fsck verdict on everything that run did to the filesystem.
+
 `python3 scripts/guest-suite.py --self-test` grades fixture logs without
 QEMU — including the log shape the previous marker-only CI check accepted
 — and `--no-disk --no-net` reproduces the old CI machine, which the driver
