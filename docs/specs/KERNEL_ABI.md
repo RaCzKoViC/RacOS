@@ -95,8 +95,9 @@ The RaCore kernel ABI defines the binary interface between user space processes 
 
 | Nr | Name | Args | Return | Stability |
 |----|------|------|--------|-----------|
-| 6 | sys_mmap | addr: u64, length: usize, prot: u32, flags: u32, fd: i32, offset: u64 | address or error | Stable |
-| 7 | sys_munmap | addr: u64, length: usize | 0 or error | Stable |
+| 6 | sys_mmap | addr: u64, length: usize, prot: u32, flags: u32, fd: i32, offset: u64 | address or error. Anonymous private mappings only (file-backed: ENOSYS). `prot` is enforced per page (PROT_NONE: present but inaccessible). `addr` is a hint, used when the range is free; with MAP_FIXED it is required: EINVAL if unaligned or outside [4 GiB, 0x7FFF_FFFF_FFFF], EEXIST over a live mapping (never replaced silently). Without a usable hint the mapping is placed at the highest free gap below 0x7FF0_0000_0000; unmapped ranges are reused. | Stable |
+| 7 | sys_munmap | addr: u64, length: usize | 0 or error. `addr` page-aligned, `length` > 0; every page must belong to a mapping of the caller (EINVAL otherwise, including kernel pages and never-mapped ranges); a range inside a mapping splits it. | Stable |
+| 68 | sys_mprotect | addr: u64, length: usize, prot: u32 | 0 or error. Same range rules as munmap with ENOMEM for pages that are not the caller's; each page's entry is rewritten and flushed. Until 2026-09 this returned 0 without acting. | Stable |
 
 ### 5.4 IPC
 
@@ -163,6 +164,11 @@ life of a boot and is not a persistent device number.
 | MAP_PRIVATE | 0x02 |
 | MAP_ANONYMOUS | 0x20 |
 | MAP_FIXED | 0x10 |
+
+The kernel keeps a per-process record of every mapping (`kernel/src/mm/vm.rs`:
+the ELF segments and the stack from exec, and each anonymous mapping),
+which is what `munmap` and `mprotect` check a range against. A fork gets
+its own copy of the record; CLONE_VM threads share it.
 
 ## 7. Pointer Validation
 
