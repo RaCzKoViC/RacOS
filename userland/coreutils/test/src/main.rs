@@ -15,6 +15,8 @@ const O_RDWR: u32 = 0x0002;
 const O_CREAT: u32 = 0x0040;
 const O_TRUNC: u32 = 0x0200;
 const SIGTERM: i32 = 15;
+const SIGKILL: i32 = 9;
+const ESRCH: i64 = -3;
 const SIGINT: i32 = 2;
 const SIGUSR1: i32 = 10;
 const TIOCGWINSZ: u32 = 0x5413;
@@ -146,6 +148,7 @@ pub extern "C" fn main(_argc: i32, argv: *const *const u8) -> i32 {
     test_tty_output_processing();
     test_chdir_getcwd();
     test_security_syscalls();
+    test_authorization();
 
     println("");
     let (pass, fail) = unsafe { (PASS, FAIL) };
@@ -3169,6 +3172,459 @@ fn test_chdir_getcwd() {
     }
 
     let _ = chdir(b"/\0");
+}
+
+/// Bits the unprivileged child reports through its exit status. Each one
+/// is a thing the kernel promised and, before this group, did not do.
+const AUTHZ_UID: i32 = 1 << 0;
+const AUTHZ_SETUID_ROOT: i32 = 1 << 1;
+const AUTHZ_CHOWN: i32 = 1 << 2;
+const AUTHZ_CHMOD: i32 = 1 << 3;
+const AUTHZ_READ_SECRET: i32 = 1 << 4;
+const AUTHZ_SEARCH_LOCKED: i32 = 1 << 5;
+const AUTHZ_WRITE_LOCKED: i32 = 1 << 6;
+const AUTHZ_EXEC_NOX: i32 = 1 << 7;
+const AUTHZ_EXEC_OK: i32 = 1 << 8;
+const AUTHZ_EXEC_DIR: i32 = 1 << 9;
+const AUTHZ_EXEC_PARSE: i32 = 1 << 15;
+const AUTHZ_KILL_ROOT: i32 = 1 << 10;
+const AUTHZ_KILL_PROBE: i32 = 1 << 11;
+const AUTHZ_KILL_ESRCH: i32 = 1 << 12;
+const AUTHZ_CHILD_INHERITS: i32 = 1 << 13;
+const AUTHZ_KILL_OWN: i32 = 1 << 14;
+
+const AUTHZ_DIR: &[u8] = b"/tmp/t43\0";
+const AUTHZ_SECRET: &[u8] = b"/tmp/t43/secret\0";
+const AUTHZ_LOCKED: &[u8] = b"/tmp/t43/locked\0";
+const AUTHZ_INNER: &[u8] = b"/tmp/t43/locked/inner\0";
+const AUTHZ_INNER_NEW: &[u8] = b"/tmp/t43/locked/made-by-user\0";
+const AUTHZ_LOCKED_SUBDIR: &[u8] = b"/tmp/t43/locked/subdir\0";
+const AUTHZ_PROG644: &[u8] = b"/tmp/t43/prog644\0";
+const AUTHZ_PROG755: &[u8] = b"/tmp/t43/prog755\0";
+/// A real executable every user may run: /bin is 0555 in the initramfs.
+const AUTHZ_REAL_PROG: &[u8] = b"/bin/true\0";
+const EACCES: i64 = -13;
+const ENOEXEC: i64 = -8;
+
+/// Everything the kernel says it enforces, run as a user who is not root.
+///
+/// Until 2026-09 none of it held, and one defect hid the rest: `setuid`
+/// changed uid/euid but left the capability masks at u64::MAX, and
+/// `has_cap` reads the mask - so a process that "dropped" to uid 1000 kept
+/// CAP_DAC_OVERRIDE, CAP_CHOWN and CAP_SETUID and could walk straight back
+/// to root. Underneath that sat three more: exec and spawn loaded an ELF
+/// without an Execute check, kill delivered a signal without looking at
+/// who owned the target, and the path walker never asked for search
+/// permission on the directories it walked through.
+///
+/// Returns a bitmask of failures; 0 means every promise held.
+fn authz_child() -> i32 {
+    let mut fail = 0i32;
+
+    if setuid(1000).is_err() {
+        return -1; // reported by the parent as "the child could not drop"
+    }
+    if getuid() != 1000 || geteuid() != 1000 {
+        fail |= AUTHZ_UID;
+    }
+
+    // Capabilities went with the UID: there is no way back to root.
+    if setuid(0).is_ok() {
+        fail |= AUTHZ_SETUID_ROOT;
+    }
+    // CAP_CHOWN and CAP_FOWNER went too.
+    if chown(AUTHZ_SECRET, 1000, 1000).is_ok() {
+        fail |= AUTHZ_CHOWN;
+    }
+    if chmod(AUTHZ_SECRET, 0o666).is_ok() {
+        fail |= AUTHZ_CHMOD;
+    }
+
+    // CAP_DAC_OVERRIDE went too: 0600 owned by root stays root's.
+    if let Ok(fd) = open(AUTHZ_SECRET, 0, 0) {
+        let _ = close(fd);
+        fail |= AUTHZ_READ_SECRET;
+    }
+
+    // Search permission: locked/ is 0700 owned by root, so nothing inside
+    // it can be reached, whatever the mode of the file itself (inner is
+    // 0666). Three ways in, all of which must be refused.
+    if let Ok(fd) = open(AUTHZ_INNER, 0, 0) {
+        let _ = close(fd);
+        fail |= AUTHZ_SEARCH_LOCKED;
+    }
+    let mut raw = [0u8; 80];
+    if stat(AUTHZ_INNER, &mut raw).is_ok() {
+        fail |= AUTHZ_SEARCH_LOCKED;
+    }
+    if access(AUTHZ_INNER, R_OK).is_ok() {
+        fail |= AUTHZ_SEARCH_LOCKED;
+    }
+
+    // Nor can anything be created, made or removed through that directory.
+    if let Ok(fd) = open(AUTHZ_INNER_NEW, O_CREAT | O_RDWR, 0o666) {
+        let _ = close(fd);
+        fail |= AUTHZ_WRITE_LOCKED;
+    }
+    if mkdir(AUTHZ_LOCKED_SUBDIR, 0o777).is_ok() {
+        fail |= AUTHZ_WRITE_LOCKED;
+    }
+    if unlink(AUTHZ_INNER).is_ok() {
+        fail |= AUTHZ_WRITE_LOCKED;
+    }
+
+    // Execute permission is a permission, not a formality. The two
+    // fixtures hold the same bytes and differ only in mode, so the errno
+    // says which rule answered: EACCES means the permission was refused
+    // before anything was read, ENOEXEC means it was granted and the ELF
+    // parser had its turn.
+    let arg0 = b"prog\0";
+    let argv: [*const u8; 2] = [arg0.as_ptr(), core::ptr::null()];
+    if spawn_reap(AUTHZ_PROG644, &argv) != Err(EACCES) {
+        fail |= AUTHZ_EXEC_NOX;
+    }
+    if spawn_reap(AUTHZ_PROG755, &argv) != Err(ENOEXEC) {
+        fail |= AUTHZ_EXEC_PARSE;
+    }
+    // A directory is not an executable, whatever its mode says.
+    if spawn_reap(AUTHZ_DIR, &argv) != Err(EACCES) {
+        fail |= AUTHZ_EXEC_DIR;
+    }
+    // And a real program still runs, for this user as for any other.
+    match spawn_args(AUTHZ_REAL_PROG, &argv) {
+        Ok(pid) => {
+            let mut st: i32 = -1;
+            if waitpid(pid, &mut st, 0).is_err() || st != 0 {
+                fail |= AUTHZ_EXEC_OK;
+            }
+        }
+        Err(_) => fail |= AUTHZ_EXEC_OK,
+    }
+
+    // Signals: the sleeper belongs to root.
+    let sleeper = authz_sleeper_pid();
+    if sleeper > 0 {
+        if kill(sleeper, SIGKILL).is_ok() {
+            fail |= AUTHZ_KILL_ROOT;
+        }
+        // Signal 0 is the permission probe, and it is refused the same way.
+        if kill(sleeper, 0).is_ok() {
+            fail |= AUTHZ_KILL_PROBE;
+        }
+    }
+    // A PID that does not exist is ESRCH, not EPERM: no probing for free.
+    if kill(99999, 0) != Err(ESRCH) {
+        fail |= AUTHZ_KILL_ESRCH;
+    }
+
+    // A child of this process is this user's: it inherits the dropped
+    // credentials, cannot climb back either, and may be signalled.
+    //
+    // It parks on a pipe read with nothing to read, which blocks it in the
+    // kernel until the signal arrives. A timed wait would do as well if
+    // /bin/sleep's busy-wait on clock_gettime did not wedge the guest
+    // (pre-existing, recorded in ROADMAP section 0), and a blocked read is
+    // the more honest wait anyway: no deadline to race against.
+    let mut wait_pipe = [0i32; 2];
+    if pipe(&mut wait_pipe).is_err() {
+        return fail | AUTHZ_CHILD_INHERITS;
+    }
+    match fork() {
+        Ok(0) => {
+            let mut bad = 0i32;
+            if getuid() != 1000 || geteuid() != 1000 {
+                bad |= 1;
+            }
+            if setuid(0).is_ok() {
+                bad |= 2;
+            }
+            if bad != 0 {
+                exit(bad);
+            }
+            let mut one = [0u8; 1];
+            let _ = read(wait_pipe[0], &mut one);
+            // Only reached if the parent gave up and released the pipe:
+            // a grandchild that survived being killed is a failure.
+            exit(9);
+        }
+        Ok(pid) => {
+            if kill(pid, SIGKILL).is_err() {
+                fail |= AUTHZ_KILL_OWN;
+            }
+            // A process killed by a signal exits with -1 here: RacOS does
+            // not encode the signal in the wait status the way POSIX does
+            // (recorded in ROADMAP section 0). So the verdict is read from
+            // what the grandchild would have reported had it lived: 1..3
+            // means it saw the wrong credentials, 9 means it ran to the end
+            // and the kill never landed.
+            let mut st: i32 = -1;
+            match waitpid(pid, &mut st, 0) {
+                Ok(_) if st >= 1 && st <= 3 => fail |= AUTHZ_CHILD_INHERITS,
+                Ok(_) if st == 9 => fail |= AUTHZ_KILL_OWN,
+                Ok(_) => {}
+                Err(_) => fail |= AUTHZ_KILL_OWN,
+            }
+        }
+        Err(_) => fail |= AUTHZ_CHILD_INHERITS,
+    }
+    let _ = close(wait_pipe[0]);
+    let _ = close(wait_pipe[1]);
+
+    fail
+}
+
+/// PID of the root-owned target the parent started, read from the file it
+/// wrote. 0 when it could not be read - the parent checks that separately.
+fn authz_sleeper_pid() -> i32 {
+    let fd = match open(b"/tmp/t43-sleeper\0", 0, 0) {
+        Ok(fd) => fd,
+        Err(_) => return 0,
+    };
+    let mut buf = [0u8; 16];
+    let n = read(fd, &mut buf).unwrap_or(0);
+    let _ = close(fd);
+    let mut pid = 0i32;
+    for &b in &buf[..n] {
+        if b.is_ascii_digit() {
+            pid = pid * 10 + (b - b'0') as i32;
+        } else {
+            break;
+        }
+    }
+    pid
+}
+
+/// Write `pid` to /tmp/t43-sleeper so the unprivileged child can find the
+/// root-owned process it is meant to fail to signal.
+fn authz_publish_sleeper(pid: i32) -> bool {
+    let mut buf = [0u8; 16];
+    let n = write_u32_into_buf(pid as u32, &mut buf);
+    match open(b"/tmp/t43-sleeper\0", O_CREAT | O_RDWR | O_TRUNC, 0o644) {
+        Ok(fd) => {
+            let ok = write_all(fd, &buf[..n]).is_ok();
+            let _ = close(fd);
+            ok
+        }
+        Err(_) => false,
+    }
+}
+
+fn write_u32_into_buf(mut v: u32, out: &mut [u8]) -> usize {
+    let mut tmp = [0u8; 10];
+    let mut n = 0;
+    if v == 0 {
+        out[0] = b'0';
+        return 1;
+    }
+    while v > 0 {
+        tmp[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+    }
+    for i in 0..n {
+        out[i] = tmp[n - 1 - i];
+    }
+    n
+}
+
+/// exec, signals and path lookup must enforce the permissions the kernel
+/// advertises, and setuid must take the capabilities with it.
+/// See `authz_child` for what an unprivileged process asserts.
+fn test_authorization() {
+    println("\n[test] permissions: exec, signals, path search, capability drop");
+
+    // Root lays out a small tree: a private file, a directory nobody may
+    // walk into holding a world-readable file, and two copies of a real
+    // program - one executable, one not.
+    let _ = mkdir(AUTHZ_DIR, 0o755);
+    let _ = mkdir(AUTHZ_LOCKED, 0o700);
+    // The two "programs" hold the same bytes and differ only in mode; what
+    // they are matters less than which rule refuses them first. Copying a
+    // real binary here is not an option: a coreutil is ~2.5 MB and tmpfs
+    // keeps file data in one kernel Vec, so the copy asks the kernel heap
+    // for 4 MiB and panics it.
+    let setup = authz_write(AUTHZ_SECRET, b"root-only\n", 0o600)
+        && authz_write(AUTHZ_INNER, b"reachable only by root\n", 0o666)
+        && authz_write(AUTHZ_PROG644, b"not-an-elf\n", 0o644)
+        && authz_write(AUTHZ_PROG755, b"not-an-elf\n", 0o755);
+    check!("root sets up the permission fixture", setup);
+    if !setup {
+        return;
+    }
+
+    // A root-owned process for the unprivileged child to fail to signal.
+    // A fork of this test, not init and not a kernel task: if a red run
+    // does kill it, the suite loses a process it owns and nothing else.
+    // It parks on a pipe read - blocked in the kernel, killable, and with
+    // no deadline to race - and exits when this test releases it.
+    let mut hold = [0i32; 2];
+    if pipe(&mut hold).is_err() {
+        check!("pipe for the root-owned target", false);
+        return;
+    }
+    let arg0 = b"prog\0";
+    let sleeper = match fork() {
+        Ok(0) => {
+            let mut one = [0u8; 1];
+            let _ = read(hold[0], &mut one);
+            exit(0);
+        }
+        Ok(pid) => pid,
+        Err(_) => {
+            check!("fork the root-owned target", false);
+            return;
+        }
+    };
+    check!("fork the root-owned target", true);
+    check!("publish the target's pid", authz_publish_sleeper(sleeper));
+
+    // Everything an unprivileged user must not be able to do.
+    let status = match fork() {
+        Ok(0) => exit(authz_child()),
+        Ok(pid) => {
+            let mut st: i32 = -1;
+            if waitpid(pid, &mut st, 0).is_err() {
+                check!("waitpid on the unprivileged child", false);
+                return;
+            }
+            st
+        }
+        Err(_) => {
+            check!("fork the unprivileged child", false);
+            return;
+        }
+    };
+
+    if status < 0 || status >= (1 << 15) {
+        check!("the child dropped to uid 1000 and reported", false);
+        return;
+    }
+
+    check!(
+        "setuid(1000) leaves uid and euid at 1000",
+        status & AUTHZ_UID == 0
+    );
+    check!(
+        "setuid(0) after dropping is EPERM (capabilities went with the uid)",
+        status & AUTHZ_SETUID_ROOT == 0
+    );
+    check!("chown of root's file is EPERM", status & AUTHZ_CHOWN == 0);
+    check!("chmod of root's file is EPERM", status & AUTHZ_CHMOD == 0);
+    check!(
+        "a 0600 file owned by root cannot be opened",
+        status & AUTHZ_READ_SECRET == 0
+    );
+    check!(
+        "nothing inside a 0700 directory can be reached (open, stat, access)",
+        status & AUTHZ_SEARCH_LOCKED == 0
+    );
+    check!(
+        "nothing can be created, made or unlinked through it",
+        status & AUTHZ_WRITE_LOCKED == 0
+    );
+    check!(
+        "a file without an execute bit is refused with EACCES",
+        status & AUTHZ_EXEC_NOX == 0
+    );
+    check!(
+        "the same file with 0755 gets past the permission check (ENOEXEC)",
+        status & AUTHZ_EXEC_PARSE == 0
+    );
+    check!("a directory does not run", status & AUTHZ_EXEC_DIR == 0);
+    check!("a real program still runs", status & AUTHZ_EXEC_OK == 0);
+    check!(
+        "signalling a root-owned process is EPERM",
+        status & AUTHZ_KILL_ROOT == 0
+    );
+    check!(
+        "signal 0 to it is EPERM, not a free existence probe",
+        status & AUTHZ_KILL_PROBE == 0
+    );
+    check!(
+        "signal 0 to a pid that does not exist is ESRCH",
+        status & AUTHZ_KILL_ESRCH == 0
+    );
+    check!(
+        "a child inherits the dropped credentials and cannot climb back",
+        status & AUTHZ_CHILD_INHERITS == 0
+    );
+    check!(
+        "a process may signal its own child",
+        status & AUTHZ_KILL_OWN == 0
+    );
+
+    // The target survived every attempt on it: released, it exits 0 on its
+    // own. A status of 137 would mean the unprivileged child killed it.
+    let _ = write(hold[1], b"x");
+    let mut sleeper_status: i32 = -1;
+    let waited = waitpid(sleeper, &mut sleeper_status, 0);
+    check!(
+        "the root-owned target was never killed",
+        waited.unwrap_or(-1) == sleeper && sleeper_status == 0
+    );
+    let _ = close(hold[0]);
+    let _ = close(hold[1]);
+
+    // Root still reaches everything it owns, and the execute rule is not a
+    // root exemption: a file with no x bit does not run for root either.
+    let root_secret = open(AUTHZ_SECRET, 0, 0);
+    check!("root opens the 0600 file", root_secret.is_ok());
+    if let Ok(fd) = root_secret {
+        let _ = close(fd);
+    }
+    let root_inner = open(AUTHZ_INNER, 0, 0);
+    check!("root walks into the 0700 directory", root_inner.is_ok());
+    if let Ok(fd) = root_inner {
+        let _ = close(fd);
+    }
+    let root_argv: [*const u8; 2] = [arg0.as_ptr(), core::ptr::null()];
+    check!(
+        "even root does not run a file with no execute bit",
+        spawn_reap(AUTHZ_PROG644, &root_argv) == Err(EACCES)
+    );
+    check!(
+        "for root too, 0755 gets past the permission check",
+        spawn_reap(AUTHZ_PROG755, &root_argv) == Err(ENOEXEC)
+    );
+    match spawn_args(AUTHZ_REAL_PROG, &root_argv) {
+        Ok(pid) => {
+            let mut st: i32 = -1;
+            let ok = waitpid(pid, &mut st, 0).is_ok() && st == 0;
+            check!("root runs a real program", ok);
+        }
+        Err(_) => check!("root runs a real program", false),
+    }
+
+    let _ = unlink(AUTHZ_SECRET);
+    let _ = unlink(AUTHZ_INNER);
+    let _ = unlink(AUTHZ_PROG644);
+    let _ = unlink(AUTHZ_PROG755);
+    let _ = unlink(b"/tmp/t43-sleeper\0");
+
+    println("T43-AUTHZ-OK");
+}
+
+/// Create `path` with `content` and set its mode. Root-owned by default.
+fn authz_write(path: &[u8], content: &[u8], mode: u32) -> bool {
+    match open(path, O_CREAT | O_RDWR | O_TRUNC, 0o666) {
+        Ok(fd) => {
+            let ok = write_all(fd, content).is_ok();
+            let _ = close(fd);
+            ok && chmod(path, mode).is_ok()
+        }
+        Err(_) => false,
+    }
+}
+
+/// Spawn `path`, reap it if it started, and report what spawn answered.
+/// The errno is the point: which rule refused, not merely that one did.
+fn spawn_reap(path: &[u8], argv: &[*const u8]) -> Result<i32, i64> {
+    let r = spawn_args(path, argv);
+    if let Ok(pid) = r {
+        let mut st: i32 = -1;
+        let _ = waitpid(pid, &mut st, 0);
+    }
+    r
 }
 
 fn test_security_syscalls() {

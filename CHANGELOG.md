@@ -11,6 +11,55 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Fixed — exec, signals and path lookup authorize before they act
+
+- **Four promises the kernel made and did not keep**, one of which hid
+  the other three. `setuid` changed uid/euid but left
+  `cap_permitted`/`cap_effective`/`cap_inheritable` at `u64::MAX`, and
+  `has_cap` answers from the mask — so a process that "dropped
+  privileges" kept `CAP_DAC_OVERRIDE`, `CAP_CHOWN` and `CAP_SETUID`, and
+  `setuid(1000)` followed by `setuid(0)` was a round trip. Underneath
+  it: `exec`/`spawn` loaded an ELF with no Execute check; `kill`
+  delivered a signal without looking at who owned the target, so any
+  process could kill init; and the path walker never asked for search
+  permission, so a 0666 file inside a 0700 directory was readable by
+  anyone who knew its name. Review item E (P1).
+- **`capability::drop_for_uid_change`** writes the policy out: leaving
+  root clears the permitted set (and with it anything regainable);
+  dropping the effective UID from root clears the effective set; raising
+  it back restores effective from permitted. Linux calls this
+  `cap_emulate_setxuid` — the saved UID, which RaCore does not keep, is
+  the only part missing. `CAP_KILL` joins the set.
+- **`dac::can_exec`**: a regular file with an execute bit the caller can
+  use. `CAP_DAC_OVERRIDE` does not make a file with no `x` bit
+  executable — the rule that makes `chmod -x` mean something to root too.
+- **`security::process::can_signal`**, behind
+  `scheduler::send_signal_checked` / `may_signal`: the lookup, the check
+  and the delivery share one interrupts-off window, so a target cannot be
+  reaped and its PID reused between deciding and acting. `kill(pid, 0)`
+  now answers the permission question alone — 0, `ESRCH` or `EPERM` —
+  instead of `EINVAL`; SIGTERM stands in for the probe, never SIGCONT
+  (the one signal with a session-wide exception).
+- **`mount::lookup_path_as`** walks a path as a given caller sees it,
+  asking each directory for search permission; `lookup_path` stays the
+  kernel's own unchecked lookup. Syscalls use `user_lookup`, and
+  `require_search_to_parent` covers the create/remove paths that reach a
+  parent through `split_parent_leaf`. **Not checked, because it cannot
+  be: the components above a mount point** — `resolve()` jumps to the
+  deepest mount and a mount point need not exist below (`/tmp`, `/dev`,
+  `/proc`, `/mnt`, `/var`, `/fat` have no directory in the initramfs).
+- **Regression test `T43-AUTHZ-OK`, 25 assertions**: root lays out a
+  0600 file, a 0700 directory holding a 0666 file and two fixtures that
+  differ only in mode, then a forked child drops to uid 1000 and reports
+  every refusal in its exit status. Red 296/14, green 310/0.
+- **Cost, measured:** the in-guest suite goes from ~170 s to ~247 s
+  locally. The per-directory metadata read is not it (a caller with
+  `CAP_DAC_OVERRIDE` settles the walk before it starts) and neither is
+  the credentials read (now a plain read, like `current_pid`); stubbing
+  the two helpers out recovers the time even in groups that make no path
+  syscalls, which points at code layout under TCG rather than work done.
+  Recorded in ROADMAP §0, not yet explained.
+
 ### Fixed — exec installs the new image's mapping record
 
 - **A process that `exec`'d kept the mapping record of the image it had

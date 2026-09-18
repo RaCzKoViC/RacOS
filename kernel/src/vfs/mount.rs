@@ -169,8 +169,43 @@ impl MountTable {
         })
     }
 
-    /// Look up a path, walking through mount points and directories.
+    /// Look up a path, walking through mount points and directories,
+    /// without asking whether the caller may traverse them. This is the
+    /// kernel's own lookup: boot, /dev/console, fsck. Syscalls on behalf
+    /// of a process use `lookup_path_as`.
     pub fn lookup_path(&self, path: &str) -> VfsResult<(Arc<dyn Filesystem>, InodeNum)> {
+        self.walk(path, None)
+    }
+
+    /// Look up a path as `creds` would see it: every directory walked
+    /// through must grant that caller search (execute) permission.
+    ///
+    /// Without this a file's own mode was the only thing protecting it -
+    /// a 0666 file inside a 0700 directory was readable by anyone who
+    /// knew its name, which is exactly what a private directory is meant
+    /// to prevent.
+    ///
+    /// What is checked: the root of the filesystem the path resolves into,
+    /// and each directory below it on the way to the last component. What
+    /// is not, and cannot be: the components ABOVE a mount point. The
+    /// resolver jumps straight to the deepest mount, and a mount point
+    /// need not exist in the filesystem underneath - /tmp, /dev, /proc,
+    /// /mnt, /var and /fat have no directory of their own in the
+    /// initramfs. Making mount points real directories is its own change;
+    /// until then a path's prefix above a mount is not a barrier.
+    pub fn lookup_path_as(
+        &self,
+        path: &str,
+        creds: &crate::task::task::Credentials,
+    ) -> VfsResult<(Arc<dyn Filesystem>, InodeNum)> {
+        self.walk(path, Some(creds))
+    }
+
+    fn walk(
+        &self,
+        path: &str,
+        creds: Option<&crate::task::task::Credentials>,
+    ) -> VfsResult<(Arc<dyn Filesystem>, InodeNum)> {
         let (mount, remainder) = self.resolve(path).ok_or(VfsError::NotFound)?;
         let fs = &mount.fs;
 
@@ -181,18 +216,91 @@ impl MountTable {
             return Ok((fs.clone(), meta.ino));
         }
 
-        // Walk the path components
+        // Walk the path components. Every directory entered on the way -
+        // the filesystem root included - has to grant search permission;
+        // the last component is the target and is judged by the caller.
+        //
+        // A caller holding CAP_DAC_OVERRIDE passes every directory whatever
+        // its mode, so the answer is settled before the walk starts and the
+        // metadata read per component is skipped: on a disk-backed
+        // filesystem that read is the expensive part, and today every
+        // process still runs as root.
+        let checking = creds.filter(|c| {
+            !crate::security::capability::has_cap(c, crate::security::capability::CAP_DAC_OVERRIDE)
+        });
         let mut current_inode = fs.root_inode();
-        for component in remainder.split('/') {
-            if component.is_empty() || component == "." {
-                continue;
+        let mut rest = remainder.split('/').filter(|c| !c.is_empty() && *c != ".");
+        let mut pending = rest.next();
+        while let Some(component) = pending {
+            let next = rest.next();
+            if let Some(creds) = checking {
+                let dir_meta = current_inode.metadata()?;
+                if !crate::security::dac::can_access(
+                    creds,
+                    &dir_meta,
+                    crate::security::dac::Access::Execute,
+                ) {
+                    return Err(VfsError::PermissionDenied);
+                }
             }
             let ino = current_inode.lookup(component)?;
             current_inode = fs.get_inode(ino)?;
+            pending = next;
         }
 
         let meta = current_inode.metadata()?;
         Ok((fs.clone(), meta.ino))
+    }
+
+    /// Search permission for every directory of `path` up to and including
+    /// the one that will hold its last component - the check a creating or
+    /// removing syscall needs before it reaches for the parent directly
+    /// (`split_parent_leaf` walks the filesystem on its own).
+    ///
+    /// A path whose parent does not exist is left to the caller's own
+    /// error handling: this answers about permission, not existence.
+    pub fn require_search_to_parent(
+        &self,
+        path: &str,
+        creds: &crate::task::task::Credentials,
+    ) -> VfsResult<()> {
+        // As in `walk`: CAP_DAC_OVERRIDE settles it without reading a
+        // single directory's metadata.
+        if crate::security::capability::has_cap(
+            creds,
+            crate::security::capability::CAP_DAC_OVERRIDE,
+        ) {
+            return Ok(());
+        }
+        let (mount, remainder) = self.resolve(path).ok_or(VfsError::NotFound)?;
+        let fs = &mount.fs;
+        let mut current_inode = fs.root_inode();
+        let components: alloc::vec::Vec<&str> = remainder
+            .split('/')
+            .filter(|c| !c.is_empty() && *c != ".")
+            .collect();
+        let parents = components.len().saturating_sub(1);
+        for component in components.iter().take(parents) {
+            let dir_meta = current_inode.metadata()?;
+            if !crate::security::dac::can_access(
+                creds,
+                &dir_meta,
+                crate::security::dac::Access::Execute,
+            ) {
+                return Err(VfsError::PermissionDenied);
+            }
+            let ino = current_inode.lookup(component)?;
+            current_inode = fs.get_inode(ino)?;
+        }
+        let dir_meta = current_inode.metadata()?;
+        if !crate::security::dac::can_access(
+            creds,
+            &dir_meta,
+            crate::security::dac::Access::Execute,
+        ) {
+            return Err(VfsError::PermissionDenied);
+        }
+        Ok(())
     }
 }
 
