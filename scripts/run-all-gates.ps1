@@ -9,7 +9,8 @@
 #   5 unsafe-safety    every unsafe block has a SAFETY note
 #   6 kernel-smoke     in-kernel assertions via isa-debug-exit, AHCI + SMP
 #   7 boot-smoke       two boots, on-disk counter survives the reboot
-#   8 racos-test       130 assertions driven through racsh in a live guest
+#   8 racos-test       the in-guest suite on the canonical machine (guest-suite.py,
+#                      the same driver CI runs): AHCI + VirtIO-net, full verdict
 #   9 usb-boot         boot from a real MBR+FAT32 image over USB (3.4)
 #  10 milestone-v03    two boots: history + installed rpkg survive (3.5)
 #  11 graphics         framebuffer claimed + screendump pixel diversity (4.4)
@@ -172,11 +173,16 @@ if ($SkipQemu) {
     Record "boot-smoke" ($b -match "BOOT-SMOKE PASS") $(if ($bDetail) { "$bDetail, counter survived reboot" } else { "" })
 
     # ---- 8. racos-test --------------------------------------------------
+    # test-racos-test.ps1 is a wrapper around scripts/guest-suite.py, the one
+    # driver shared with the CI job: same devices, readiness instead of
+    # sleeps, and the verdict is the suite's own tally plus its exit status.
+    # The machine is -smp 2 by definition; the -Smp of this script is for the
+    # AP bring-up gates above and is deliberately not forwarded here.
     Write-Host ""
-    Write-Host "[8/11] racos-test (in-guest suite)" -ForegroundColor Cyan
+    Write-Host "[8/11] racos-test (in-guest suite via guest-suite.py)" -ForegroundColor Cyan
     Stage-PlainKernel
     $t = powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test-racos-test.ps1") `
-            -BootWaitMax 90 -TestBudget 200 2>&1 | Out-String
+            -BootWaitMax 180 -TestBudget 600 2>&1 | Out-String
     $tally = [regex]::Match($t, 'racos-test tally: (\d+) passed, (\d+) failed')
     $mk    = [regex]::Match($t, 'markers OK=(\d+)\s+FAIL=(\d+)')
     if ($t -match "KERNEL PANIC") { Write-Host "  (kernel panic observed in this run)" -ForegroundColor Red }
