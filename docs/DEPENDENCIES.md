@@ -89,7 +89,9 @@ These are deps of `cargo test` on the host, not anything that ships:
 - `nightly-2026-05-21` pinned by `rust-toolchain.toml`
 - `nasm` (assembler for the AP trampoline)
 - `qemu-system-x86_64` + `OVMF` (CI smoke targets)
-- `mtools` + `python3` (ESP image staging on CI)
+- `mtools` + `python3` (ESP image staging on CI; `python3` also runs
+  `scripts/guest-suite.py`, the in-guest suite driver shared by the local
+  gate and the `guest-suite` CI job)
 
 None of these are linked into a shipped artifact.
 

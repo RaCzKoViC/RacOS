@@ -44,7 +44,7 @@ RacOS to w pełni autorski system operacyjny budowany od zera — bez kopiowania
 - **C kompatybilność**: warstwa ABI (`libc-lite` C ABI surface) jest jedynym miejscem gdzie C może być używane — głównie do testów ABI i przyszłych portów userland. Kernel i bootloader **nie są** pisane w C ani C++.
 - **Toolchain**: Rust nightly **przypięta do daty** (`nightly-2026-05-21`) przez `rust-toolchain.toml`. Bumpować dopiero po zielonym przebiegu `cargo fmt --check`, `cargo clippy`, `cargo check`, ci-smoke i interactive QEMU boot na nowej dacie.
 - **Build**: cargo + `-Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem`, link via rust-lld, PowerShell scripts do staging ESP i initramfs.
-- **CI**: GitHub Actions — lint (fmt + clippy advisory) → build (kernel + bootloader + userland) → unit/integration tests (host) → kernel smoke przez `isa-debug-exit` → boot smoke (UEFI) → interactive shell smoke przez TCP-serial.
+- **CI**: GitHub Actions — lint (fmt + clippy advisory) → build (kernel + bootloader + userland) → unit/integration tests (host) → kernel smoke przez `isa-debug-exit` → boot smoke (UEFI, dwa booty) → guest suite: `racos-test` w żywym goście na kanonicznej maszynie (AHCI + VirtIO-net), zaliczany wyłącznie po pełnym werdykcie suite'u (`N passed, 0 failed` + kod wyjścia 0). Ten sam driver (`scripts/guest-suite.py`) uruchamia bramkę lokalnie.
 
 ## Struktura repozytorium
 
