@@ -11,6 +11,52 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Changed — CI: the guest suite boots the canonical machine and is graded on its verdict
+
+- **One driver for the in-guest suite, on both platforms:
+  `scripts/guest-suite.py`.** The `interactive-smoke` CI job and the local
+  `test-racos-test.ps1` gate had drifted apart: the local gate booted with an
+  AHCI disk and a VirtIO-net NIC, the CI job booted with neither, slept a
+  fixed 70 s and grepped nine markers. Run 33229859931 on `main` shows the
+  consequence — every `/mnt` and `ping` assertion failed, the suite was cut
+  off in group 22 of 39, and the job went red on a tree that passes 176/0
+  locally. The machine definition, the readiness logic and the grading now
+  live in one Python file (stdlib only); the CI job runs it and the Windows
+  gate is a wrapper around it. `-boot menu=on`, believed to be needed on the
+  Windows host, turned out not to be: the machine is identical on both.
+
+- **Readiness instead of sleeps.** The driver waits for the racsh banner
+  and prompt (one pattern over the whole log, so it does not matter how the
+  serial bytes were chunked), then for each command's prompt to return,
+  then for the suite's final line — and treats a long serial silence as a
+  hang (90 s in CI; the longest pause a healthy suite makes on the dev box
+  is 13 s, during the indirect-block `cat`, and the driver prints that
+  number every run). A healthy run returns as soon as the suite does
+  (boot 15-20 s, suite 125-136 s under TCG on the dev box); the budget is
+  an upper bound, not a wait.
+
+- **The verdict is the suite's, not the harness's.** PASS requires
+  `=== Results: N passed, 0 failed ===`, the exit status the shell saw
+  (`racos-test; echo RACOS-TEST-EXIT=$?` must print `0`), no kernel fatal
+  line, and every device the suite needs present in the boot log (`sda
+  registered`, `racfs mounted on /mnt`, `NETSTACK up`) — a missing device is
+  reported by name before the suite is even started. The nine legacy markers
+  are still reported, but they no longer decide anything.
+
+- **`--self-test` documents the hole it closes.** Fixture logs are graded
+  without QEMU: a log with all nine legacy markers and `175 passed, 1 failed`
+  is accepted by the reproduced old check and rejected by the new one; a
+  truncated run, a clean tally followed by `!!! KERNEL PANIC`, a 0-failed
+  tally with exit status 1, and a boot without the disk are all rejected.
+  `--no-disk --no-net` reproduces the old CI machine and must fail
+  (locally: exit 1 after 15 s, three devices named). The CI job runs the
+  self-test before booting.
+
+- Docs and recipes follow the code: `just guest-suite` on both platforms,
+  `docs/DEVELOPMENT_LINUX.md` shows the exact CI staging steps,
+  `README.md` / `docs/language-policy.md` / `docs/DEPENDENCIES.md` describe
+  the job as it is. `run-all-gates.ps1` gate 8 goes through the same driver.
+
 ### Added — v0.4 §4.2: the console is RacTerm, rendered from its buffer
 
 - **Each VT owns a real `racterm::Terminal`, and the screen is painted from

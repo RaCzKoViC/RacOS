@@ -164,6 +164,21 @@ smoke-disk:
 smoke-disk:
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-ci-smoke.ps1 -Disk
 
+# The in-guest racos-test suite on the canonical machine (AHCI disk +
+# VirtIO-net), graded on its own tally and exit status. This is exactly the
+# guest-suite CI job: same script, same devices. Needs a staged ESP:
+# `just build-image` (kernel with static relocations + userland + initramfs),
+# then copy target/.../racore to esp/racore.elf and bootx64.efi to
+# esp/EFI/BOOT/BOOTX64.EFI exactly as the CI job does (see ci.yml, or
+# docs/DEVELOPMENT_LINUX.md).
+[unix]
+guest-suite:
+    python3 scripts/guest-suite.py
+
+[windows]
+guest-suite:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-racos-test.ps1
+
 # Clean build artifacts
 [unix]
 clean:

@@ -161,7 +161,9 @@ follow the per-op style.
 - `cargo clippy --workspace --all-targets` — advisory.
 - Kernel `ci-smoke` feature — required (asserts VFS topology, racfs/FAT32
   round-trip, /mnt persistence, per-CPU LAPIC ticks, SMP bring-up).
-- Interactive shell smoke (TCP serial) — required.
+- Guest suite (`racos-test` driven through racsh on the canonical QEMU
+  machine: AHCI disk + VirtIO-net, `scripts/guest-suite.py`) — required.
+  Graded on the suite's own tally and exit status, not on markers.
 - Boot smoke (UEFI) — required.
 
 When a change touches any unsafe boundary, the commit message should
