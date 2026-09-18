@@ -137,16 +137,7 @@ impl WritableStore {
 }
 
 fn current_creds() -> crate::task::task::Credentials {
-    // SAFETY: cli/sti window around scheduler::with_current_task. Single-CPU
-    // MVP makes this a critical section; cli prevents the timer from
-    // re-entering the scheduler mid-read.
-    unsafe {
-        core::arch::asm!("cli", options(nomem, nostack));
-        let creds = crate::task::scheduler::with_current_task(|t| t.creds)
-            .unwrap_or(crate::task::task::Credentials::root());
-        core::arch::asm!("sti", options(nomem, nostack));
-        creds
-    }
+    crate::task::scheduler::current_creds()
 }
 
 fn current_umask() -> u32 {
@@ -204,6 +195,47 @@ fn require_dac_access(
 ) -> Result<(), SyscallError> {
     let creds = current_creds();
     if crate::security::dac::can_access(&creds, meta, access) {
+        Ok(())
+    } else {
+        Err(SyscallError::EACCES)
+    }
+}
+
+/// Resolve `path` the way the calling process sees it: every directory on
+/// the way has to grant it search permission. Every syscall that takes a
+/// path from user space goes through this; `mount_table().lookup_path`
+/// stays the kernel's own, unchecked lookup.
+fn user_lookup(
+    path: &str,
+) -> Result<(alloc::sync::Arc<dyn crate::vfs::mount::Filesystem>, u64), SyscallError> {
+    let creds = current_creds();
+    // SAFETY: mount_table is a kernel singleton initialised once at boot.
+    unsafe {
+        crate::vfs::mount::mount_table()
+            .lookup_path_as(path, &creds)
+            .map_err(map_vfs_error)
+    }
+}
+
+/// Search permission for the directories leading to `path`'s parent - the
+/// check a create/remove syscall needs before `split_parent_leaf` walks to
+/// that parent on its own.
+fn require_search_to_parent(path: &str) -> Result<(), SyscallError> {
+    let creds = current_creds();
+    // SAFETY: mount_table singleton, read-only walk.
+    unsafe {
+        crate::vfs::mount::mount_table()
+            .require_search_to_parent(path, &creds)
+            .map_err(map_vfs_error)
+    }
+}
+
+/// May the caller execute this file? A regular file with an execute bit
+/// the caller's credentials reach - checked before the image is read, so
+/// "you may not run this" never depends on whether it parses.
+fn require_exec_access(meta: &crate::vfs::inode::InodeMetadata) -> Result<(), SyscallError> {
+    let creds = current_creds();
+    if crate::security::dac::can_exec(&creds, meta) {
         Ok(())
     } else {
         Err(SyscallError::EACCES)
@@ -769,14 +801,12 @@ pub fn sys_open(path: *const u8, flags: u32, _mode: u32) -> SyscallResult {
     let path_owned = usercopy::read_user_string(path as u64, 4096)?;
     let path_str = path_owned.as_str();
 
-    // SAFETY: mount_table is a kernel singleton initialised once at boot.
-    let lookup_result = unsafe { crate::vfs::mount::mount_table().lookup_path(path_str) };
+    let lookup_result = user_lookup(path_str);
 
     let (fs, ino, created) = match lookup_result {
         Ok(pair) => (pair.0, pair.1, false),
-        Err(crate::vfs::inode::VfsError::NotFound)
-            if flags & crate::vfs::file::flags::O_CREAT != 0 =>
-        {
+        Err(SyscallError::ENOENT) if flags & crate::vfs::file::flags::O_CREAT != 0 => {
+            require_search_to_parent(path_str)?;
             // SAFETY: same singleton mount_table access.
             let mt = unsafe { crate::vfs::mount::mount_table() };
             let (mount, remainder) = mt.resolve(path_str).ok_or(SyscallError::ENOENT)?;
@@ -789,7 +819,7 @@ pub fn sys_open(path: *const u8, flags: u32, _mode: u32) -> SyscallResult {
             let new_ino = store.create_file(parent_ino, leaf).map_err(map_vfs_error)?;
             (mount.fs.clone(), new_ino, true)
         }
-        Err(e) => return Err(map_vfs_error(e)),
+        Err(e) => return Err(e),
     };
 
     let inode = fs.get_inode(ino).map_err(map_vfs_error)?;
@@ -1196,15 +1226,16 @@ pub fn sys_exec(path: *const u8, argv_ptr: u64, envp_ptr: u64) -> SyscallResult 
     let path_owned = usercopy::read_user_string(path as u64, 4096)?;
     let path_str = path_owned.as_str();
 
-    // Look up the executable in the VFS.
-    // SAFETY: mount_table is a kernel singleton initialised once at boot.
-    let (fs, ino) = unsafe {
-        crate::vfs::mount::mount_table()
-            .lookup_path(path_str)
-            .map_err(|_| SyscallError::ENOENT)?
-    };
-    let inode = fs.get_inode(ino).map_err(|_| SyscallError::ENOENT)?;
+    // Look up the executable as this process sees it, and make sure it is
+    // allowed to run it: the permission is checked before a byte is read,
+    // so a refusal says EACCES rather than whatever the parser would have
+    // said. Lookup failures keep their own errno (EACCES for a directory
+    // it may not search, ENOENT for a name that is not there) instead of
+    // being flattened into ENOENT.
+    let (fs, ino) = user_lookup(path_str)?;
+    let inode = fs.get_inode(ino).map_err(map_vfs_error)?;
     let meta = inode.metadata().map_err(|_| SyscallError::EIO)?;
+    require_exec_access(&meta)?;
     let size = meta.size as usize;
     if size == 0 {
         return Err(SyscallError::ENOEXEC);
@@ -1272,15 +1303,16 @@ pub fn sys_spawn(path: *const u8, argv_ptr: u64, envp_ptr: u64) -> SyscallResult
     let path_owned = usercopy::read_user_string(path as u64, 4096)?;
     let path_str = path_owned.as_str();
 
-    // Look up the executable in the VFS.
-    // SAFETY: mount_table is a kernel singleton initialised once at boot.
-    let (fs, ino) = unsafe {
-        crate::vfs::mount::mount_table()
-            .lookup_path(path_str)
-            .map_err(|_| SyscallError::ENOENT)?
-    };
-    let inode = fs.get_inode(ino).map_err(|_| SyscallError::ENOENT)?;
+    // Look up the executable as this process sees it, and make sure it is
+    // allowed to run it: the permission is checked before a byte is read,
+    // so a refusal says EACCES rather than whatever the parser would have
+    // said. Lookup failures keep their own errno (EACCES for a directory
+    // it may not search, ENOENT for a name that is not there) instead of
+    // being flattened into ENOENT.
+    let (fs, ino) = user_lookup(path_str)?;
+    let inode = fs.get_inode(ino).map_err(map_vfs_error)?;
     let meta = inode.metadata().map_err(|_| SyscallError::EIO)?;
+    require_exec_access(&meta)?;
     let size = meta.size as usize;
     if size == 0 {
         return Err(SyscallError::ENOEXEC);
@@ -1448,13 +1480,9 @@ pub fn sys_chdir(path: *const u8) -> SyscallResult {
     let path_owned = usercopy::read_user_string(path as u64, 4096)?;
     let path_str = path_owned.as_str();
 
-    // Verify the path exists and is a directory
-    // SAFETY: mount_table is a kernel singleton initialised once at boot.
-    let (_fs, _ino) = unsafe {
-        crate::vfs::mount::mount_table()
-            .lookup_path(path_str)
-            .map_err(|_| SyscallError::ENOENT)?
-    };
+    // Verify the path exists, is a directory, and that this process may
+    // walk there.
+    let (_fs, _ino) = user_lookup(path_str)?;
 
     // Normalize: ensure no trailing slash (except root)
     let path_bytes = path_str.as_bytes();
@@ -1481,24 +1509,46 @@ pub fn sys_chdir(path: *const u8) -> SyscallResult {
 // Syscall 17: sys_kill
 // ─────────────────────────────────────────────────
 
-/// Send a signal to a process.
+/// Send a signal to a process, if the caller's credentials allow it.
+///
+/// Signal 0 sends nothing and answers the question alone: 0 if the target
+/// exists and could be signalled, ESRCH if it does not exist, EPERM if it
+/// does and the caller may not touch it. Until 2026-09 no signal was
+/// checked against the target's owner at all - any process could kill any
+/// other, init included.
 pub fn sys_kill(pid: i32, sig: i32) -> SyscallResult {
     if pid <= 0 {
         return Err(SyscallError::EINVAL);
     }
-    let signal = crate::task::signal::Signal::from_u8(sig as u8).ok_or(SyscallError::EINVAL)?;
-    // SAFETY: cli/sti window so the target task can't be reaped while we
-    // queue the signal on it.
-    let found = unsafe {
+    let probe = sig == 0;
+    // Signal 0 carries no signal, so something has to stand in for it when
+    // the permission is judged. It must not be SIGCONT: that is the one
+    // signal with a session-wide exception, and a probe answering "yes"
+    // because SIGCONT would have been allowed says nothing about the
+    // signals the caller actually wants to send. SIGTERM has no exception.
+    let signal = if probe {
+        crate::task::signal::Signal::SIGTERM
+    } else {
+        crate::task::signal::Signal::from_u8(sig as u8).ok_or(SyscallError::EINVAL)?
+    };
+    let creds = current_creds();
+    // SAFETY: cli/sti window so the lookup, the permission check and the
+    // delivery see one consistent task table: the target cannot be reaped
+    // and its PID reused between deciding and acting.
+    let result = unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
-        let r = crate::task::scheduler::send_signal_to(pid as u32, signal);
+        let r = if probe {
+            crate::task::scheduler::may_signal(pid as u32, &creds, signal)
+        } else {
+            crate::task::scheduler::send_signal_checked(pid as u32, signal, &creds)
+        };
         core::arch::asm!("sti", options(nomem, nostack));
         r
     };
-    if found {
-        Ok(0)
-    } else {
-        Err(SyscallError::ESRCH)
+    match result {
+        Ok(true) => Ok(0),
+        Ok(false) => Err(SyscallError::ESRCH),
+        Err(()) => Err(SyscallError::EPERM),
     }
 }
 
@@ -1634,12 +1684,7 @@ pub fn sys_stat(path: *const u8, buf: *mut u8) -> SyscallResult {
     let path_str = path_owned.as_str();
     validate_user_ptr_mut(buf as u64, core::mem::size_of::<StatBuf>())?;
 
-    // SAFETY: mount_table singleton — same as sys_chdir.
-    let (fs, ino) = unsafe {
-        crate::vfs::mount::mount_table()
-            .lookup_path(path_str)
-            .map_err(|_| SyscallError::ENOENT)?
-    };
+    let (fs, ino) = user_lookup(path_str)?;
     let inode = fs.get_inode(ino).map_err(map_vfs_error)?;
     let meta = inode.metadata().map_err(map_vfs_error)?;
     // SAFETY: mount_table singleton, read-only use.
@@ -1888,6 +1933,7 @@ pub fn sys_mkdir(path: *const u8, _mode: u32) -> SyscallResult {
     let (mount, remainder) = mt.resolve(path_str).ok_or(SyscallError::ENOENT)?;
     let store = writable_store_from_mount(mount).ok_or(SyscallError::EACCES)?;
 
+    require_search_to_parent(path_str)?;
     let (parent_ino, leaf) = store.split_parent_leaf(remainder).map_err(map_vfs_error)?;
     let parent_inode = mount.fs.get_inode(parent_ino).map_err(map_vfs_error)?;
     let parent_meta = parent_inode.metadata().map_err(map_vfs_error)?;
@@ -1925,6 +1971,7 @@ pub fn sys_unlink(path: *const u8) -> SyscallResult {
     let (mount, remainder) = mt.resolve(path_str).ok_or(SyscallError::ENOENT)?;
     let store = writable_store_from_mount(mount).ok_or(SyscallError::EACCES)?;
 
+    require_search_to_parent(path_str)?;
     let (parent_ino, leaf) = store.split_parent_leaf(remainder).map_err(map_vfs_error)?;
     let parent_inode = mount.fs.get_inode(parent_ino).map_err(map_vfs_error)?;
     let parent_meta = parent_inode.metadata().map_err(map_vfs_error)?;
@@ -2573,17 +2620,23 @@ pub fn sys_setuid(uid: u32) -> SyscallResult {
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let res = crate::task::scheduler::with_current_task_mut(|t| {
+            let (old_uid, old_euid) = (t.creds.uid, t.creds.euid);
             if crate::security::capability::has_cap(
                 &t.creds,
                 crate::security::capability::CAP_SETUID,
             ) {
                 t.creds.uid = uid;
                 t.creds.euid = uid;
+                // The capabilities are part of the identity being left
+                // behind: without this the process could come straight
+                // back, since has_cap answers from the mask.
+                crate::security::capability::drop_for_uid_change(old_uid, old_euid, &mut t.creds);
                 return Ok(0);
             }
             // Non-root may only switch effective UID between current real/effective.
             if uid == t.creds.uid || uid == t.creds.euid {
                 t.creds.euid = uid;
+                crate::security::capability::drop_for_uid_change(old_uid, old_euid, &mut t.creds);
                 Ok(0)
             } else {
                 Err(SyscallError::EPERM)
@@ -2673,12 +2726,7 @@ pub fn sys_truncate(path: *const u8, length: u64) -> SyscallResult {
     let path_owned = usercopy::read_user_string(path as u64, 4096)?;
     let path_str = path_owned.as_str();
 
-    // SAFETY: mount_table singleton - same as sys_chmod.
-    let (fs, ino) = unsafe {
-        crate::vfs::mount::mount_table()
-            .lookup_path(path_str)
-            .map_err(map_vfs_error)?
-    };
+    let (fs, ino) = user_lookup(path_str)?;
     let inode = fs.get_inode(ino).map_err(map_vfs_error)?;
     let meta = inode.metadata().map_err(map_vfs_error)?;
     match meta.file_type {
@@ -2791,12 +2839,7 @@ pub fn sys_access(path: *const u8, _mode: u32) -> SyscallResult {
     let path_owned = usercopy::read_user_string(path as u64, 4096)?;
     let path_str = path_owned.as_str();
 
-    // SAFETY: mount_table is a kernel singleton initialised once at boot.
-    let (fs, ino) = unsafe {
-        crate::vfs::mount::mount_table()
-            .lookup_path(path_str)
-            .map_err(|_| SyscallError::ENOENT)?
-    };
+    let (fs, ino) = user_lookup(path_str)?;
     if _mode == 0 {
         return Ok(0); // F_OK
     }
@@ -2823,12 +2866,7 @@ pub fn sys_chmod(path: *const u8, mode: u32) -> SyscallResult {
     let path_owned = usercopy::read_user_string(path as u64, 4096)?;
     let path_str = path_owned.as_str();
 
-    // SAFETY: mount_table singleton — same as sys_access.
-    let (fs, ino) = unsafe {
-        crate::vfs::mount::mount_table()
-            .lookup_path(path_str)
-            .map_err(map_vfs_error)?
-    };
+    let (fs, ino) = user_lookup(path_str)?;
     let inode = fs.get_inode(ino).map_err(map_vfs_error)?;
     let mut meta = inode.metadata().map_err(map_vfs_error)?;
     let creds = current_creds();
@@ -2846,12 +2884,7 @@ pub fn sys_chown(path: *const u8, uid: u32, gid: u32) -> SyscallResult {
     let path_owned = usercopy::read_user_string(path as u64, 4096)?;
     let path_str = path_owned.as_str();
 
-    // SAFETY: mount_table singleton — same as sys_access.
-    let (fs, ino) = unsafe {
-        crate::vfs::mount::mount_table()
-            .lookup_path(path_str)
-            .map_err(map_vfs_error)?
-    };
+    let (fs, ino) = user_lookup(path_str)?;
     let inode = fs.get_inode(ino).map_err(map_vfs_error)?;
     let mut meta = inode.metadata().map_err(map_vfs_error)?;
 
@@ -2909,18 +2942,14 @@ pub fn sys_link(old: *const u8, new: *const u8) -> SyscallResult {
 
     // Existing file the link will point at. Resolving it also proves it exists
     // before we touch the destination directory.
-    // SAFETY: mount_table singleton — same as sys_stat.
-    let (target_fs, target_ino) = unsafe {
-        crate::vfs::mount::mount_table()
-            .lookup_path(old_str)
-            .map_err(|_| SyscallError::ENOENT)?
-    };
+    let (target_fs, target_ino) = user_lookup(old_str)?;
     let target_inode = target_fs.get_inode(target_ino).map_err(map_vfs_error)?;
     let target_meta = target_inode.metadata().map_err(map_vfs_error)?;
     if target_meta.file_type == crate::vfs::inode::FileType::Directory {
         return Err(SyscallError::EPERM);
     }
 
+    require_search_to_parent(new_str)?;
     let (parent_ino, leaf) = store.split_parent_leaf(new_rem).map_err(map_vfs_error)?;
     let parent_inode = new_mount.fs.get_inode(parent_ino).map_err(map_vfs_error)?;
     let parent_meta = parent_inode.metadata().map_err(map_vfs_error)?;
@@ -3003,6 +3032,8 @@ pub fn sys_rename(old: *const u8, new: *const u8) -> SyscallResult {
 
     // Paths are relative to the mount from here on: a subtree mount such
     // as /home enters its filesystem at its own root inode.
+    require_search_to_parent(old_str)?;
+    require_search_to_parent(new_str)?;
     let (old_parent, old_leaf) = store.split_parent_leaf(old_rem).map_err(map_vfs_error)?;
     let (new_parent, new_leaf) = store.split_parent_leaf(new_rem).map_err(map_vfs_error)?;
 
@@ -3370,7 +3401,9 @@ pub fn sys_mount(
         target_str
     };
 
-    // Mount point must exist prior to mount.
+    // Mount point must exist prior to mount. The unchecked lookup is
+    // deliberate: this syscall already required CAP_SYS_ADMIN above, and a
+    // mount point can sit under directories the caller could not search.
     // SAFETY: mount_table is a kernel singleton initialised once at boot.
     let _ = unsafe {
         crate::vfs::mount::mount_table()

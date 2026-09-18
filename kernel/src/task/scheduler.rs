@@ -738,6 +738,24 @@ pub fn current_pid() -> Pid {
     }
 }
 
+/// The current task's credentials.
+///
+/// A plain read, like `current_pid` and `current_session_id` above: a task's
+/// credentials are written only by that task itself (setuid/setgid on the
+/// running task), so a timer landing mid-read cannot change what is being
+/// read. Worth spelling out because the syscall path reads this often
+/// enough that a cli/sti pair around it cost the in-guest suite about 40%
+/// of its wall time under TCG.
+pub fn current_creds() -> super::task::Credentials {
+    // SAFETY: read-only access to the SCHEDULER singleton.
+    unsafe {
+        (*core::ptr::addr_of!(SCHEDULER))
+            .as_ref()
+            .and_then(|s| s.tasks[s.current].as_ref().map(|t| t.creds))
+            .unwrap_or(super::task::Credentials::root())
+    }
+}
+
 /// Get the physical address of the current task's page table (0 = kernel task).
 pub fn current_page_table_phys() -> u64 {
     // SAFETY: read-only access to the SCHEDULER singleton.
@@ -842,6 +860,72 @@ pub unsafe fn take_pending_signal() -> Option<super::signal::Signal> {
 ///
 /// # Safety
 /// Must be called with interrupts disabled.
+/// Deliver `sig` to `pid` on behalf of `sender`, refusing when the
+/// sender's credentials do not authorize it.
+///
+/// Returns `Ok(true)` when the signal was queued, `Ok(false)` when no such
+/// task exists, and `Err(())` when the target exists but the sender may
+/// not signal it. The lookup, the check and the delivery share one
+/// interrupts-off window, so the target cannot be reaped and replaced by
+/// an unrelated process between deciding and acting.
+///
+/// # Safety
+/// Must be called with interrupts disabled.
+pub unsafe fn send_signal_checked(
+    pid: Pid,
+    sig: super::signal::Signal,
+    sender: &super::task::Credentials,
+) -> Result<bool, ()> {
+    let sender_session = current_session_id();
+    if let Some(ref mut sched) = *core::ptr::addr_of_mut!(SCHEDULER) {
+        for slot in sched.tasks.iter_mut().flatten() {
+            if slot.pid == pid {
+                let same_session = slot.session_id == sender_session;
+                if !crate::security::process::can_signal(sender, &slot.creds, same_session, sig) {
+                    return Err(());
+                }
+                slot.signals.send(sig);
+                if matches!(slot.state, TaskState::Blocked) {
+                    slot.state = TaskState::Ready;
+                }
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Is `pid` a live task, and may `sender` signal it? Used by `kill(pid, 0)`,
+/// which asks the question without sending anything.
+///
+/// # Safety
+/// Must be called with interrupts disabled.
+pub unsafe fn may_signal(
+    pid: Pid,
+    sender: &super::task::Credentials,
+    sig: super::signal::Signal,
+) -> Result<bool, ()> {
+    let sender_session = current_session_id();
+    if let Some(ref sched) = *core::ptr::addr_of!(SCHEDULER) {
+        for slot in sched.tasks.iter().flatten() {
+            if slot.pid == pid {
+                let same_session = slot.session_id == sender_session;
+                return if crate::security::process::can_signal(
+                    sender,
+                    &slot.creds,
+                    same_session,
+                    sig,
+                ) {
+                    Ok(true)
+                } else {
+                    Err(())
+                };
+            }
+        }
+    }
+    Ok(false)
+}
+
 pub unsafe fn send_signal_to(pid: Pid, sig: super::signal::Signal) -> bool {
     if let Some(ref mut sched) = *core::ptr::addr_of_mut!(SCHEDULER) {
         for slot in sched.tasks.iter_mut().flatten() {
