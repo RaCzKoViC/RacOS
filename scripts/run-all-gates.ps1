@@ -211,7 +211,7 @@ if ($SkipQemu) {
     Write-Host "[11/11] graphics (claim line + QMP screendump)" -ForegroundColor Cyan
     $g = powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test-graphics.ps1") `
             -BootWaitMax 90 2>&1 | Out-String
-    $gDetail = if ($g -match "screendump has (\d+) distinct") { $Matches[1] + " distinct pixel values" } else { "no dump" }
+    $gDetail = if ($g -match "console text on screen: (\d+) lit pixels") { $Matches[1] + " lit pixels of console text" } else { "no dump" }
     Record "graphics" ($g -match "GRAPHICS-SMOKE PASS") $gDetail
 }
 
