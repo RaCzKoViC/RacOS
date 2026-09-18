@@ -166,7 +166,11 @@ for ($i = 1; $i -le $Iterations; $i++) {
     Pump $p $st 2 $null | Out-Null
     $st.Text = ""
     Send-Line $p "mkdir /mnt/churn-ran; echo CHURN-ARMED"
-    $armed = Pump $p $st 20 'CHURN-ARMED'
+    # (?m)^ so the marker is matched as output at the start of a line, not
+    # in the guest's echo of the command being typed: matching the echo
+    # returned before the command ran, and the next line was then typed
+    # into a shell still busy - its characters were dropped.
+    $armed = Pump $p $st 20 '(?m)^CHURN-ARMED'
     if (-not $armed) {
         Write-Host "  FAIL  shell did not accept input; the churn never ran" -ForegroundColor Red
         $results += @{ Iter = $i; Ok = $false; Detail = "churn never started" }
@@ -182,7 +186,7 @@ for ($i = 1; $i -le $Iterations; $i++) {
     Send-Line $p "echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef > /mnt/seed1; cat /mnt/seed1 /mnt/seed1 /mnt/seed1 /mnt/seed1 > /mnt/seed2; cat /mnt/seed2 /mnt/seed2 /mnt/seed2 /mnt/seed2 > /mnt/seed1; cat /mnt/seed1 /mnt/seed2 > /mnt/seed; echo SEED-READY"
     # Same rule as CHURN-ARMED: a seed that never got built would turn the
     # truncating step into a plain create and the run would still look green.
-    $seeded = Pump $p $st 40 'SEED-READY'
+    $seeded = Pump $p $st 40 '(?m)^SEED-READY'
     if (-not $seeded) {
         Write-Host "  FAIL  the seed file was not built; the truncating churn never ran" -ForegroundColor Red
         $results += @{ Iter = $i; Ok = $false; Detail = "seed never built" }
@@ -190,7 +194,21 @@ for ($i = 1; $i -le $Iterations; $i++) {
         if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
         continue
     }
-    $churn = 'while true; do mkdir /mnt/cd; cat /mnt/seed > /mnt/cd/f; echo x > /mnt/cd/f; ln /mnt/cd/f /mnt/cd/g; rm /mnt/cd/g; rm /mnt/cd/f; rmdir /mnt/cd; done'
+    # A file that is only ever renamed, back and forth, so a kill can land
+    # inside a rename transaction. After the crash it must exist under
+    # exactly one of its two names with all 1300 bytes - the property a
+    # copy-then-unlink "rename" cannot give. The disk persists across
+    # iterations, so first put it back under its home name.
+    Send-Line $p "test -e /mnt/keep2 && mv /mnt/keep2 /mnt/keep; test -e /mnt/keep || cat /mnt/seed > /mnt/keep; echo KEEP-READY"
+    $kept = Pump $p $st 40 '(?m)^KEEP-READY'
+    if (-not $kept) {
+        Write-Host "  FAIL  the rename fixture was not prepared" -ForegroundColor Red
+        $results += @{ Iter = $i; Ok = $false; Detail = "rename fixture not prepared" }
+        $fail++
+        if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+        continue
+    }
+    $churn = 'while true; do mkdir /mnt/cd; cat /mnt/seed > /mnt/cd/f; echo x > /mnt/cd/f; ln /mnt/cd/f /mnt/cd/g; rm /mnt/cd/g; rm /mnt/cd/f; rmdir /mnt/cd; mv /mnt/keep /mnt/keep2; mv /mnt/keep2 /mnt/keep; done'
     Send-Line $p $churn
 
     Pump $p $st $churnSeconds $null | Out-Null
@@ -203,8 +221,21 @@ for ($i = 1; $i -le $Iterations; $i++) {
     $p2 = Start-Guest
     $st2 = New-PumpState
     $up2 = Pump $p2 $st2 $BootWaitMax 'racsh 0\.1\.0'
+    $renameState = ""
+    if ($up2) {
+        # Which name survived, and is the content whole? "10" or "01" with
+        # 1300 bytes (the seed: 1040 + 260) is the only acceptable answer.
+        Pump $p2 $st2 3 $null | Out-Null
+        Send-Line $p2 "a=0; test -e /mnt/keep && a=1; b=0; test -e /mnt/keep2 && b=1; if test -e /mnt/keep; then n=`$(wc -c < /mnt/keep); else n=`$(wc -c < /mnt/keep2); fi; echo RENAME-STATE=`$a`$b:`$n"
+        Pump $p2 $st2 40 'RENAME-STATE=\d\d:\d+' | Out-Null
+        # -match inside Pump sets $Matches in Pump's scope, not here.
+        if ($st2.Text -match 'RENAME-STATE=(\d)(\d):(\d+)') {
+            $renameState = $Matches[1] + $Matches[2] + ":" + $Matches[3]
+        }
+    }
     $log = $st2.Text
     if (-not $p2.HasExited) { Stop-Process -Id $p2.Id -Force }
+    $renameOk = ($renameState -eq "10:1300") -or ($renameState -eq "01:1300")
 
     $panic     = $log -match 'KERNEL PANIC|HALTING'
     $clean     = $log -match 'RACFS sda: fsck clean'
@@ -231,6 +262,10 @@ for ($i = 1; $i -le $Iterations; $i++) {
         Write-Host "  FAIL  fsck found shared or unallocated-but-used blocks ($replayNote)" -ForegroundColor Red
         $results += @{ Iter = $i; Ok = $false; Detail = "dangerous fsck findings" }
         $fail++
+    } elseif (-not $renameOk) {
+        Write-Host "  FAIL  the renamed file is not under exactly one name with 1300 bytes (state '$renameState')" -ForegroundColor Red
+        $results += @{ Iter = $i; Ok = $false; Detail = "rename state '$renameState'" }
+        $fail++
     } elseif (-not $clean) {
         # Leaked blocks are the survivable class: nothing will be overwritten.
         # Still reported, because a journal that leaks on every crash is a
@@ -238,8 +273,8 @@ for ($i = 1; $i -le $Iterations; $i++) {
         Write-Host "  WARN  fsck not clean but not dangerous ($replayNote)" -ForegroundColor Yellow
         $results += @{ Iter = $i; Ok = $true; Detail = "$fsckLine; $replayNote" }
     } else {
-        Write-Host "  PASS  fsck clean after a hard kill ($replayNote)" -ForegroundColor Green
-        $results += @{ Iter = $i; Ok = $true; Detail = "clean; $replayNote" }
+        Write-Host "  PASS  fsck clean after a hard kill ($replayNote); renamed file under one name, whole" -ForegroundColor Green
+        $results += @{ Iter = $i; Ok = $true; Detail = "clean; $replayNote; rename $renameState" }
     }
 }
 
