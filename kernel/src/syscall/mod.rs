@@ -13,3 +13,4 @@ pub mod dispatch;
 pub mod entry;
 pub mod error;
 pub mod handlers;
+pub mod usercopy;

@@ -11,6 +11,48 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Fixed — syscalls refuse pointers the process cannot touch (usercopy)
+
+- **A kernel address passed as a user pointer.** `validate_user_ptr`
+  checked null, `ptr <= 0x7FFF_FFFF_FFFF` and overflow and nothing
+  about the page tables. The kernel is linked at 0x100000 and
+  identity-mapped as supervisor pages, so `write(1, 0x100000, 64)`
+  printed 64 bytes of kernel text to stdout, `read` into a kernel
+  address wrote kernel memory in ring 0, a read-only page was a valid
+  `read` destination, and an unmapped address page-faulted in the kernel
+  - whose handler then read a garbage frame and killed the process with
+  SIGSEGV. Review item A (P0), the first change of the memory work.
+
+- **`kernel/src/syscall/usercopy.rs`.** `check_user_range` walks the
+  calling process's page table for every page of the range and asks
+  what the CPU would ask for a ring-3 access: present at every level,
+  USER at every level, WRITABLE at every level when the kernel will
+  write (1 GiB and 2 MiB leaves included). `copy_from_user`,
+  `copy_to_user`, `get_user`, `put_user`, `strlen_user`,
+  `read_user_bytes` and `read_user_string` check and access with
+  interrupts off, so a `munmap` from another thread cannot land between
+  the check and the access; strings are scanned a page at a time with
+  each page checked first. `read`/`write`/`send`/`recv` go through a
+  kernel bounce buffer (64 KiB per call, a short count past that). All
+  61 pointer-taking sites in `handlers.rs` were assigned a direction and
+  converted; the kernel has 41 `unsafe` blocks fewer (472 → 431).
+  `KERNEL_ABI.md` §7, ADR-019 and SECURITY.md now describe this rather
+  than the promise the old code did not keep.
+
+- **Regression test first: `T39-USERCOPY-OK`, 17 assertions.** On the
+  old kernel the group leaks 64 kernel bytes into the log and the suite
+  dies at the first unmapped pointer (exit 139) - that is the red run.
+  Green: 249/0. Refused: kernel text and identity-mapped RAM in both
+  directions, a path in kernel memory, unmapped addresses, a range that
+  runs off the end of the stack mapping, the process's own text as a
+  `read` destination, non-canonical, overflowing and null pointers.
+  Still accepted: a buffer crossing a page boundary inside a mapping, a
+  whole stack page, the process's text as a `write` source. Suite time
+  157 s → 163 s with 17 more assertions: the page walk is in the noise.
+
+- Not yet: recovering from a page fault taken in ring 0 (an exception
+  table). Said so in the module doc and the ABI spec.
+
 ### Fixed — rename(2) is a rename
 
 - **`sys_rename` read the whole file into memory, created a new one,

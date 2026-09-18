@@ -7,6 +7,7 @@
 extern crate alloc;
 
 use super::error::{SyscallError, SyscallResult};
+use super::usercopy;
 use crate::vfs::inode::VfsError;
 
 fn map_vfs_error(err: VfsError) -> SyscallError {
@@ -226,9 +227,9 @@ fn parse_sockaddr_in(addr: *const u8, len: u32) -> Result<(u16, u32), SyscallErr
     if len < 8 {
         return Err(SyscallError::EINVAL);
     }
-    validate_user_ptr(addr as u64, len as usize)?;
-    // SAFETY: validate_user_ptr above bounded [addr, addr+len) to user space.
-    let b = unsafe { core::slice::from_raw_parts(addr, len as usize) };
+    // Only the 8 bytes of a sockaddr_in are read, whatever `len` claims.
+    let mut b = [0u8; 8];
+    usercopy::copy_from_user(&mut b, addr as u64)?;
     let family = u16::from_le_bytes([b[0], b[1]]);
     if family as i32 != crate::net::AF_INET {
         return Err(SyscallError::EINVAL);
@@ -247,12 +248,9 @@ fn write_sockaddr_in(
     if len_ptr.is_null() {
         return Ok(());
     }
-    validate_user_ptr(len_ptr as u64, 4)?;
-    // SAFETY: validate_user_ptr above confirms len_ptr points at 4 mapped bytes.
-    let in_len = unsafe { *len_ptr };
+    let in_len: u32 = usercopy::get_user(len_ptr as u64)?;
     let out_len = 8u32;
     if !addr.is_null() && in_len >= out_len {
-        validate_user_ptr(addr as u64, out_len as usize)?;
         let mut buf = [0u8; 8];
         let fam = (crate::net::AF_INET as u16).to_le_bytes();
         let p = port.to_be_bytes();
@@ -265,15 +263,9 @@ fn write_sockaddr_in(
         buf[5] = a[1];
         buf[6] = a[2];
         buf[7] = a[3];
-        // SAFETY: validate_user_ptr just above bounds-checked [addr, addr+out_len).
-        unsafe {
-            core::ptr::copy_nonoverlapping(buf.as_ptr(), addr, out_len as usize);
-        }
+        usercopy::copy_to_user(addr as u64, &buf)?;
     }
-    // SAFETY: len_ptr was bounds-checked at the top of the function.
-    unsafe {
-        *len_ptr = out_len;
-    }
+    usercopy::put_user(len_ptr as u64, out_len)?;
     Ok(())
 }
 
@@ -368,44 +360,32 @@ fn ensure_console_stdio(fds: &mut crate::vfs::file::FdTable) {
 
 /// Maximum valid user-space address.
 /// Anything above this is kernel space.
-const USER_SPACE_MAX: u64 = 0x0000_7FFF_FFFF_FFFF;
+const USER_SPACE_MAX: u64 = usercopy::USER_SPACE_MAX;
 
-/// Validate that a user-space pointer range is within user address space.
+/// Largest single read/write the kernel moves through its bounce buffer;
+/// longer requests get a short count, which POSIX allows.
+const USER_IO_CHUNK: usize = 64 * 1024;
+
+/// A range the kernel is about to READ from user memory: every page must be
+/// present and user-accessible in the current page table (see
+/// `usercopy::check_user_range`). Until 2026-09 this checked the address
+/// range only, and a kernel address passed.
 fn validate_user_ptr(ptr: u64, len: usize) -> Result<(), SyscallError> {
-    if ptr == 0 {
-        return Err(SyscallError::EFAULT);
-    }
-    if ptr > USER_SPACE_MAX {
-        return Err(SyscallError::EFAULT);
-    }
-    let end = ptr.checked_add(len as u64).ok_or(SyscallError::EFAULT)?;
-    if end > USER_SPACE_MAX {
-        return Err(SyscallError::EFAULT);
-    }
-    Ok(())
+    usercopy::check_user_range(ptr, len, usercopy::Access::Read)
+}
+
+/// A range the kernel is about to WRITE into user memory: as above, and
+/// every page must be writable by the process too.
+fn validate_user_ptr_mut(ptr: u64, len: usize) -> Result<(), SyscallError> {
+    usercopy::check_user_range(ptr, len, usercopy::Access::Write)
 }
 
 /// Validate a null-terminated user string pointer.
 /// Returns the string length (not including null terminator), max 4096.
+/// Each page is checked before it is scanned, so a string that runs off
+/// its mapping is EFAULT rather than a kernel page fault.
 fn validate_user_string(ptr: u64) -> Result<usize, SyscallError> {
-    if ptr == 0 || ptr > USER_SPACE_MAX {
-        return Err(SyscallError::EFAULT);
-    }
-
-    // Read byte-by-byte up to 4096 chars
-    let max_len = 4096usize;
-    for i in 0..max_len {
-        let addr = ptr.checked_add(i as u64).ok_or(SyscallError::EFAULT)?;
-        if addr > USER_SPACE_MAX {
-            return Err(SyscallError::EFAULT);
-        }
-        // SAFETY: We validated the address is in user space
-        let byte = unsafe { *(addr as *const u8) };
-        if byte == 0 {
-            return Ok(i);
-        }
-    }
-    Err(SyscallError::ENAMETOOLONG)
+    usercopy::strlen_user(ptr, 4096)
 }
 
 // ─────────────────────────────────────────────────
@@ -426,25 +406,19 @@ fn collect_user_argv(
         return Ok(alloc::vec![alloc::vec::Vec::from(path.as_bytes())]);
     }
 
-    validate_user_ptr(argv_ptr, 8)?;
-
     let mut args = alloc::vec::Vec::new();
 
     for i in 0..MAX_ARGS {
-        let ptr_addr = argv_ptr + (i * 8) as u64;
-        validate_user_ptr(ptr_addr, 8)?;
-        // SAFETY: validate_user_ptr just confirmed ptr_addr points at 8 mapped bytes.
-        let str_ptr = unsafe { *(ptr_addr as *const u64) };
+        let ptr_addr = argv_ptr
+            .checked_add((i * 8) as u64)
+            .ok_or(SyscallError::EFAULT)?;
+        let str_ptr: u64 = usercopy::get_user(ptr_addr)?;
 
         if str_ptr == 0 {
             break; // NULL terminator
         }
 
-        let str_len = validate_user_string(str_ptr)?;
-        // SAFETY: validate_user_string above confirmed [str_ptr, str_ptr+str_len)
-        // is user-mapped + NUL-terminated.
-        let slice = unsafe { core::slice::from_raw_parts(str_ptr as *const u8, str_len) };
-        args.push(alloc::vec::Vec::from(slice));
+        args.push(usercopy::read_user_bytes(str_ptr, 4096)?);
     }
 
     if args.is_empty() {
@@ -465,20 +439,15 @@ fn collect_user_envp(envp_ptr: u64) -> Result<alloc::vec::Vec<alloc::vec::Vec<u8
     if envp_ptr == 0 {
         return Ok(env_vars);
     }
-    validate_user_ptr(envp_ptr, 8)?;
-
     for i in 0..MAX_ENV_VARS {
-        let ptr_addr = envp_ptr + (i * 8) as u64;
-        validate_user_ptr(ptr_addr, 8)?;
-        // SAFETY: validate_user_ptr just confirmed ptr_addr points at 8 mapped bytes.
-        let str_ptr = unsafe { *(ptr_addr as *const u64) };
+        let ptr_addr = envp_ptr
+            .checked_add((i * 8) as u64)
+            .ok_or(SyscallError::EFAULT)?;
+        let str_ptr: u64 = usercopy::get_user(ptr_addr)?;
         if str_ptr == 0 {
             break;
         }
-        let str_len = validate_user_string(str_ptr)?;
-        // SAFETY: validate_user_string above confirmed the string is in user space.
-        let slice = unsafe { core::slice::from_raw_parts(str_ptr as *const u8, str_len) };
-        env_vars.push(alloc::vec::Vec::from(slice));
+        env_vars.push(usercopy::read_user_bytes(str_ptr, 4096)?);
     }
     Ok(env_vars)
 }
@@ -513,6 +482,7 @@ struct SyscallFrame {
 /// On-user-stack frame written by the kernel on signal delivery and consumed
 /// by `sys_sigreturn`. Stable ABI shared with libc-lite.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct UserSignalFrame {
     signum: u64,       // [rsp+0]  read by __signal_dispatcher to dispatch
     orig_rip: u64,     // [rsp+8]
@@ -583,10 +553,6 @@ fn try_deliver_user_handler(
     if frame_addr == 0 {
         return false;
     }
-    if validate_user_ptr(frame_addr, frame_size as usize).is_err() {
-        return false;
-    }
-
     let usf = UserSignalFrame {
         signum: sig as u64,
         orig_rip: frame.user_rip,
@@ -598,10 +564,10 @@ fn try_deliver_user_handler(
         _pad: 0,
     };
 
-    // SAFETY: syscall_entry already issued STAC, so SMAP allows this write.
-    // The destination range has been bounds-checked by validate_user_ptr.
-    unsafe {
-        core::ptr::write(frame_addr as *mut UserSignalFrame, usf);
+    // The frame lands on the user stack only if the process could write
+    // there itself; a stack that has run out of mapping means no delivery.
+    if usercopy::put_user(frame_addr, usf).is_err() {
+        return false;
     }
 
     frame.user_rip = handler_addr;
@@ -721,27 +687,36 @@ pub fn sys_exit(status: i32) -> ! {
 
 /// Read from a file descriptor.
 pub fn sys_read(fd: i32, buf: *mut u8, count: usize) -> SyscallResult {
-    validate_user_ptr(buf as u64, count)?;
+    // The user buffer is checked for writability up front (a read-only page
+    // such as the process's own text is refused here) and written only
+    // through copy_to_user at the end. The file reads into a kernel bounce
+    // buffer, so a blocking read never holds a raw user pointer.
+    validate_user_ptr_mut(buf as u64, count)?;
+    if count == 0 {
+        return Ok(0);
+    }
+    let chunk = count.min(USER_IO_CHUNK);
+    let mut bounce = alloc::vec![0u8; chunk];
 
     // SAFETY: cli/sti window around the fd-table lookup; the inner sti
     // re-enables IRQs during the potentially-blocking file read so the
-    // timer can preempt without losing fd_table consistency. validate_user_ptr
-    // above bounds-checked [buf, buf+count).
-    unsafe {
+    // timer can preempt without losing fd_table consistency.
+    let n = unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {
             let file = fds.get(fd).map_err(map_vfs_error)?;
-            let out = core::slice::from_raw_parts_mut(buf, count);
             // Re-enable interrupts during the potentially blocking read
             core::arch::asm!("sti", options(nomem, nostack));
-            let n = file.read(out).map_err(map_vfs_error)?;
+            let n = file.read(&mut bounce).map_err(map_vfs_error);
             core::arch::asm!("cli", options(nomem, nostack));
-            Ok(n as i64)
+            n
         })
         .unwrap_or(Err(SyscallError::EBADF));
         core::arch::asm!("sti", options(nomem, nostack));
-        result
-    }
+        result?
+    };
+    usercopy::copy_to_user(buf as u64, &bounce[..n])?;
+    Ok(n as i64)
 }
 // ─────────────────────────────────────────────────
 // Syscall 2: sys_write
@@ -749,26 +724,33 @@ pub fn sys_read(fd: i32, buf: *mut u8, count: usize) -> SyscallResult {
 
 /// Write to a file descriptor.
 pub fn sys_write(fd: i32, buf: *const u8, count: usize) -> SyscallResult {
-    validate_user_ptr(buf as u64, count)?;
+    // Copy the user bytes into a kernel buffer first (checked page by page,
+    // interrupts off), then write from there. At most USER_IO_CHUNK bytes
+    // per call: a short write is a legal answer and libc-lite's write_all
+    // continues from it.
+    if count == 0 {
+        validate_user_ptr(buf as u64, 0)?;
+        return Ok(0);
+    }
+    let chunk = count.min(USER_IO_CHUNK);
+    let mut bounce = alloc::vec![0u8; chunk];
+    usercopy::copy_from_user(&mut bounce, buf as u64)?;
 
-    // SAFETY: see sys_read above for the cli/sti pattern. validate_user_ptr
-    // bounds-checked the user buffer.
+    // SAFETY: cli/sti window around the fd-table lookup, as in sys_read.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {
             let file = fds.get(fd).map_err(map_vfs_error)?;
-            let input = core::slice::from_raw_parts(buf, count);
-            let n = file.write(input).map_err(map_vfs_error)?;
+            let n = file.write(&bounce).map_err(map_vfs_error)?;
             Ok(n as i64)
         })
         .unwrap_or_else(|| {
             // Fallback: if FD table lookup fails for stdout/stderr, write to serial
             if fd == 1 || fd == 2 {
-                for i in 0..count {
-                    let byte = *buf.add(i);
+                for &byte in bounce.iter() {
                     crate::serial::serial_print!("{}", byte as char);
                 }
-                Ok(count as i64)
+                Ok(chunk as i64)
             } else {
                 Err(SyscallError::EBADF)
             }
@@ -784,12 +766,8 @@ pub fn sys_write(fd: i32, buf: *const u8, count: usize) -> SyscallResult {
 
 /// Open a file or device.
 pub fn sys_open(path: *const u8, flags: u32, _mode: u32) -> SyscallResult {
-    let path_len = validate_user_string(path as u64)?;
-    // SAFETY: validated by validate_user_string
-    let path_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let path_owned = usercopy::read_user_string(path as u64, 4096)?;
+    let path_str = path_owned.as_str();
 
     // SAFETY: mount_table is a kernel singleton initialised once at boot.
     let lookup_result = unsafe { crate::vfs::mount::mount_table().lookup_path(path_str) };
@@ -1042,7 +1020,9 @@ pub fn sys_munmap(addr: u64, length: usize) -> SyscallResult {
 /// Create an anonymous pipe.
 /// `fds_ptr` must point to two i32 slots: [read_fd, write_fd].
 pub fn sys_pipe(fds_ptr: *mut i32) -> SyscallResult {
-    validate_user_ptr(fds_ptr as u64, core::mem::size_of::<i32>() * 2)?;
+    // Checked as a write target up front so the pair is never created for
+    // a caller that cannot receive it.
+    validate_user_ptr_mut(fds_ptr as u64, core::mem::size_of::<i32>() * 2)?;
 
     let (read_inode, write_inode) = crate::vfs::pipe::create_pipe();
     let read_file = alloc::sync::Arc::new(crate::vfs::file::OpenFile::new(
@@ -1070,12 +1050,7 @@ pub fn sys_pipe(fds_ptr: *mut i32) -> SyscallResult {
         res?
     };
 
-    // SAFETY: validate_user_ptr at the top of the function bounded
-    // [fds_ptr, fds_ptr + 8) to user space.
-    unsafe {
-        *fds_ptr.add(0) = fd_r;
-        *fds_ptr.add(1) = fd_w;
-    }
+    usercopy::put_user(fds_ptr as u64, [fd_r, fd_w])?;
     Ok(0)
 }
 
@@ -1124,12 +1099,8 @@ pub fn sys_dup2(oldfd: i32, newfd: i32) -> SyscallResult {
 /// Replace the current process with a new executable.
 /// `path` is a null-terminated string in user space.
 pub fn sys_exec(path: *const u8, argv_ptr: u64, envp_ptr: u64) -> SyscallResult {
-    let path_len = validate_user_string(path as u64)?;
-    // SAFETY: path is validated to be in user space with a null terminator.
-    let path_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let path_owned = usercopy::read_user_string(path as u64, 4096)?;
+    let path_str = path_owned.as_str();
 
     // Look up the executable in the VFS.
     // SAFETY: mount_table is a kernel singleton initialised once at boot.
@@ -1204,13 +1175,8 @@ pub fn sys_exec(path: *const u8, argv_ptr: u64, envp_ptr: u64) -> SyscallResult 
 /// `path` is a null-terminated string in user space.
 /// Returns child PID to the caller.
 pub fn sys_spawn(path: *const u8, argv_ptr: u64, envp_ptr: u64) -> SyscallResult {
-    let path_len = validate_user_string(path as u64)?;
-    // SAFETY: validate_user_string above bounded [path, path+path_len) to
-    // user space and confirmed a trailing NUL.
-    let path_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let path_owned = usercopy::read_user_string(path as u64, 4096)?;
+    let path_str = path_owned.as_str();
 
     // Look up the executable in the VFS.
     // SAFETY: mount_table is a kernel singleton initialised once at boot.
@@ -1328,16 +1294,17 @@ pub fn sys_wait(pid: i32, status_ptr: u64, options: u32) -> SyscallResult {
     let parent = crate::task::scheduler::current_pid();
     let parent_pgid = crate::task::scheduler::current_pgid();
 
-    // Validate the status pointer when provided.
+    // Validate the status pointer when provided: refused up front rather
+    // than after a child has been reaped and its status lost.
     if status_ptr != 0 {
-        validate_user_ptr(status_ptr, 4)?;
+        validate_user_ptr_mut(status_ptr, 4)?;
     }
 
     // SAFETY: cli/sti window guards the parent/child relationship lookup and
     // the zombie reap. block_and_reschedule re-enters the scheduler with IF
     // already clear; when we resume, IRQs are still off (the scheduler hands
-    // off only after CLI). The write through status_ptr is bounded by the
-    // validate_user_ptr above on the non-zero path.
+    // off only after CLI). The exit status reaches user memory only through
+    // put_user, after the window is reopened.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
 
@@ -1355,7 +1322,7 @@ pub fn sys_wait(pid: i32, status_ptr: u64, options: u32) -> SyscallResult {
                 core::arch::asm!("sti", options(nomem, nostack));
                 // Write exit status to user-space pointer if supplied.
                 if status_ptr != 0 {
-                    *(status_ptr as *mut i32) = exit_status;
+                    usercopy::put_user(status_ptr, exit_status)?;
                 }
                 return Ok(child_pid as i64);
             }
@@ -1384,13 +1351,8 @@ pub fn sys_wait(pid: i32, status_ptr: u64, options: u32) -> SyscallResult {
 
 /// Change current working directory.
 pub fn sys_chdir(path: *const u8) -> SyscallResult {
-    let path_len = validate_user_string(path as u64)?;
-    // SAFETY: validate_user_string above confirmed [path, path+path_len) is
-    // user-mapped and NUL-terminated.
-    let path_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let path_owned = usercopy::read_user_string(path as u64, 4096)?;
+    let path_str = path_owned.as_str();
 
     // Verify the path exists and is a directory
     // SAFETY: mount_table is a kernel singleton initialised once at boot.
@@ -1455,11 +1417,11 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> SyscallResult {
     if size == 0 {
         return Err(SyscallError::EINVAL);
     }
-    validate_user_ptr(buf as u64, size)?;
+    validate_user_ptr_mut(buf as u64, size)?;
 
-    let mut tmp = [0u8; 256];
-    // SAFETY: cli/sti window so get_cwd reads a consistent snapshot of the
-    // current task's cwd buffer.
+    let mut tmp = [0u8; 257]; // cwd is at most 256 bytes, plus the NUL
+                              // SAFETY: cli/sti window so get_cwd reads a consistent snapshot of the
+                              // current task's cwd buffer.
     let cwd_len = unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let len = crate::task::scheduler::get_cwd(&mut tmp);
@@ -1471,12 +1433,10 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> SyscallResult {
     if size < cwd_len + 1 {
         return Err(SyscallError::ERANGE);
     }
-    // SAFETY: validate_user_ptr above bounded [buf, buf+size) to user
-    // space, and the ERANGE check confirmed size >= cwd_len+1.
-    unsafe {
-        core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf, cwd_len);
-        *buf.add(cwd_len) = 0; // null terminator
-    }
+    // The ERANGE check confirmed size >= cwd_len+1, so the path and its
+    // NUL fit in the checked range.
+    tmp[cwd_len] = 0;
+    usercopy::copy_to_user(buf as u64, &tmp[..cwd_len + 1])?;
     // Return the length, not the buffer pointer. libc-lite's wrapper treats
     // the syscall return value as a usize length; returning the pointer made
     // user-space see e.g. `n = 0x7FFFFFFEFE00`, and `&buf[..n]` panicked
@@ -1558,6 +1518,7 @@ pub fn sys_setsid() -> SyscallResult {
 
 /// Stat buffer matching the kernel ABI layout.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct StatBuf {
     st_dev: u64,
     st_ino: u64,
@@ -1575,15 +1536,9 @@ struct StatBuf {
 
 /// Get file status.
 pub fn sys_stat(path: *const u8, buf: *mut u8) -> SyscallResult {
-    let path_len = validate_user_string(path as u64)?;
-    validate_user_ptr(buf as u64, core::mem::size_of::<StatBuf>())?;
-
-    // SAFETY: validate_user_string above confirmed [path, path+path_len) is
-    // user-mapped and NUL-terminated.
-    let path_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let path_owned = usercopy::read_user_string(path as u64, 4096)?;
+    let path_str = path_owned.as_str();
+    validate_user_ptr_mut(buf as u64, core::mem::size_of::<StatBuf>())?;
 
     // SAFETY: mount_table singleton — same as sys_chdir.
     let (fs, ino) = unsafe {
@@ -1611,15 +1566,7 @@ pub fn sys_stat(path: *const u8, buf: *mut u8) -> SyscallResult {
         st_rdev_minor: meta.dev_minor,
     };
 
-    // SAFETY: validate_user_ptr above bounded [buf, buf+sizeof(StatBuf)).
-    // stat is a fully-initialised StatBuf, repr(C), POD.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &stat as *const StatBuf as *const u8,
-            buf,
-            core::mem::size_of::<StatBuf>(),
-        );
-    }
+    usercopy::put_user(buf as u64, stat)?;
     Ok(0)
 }
 
@@ -1671,26 +1618,15 @@ fn with_current_tty_pty<R>(
 pub fn sys_ioctl(fd: i32, request: u32, arg: u64) -> SyscallResult {
     match request {
         TIOCGWINSZ => {
-            validate_user_ptr(arg, 4)?;
+            validate_user_ptr_mut(arg, 4)?;
             let ws = with_current_tty_pty(fd, |pty| pty.winsize())?;
-            // SAFETY: validate_user_ptr above confirmed 4 bytes at arg are
-            // user-mapped; we write rows then cols as two u16s.
-            unsafe {
-                let ptr = arg as *mut u16;
-                *ptr = ws.rows;
-                *ptr.add(1) = ws.cols;
-            }
+            // rows then cols, as two u16s.
+            usercopy::put_user(arg, [ws.rows, ws.cols])?;
             Ok(0)
         }
         TIOCSWINSZ => {
-            // Set window size
-            validate_user_ptr(arg, 4)?;
-            // SAFETY: validate_user_ptr above confirmed 4 bytes at arg are
-            // user-mapped; we read rows then cols as two u16s.
-            let (rows, cols) = unsafe {
-                let ptr = arg as *const u16;
-                (*ptr, *ptr.add(1))
-            };
+            // Set window size: rows then cols, as two u16s.
+            let [rows, cols]: [u16; 2] = usercopy::get_user(arg)?;
             if rows == 0 || cols == 0 || rows >= 10_000 || cols >= 10_000 {
                 return Err(SyscallError::EINVAL);
             }
@@ -1702,24 +1638,19 @@ pub fn sys_ioctl(fd: i32, request: u32, arg: u64) -> SyscallResult {
         }
         TIOCGPGRP => {
             // Get foreground process group
-            validate_user_ptr(arg, 4)?;
+            validate_user_ptr_mut(arg, 4)?;
             let pty_pgid = with_current_tty_pty(fd, |pty| pty.foreground_pgid)?;
             let pgid = if pty_pgid > 0 {
                 pty_pgid as u32
             } else {
                 crate::task::scheduler::current_pgid()
             };
-            // SAFETY: validate_user_ptr above confirmed 4 bytes at arg.
-            unsafe {
-                *(arg as *mut u32) = pgid;
-            }
+            usercopy::put_user(arg, pgid)?;
             Ok(0)
         }
         TIOCSPGRP => {
             // Set foreground process group
-            validate_user_ptr(arg, 4)?;
-            // SAFETY: validate_user_ptr above confirmed 4 bytes at arg.
-            let pgid = unsafe { *(arg as *const u32) };
+            let pgid: u32 = usercopy::get_user(arg)?;
             if pgid == 0 {
                 return Err(SyscallError::EINVAL);
             }
@@ -1777,6 +1708,7 @@ pub fn sys_ioctl(fd: i32, request: u32, arg: u64) -> SyscallResult {
 
 /// Timespec layout matching the kernel ABI.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Timespec {
     tv_sec: u64,
     tv_nsec: u64,
@@ -1787,7 +1719,7 @@ const CLOCK_MONOTONIC: u32 = 1;
 
 /// Get the current time for the given clock.
 pub fn sys_clock_gettime(clock_id: u32, tp: *mut u8) -> SyscallResult {
-    validate_user_ptr(tp as u64, core::mem::size_of::<Timespec>())?;
+    validate_user_ptr_mut(tp as u64, core::mem::size_of::<Timespec>())?;
 
     let ms = crate::interrupts::pit::uptime_ms();
     let ts = match clock_id {
@@ -1801,15 +1733,7 @@ pub fn sys_clock_gettime(clock_id: u32, tp: *mut u8) -> SyscallResult {
         _ => return Err(SyscallError::EINVAL),
     };
 
-    // SAFETY: validate_user_ptr above bounded [tp, tp+sizeof(Timespec)).
-    // ts is a fully-initialised, repr(C), POD Timespec.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &ts as *const Timespec as *const u8,
-            tp,
-            core::mem::size_of::<Timespec>(),
-        );
-    }
+    usercopy::put_user(tp as u64, ts)?;
     Ok(0)
 }
 
@@ -1821,7 +1745,7 @@ pub fn sys_clock_gettime(clock_id: u32, tp: *mut u8) -> SyscallResult {
 /// Each entry: [ino: u64][type: u8][name_len: u8][name: name_len bytes]
 /// Total entry size = 10 + name_len.
 pub fn sys_getdents(fd: i32, buf: *mut u8, buf_size: usize) -> SyscallResult {
-    validate_user_ptr(buf as u64, buf_size)?;
+    validate_user_ptr_mut(buf as u64, buf_size)?;
 
     // Get the inode from the fd
     // SAFETY: cli/sti window guarding the fd-table lookup + readdir.
@@ -1836,32 +1760,23 @@ pub fn sys_getdents(fd: i32, buf: *mut u8, buf_size: usize) -> SyscallResult {
         result?
     };
 
-    // Serialize entries into user buffer
-    let mut offset = 0usize;
+    // Serialize entries into a kernel buffer, then copy out once.
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     for entry in &entries {
         let name_bytes = entry.name.as_bytes();
         let name_len = name_bytes.len().min(255);
         let entry_size = 10 + name_len; // ino(8) + type(1) + name_len(1) + name
-        if offset + entry_size > buf_size {
+        if out.len() + entry_size > buf_size {
             break;
         }
-        // SAFETY: validate_user_ptr above bounded [buf, buf+buf_size); the
-        // offset+entry_size > buf_size check guarantees we stay within it.
-        unsafe {
-            // ino: u64
-            let dst = buf.add(offset);
-            core::ptr::copy_nonoverlapping(&entry.ino as *const u64 as *const u8, dst, 8);
-            // file_type: u8
-            *dst.add(8) = entry.file_type as u8;
-            // name_len: u8
-            *dst.add(9) = name_len as u8;
-            // name bytes
-            core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), dst.add(10), name_len);
-        }
-        offset += entry_size;
+        out.extend_from_slice(&entry.ino.to_le_bytes());
+        out.push(entry.file_type as u8);
+        out.push(name_len as u8);
+        out.extend_from_slice(&name_bytes[..name_len]);
     }
+    usercopy::copy_to_user(buf as u64, &out)?;
 
-    Ok(offset as i64)
+    Ok(out.len() as i64)
 }
 
 // ─────────────────────────────────────────────────
@@ -1870,13 +1785,8 @@ pub fn sys_getdents(fd: i32, buf: *mut u8, buf_size: usize) -> SyscallResult {
 
 /// Create a directory.
 pub fn sys_mkdir(path: *const u8, _mode: u32) -> SyscallResult {
-    let path_len = validate_user_string(path as u64)?;
-    // SAFETY: validate_user_string above confirmed [path, path+path_len) is
-    // user-mapped and NUL-terminated.
-    let path_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let path_owned = usercopy::read_user_string(path as u64, 4096)?;
+    let path_str = path_owned.as_str();
 
     // Resolve through mount table to find the right FS and relative path
     // SAFETY: mount_table is a kernel singleton initialised once at boot.
@@ -1913,13 +1823,8 @@ pub fn sys_mkdir(path: *const u8, _mode: u32) -> SyscallResult {
 
 /// Remove a file or empty directory.
 pub fn sys_unlink(path: *const u8) -> SyscallResult {
-    let path_len = validate_user_string(path as u64)?;
-    // SAFETY: validate_user_string above confirmed [path, path+path_len) is
-    // user-mapped and NUL-terminated.
-    let path_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let path_owned = usercopy::read_user_string(path as u64, 4096)?;
+    let path_str = path_owned.as_str();
 
     // SAFETY: mount_table singleton — same as sys_mkdir.
     let mt = unsafe { crate::vfs::mount::mount_table() };
@@ -2310,6 +2215,7 @@ unsafe extern "C" fn clone_child_return() {
 
 /// Kernel representation of a signal action.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct KSigAction {
     pub handler: u64, // SIG_DFL=0, SIG_IGN=1, or function pointer
     pub flags: u32,
@@ -2328,45 +2234,38 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SyscallRes
 
     let sa_size = core::mem::size_of::<KSigAction>();
 
+    // Both user pointers are checked - and the new action read - before
+    // the handler slot is touched, so a bad pointer changes nothing.
     if !oldact.is_null() {
-        validate_user_ptr(oldact as u64, sa_size)?;
+        validate_user_ptr_mut(oldact as u64, sa_size)?;
     }
-    if !act.is_null() {
-        validate_user_ptr(act as u64, sa_size)?;
-    }
+    let new_sa: Option<KSigAction> = if act.is_null() {
+        None
+    } else {
+        Some(usercopy::get_user(act as u64)?)
+    };
 
     // SAFETY: cli/sti window so we read+write the signal-handler slot
-    // atomically against signal delivery. oldact/act pointers were
-    // validated above; `&*(act as *const KSigAction)` is repr(C) POD.
-    unsafe {
+    // atomically against signal delivery.
+    let old_sa = unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
-
-        // Read old action
-        if !oldact.is_null() {
-            let old =
-                crate::task::scheduler::with_current_task(|t| t.signals.get_handler(signum as u8))
-                    .unwrap_or(0);
-            let old_sa = KSigAction {
-                handler: old,
-                flags: 0,
-                mask: 0,
-            };
-            core::ptr::copy_nonoverlapping(
-                &old_sa as *const KSigAction as *const u8,
-                oldact,
-                sa_size,
-            );
-        }
-
-        // Set new action
-        if !act.is_null() {
-            let new_sa = &*(act as *const KSigAction);
+        let old =
+            crate::task::scheduler::with_current_task(|t| t.signals.get_handler(signum as u8))
+                .unwrap_or(0);
+        if let Some(new_sa) = new_sa {
             crate::task::scheduler::with_current_task_mut(|t| {
                 t.signals.set_handler(signum as u8, new_sa.handler);
             });
         }
-
         core::arch::asm!("sti", options(nomem, nostack));
+        KSigAction {
+            handler: old,
+            flags: 0,
+            mask: 0,
+        }
+    };
+    if !oldact.is_null() {
+        usercopy::put_user(oldact as u64, old_sa)?;
     }
     Ok(0)
 }
@@ -2401,11 +2300,7 @@ pub fn sys_sigreturn() -> SyscallResult {
     let frame = unsafe { &mut *(frame_ptr as *mut SyscallFrame) };
 
     let usf_addr = frame.user_rsp;
-    let usf_size = core::mem::size_of::<UserSignalFrame>();
-    validate_user_ptr(usf_addr, usf_size)?;
-
-    // SAFETY: address+size are bounds-checked above, STAC is active.
-    let usf: UserSignalFrame = unsafe { core::ptr::read(usf_addr as *const UserSignalFrame) };
+    let usf: UserSignalFrame = usercopy::get_user(usf_addr)?;
 
     if usf.magic != SIG_FRAME_MAGIC {
         return Err(SyscallError::EFAULT);
@@ -2424,6 +2319,7 @@ pub fn sys_sigreturn() -> SyscallResult {
 
 /// PollFd structure matching user-space layout.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct PollFd {
     fd: i32,
     events: i16,
@@ -2443,19 +2339,38 @@ pub fn sys_poll(fds_ptr: *mut u8, nfds: u32, timeout_ms: i32) -> SyscallResult {
     }
     let size = nfds as usize * core::mem::size_of::<PollFd>();
     if size > 0 {
-        validate_user_ptr(fds_ptr as u64, size)?;
+        validate_user_ptr_mut(fds_ptr as u64, size)?;
     }
 
-    let ready = poll_once(fds_ptr, nfds);
+    // The pollfd array is copied in once; each pass works on the kernel
+    // copy and writes the revents back through copy_to_user.
+    let mut fds: alloc::vec::Vec<PollFd> = alloc::vec::Vec::with_capacity(nfds as usize);
+    for i in 0..nfds as usize {
+        let at = (fds_ptr as u64)
+            .checked_add((i * core::mem::size_of::<PollFd>()) as u64)
+            .ok_or(SyscallError::EFAULT)?;
+        fds.push(usercopy::get_user(at)?);
+    }
+    let write_back = |fds: &[PollFd]| -> Result<(), SyscallError> {
+        for (i, pfd) in fds.iter().enumerate() {
+            let at = (fds_ptr as u64) + (i * core::mem::size_of::<PollFd>()) as u64;
+            usercopy::put_user(at, *pfd)?;
+        }
+        Ok(())
+    };
+
+    let ready = poll_once(&mut fds);
     if ready != 0 || timeout_ms == 0 {
+        write_back(&fds)?;
         return Ok(ready);
     }
 
     if timeout_ms < 0 {
         loop {
             crate::task::scheduler::yield_now();
-            let ready = poll_once(fds_ptr, nfds);
+            let ready = poll_once(&mut fds);
             if ready != 0 {
+                write_back(&fds)?;
                 return Ok(ready);
             }
         }
@@ -2464,23 +2379,23 @@ pub fn sys_poll(fds_ptr: *mut u8, nfds: u32, timeout_ms: i32) -> SyscallResult {
     let deadline = crate::interrupts::pit::uptime_ms().saturating_add(timeout_ms as u64);
     while crate::interrupts::pit::uptime_ms() < deadline {
         crate::task::scheduler::yield_now();
-        let ready = poll_once(fds_ptr, nfds);
+        let ready = poll_once(&mut fds);
         if ready != 0 {
+            write_back(&fds)?;
             return Ok(ready);
         }
     }
+    write_back(&fds)?;
     Ok(0)
 }
 
-fn poll_once(fds_ptr: *mut u8, nfds: u32) -> i64 {
+fn poll_once(fds: &mut [PollFd]) -> i64 {
     let mut ready = 0i64;
-    // SAFETY: caller (sys_poll) validated [fds_ptr, fds_ptr+nfds*sizeof(PollFd))
-    // is user-mapped + nfds <= 256. cli/sti window so the fd-table snapshot
-    // for each pfd is consistent across the loop.
+    // SAFETY: cli/sti window so the fd-table snapshot for each pfd is
+    // consistent across the loop. `fds` is the kernel copy of the array.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
-        for i in 0..nfds as usize {
-            let pfd = &mut *((fds_ptr as *mut PollFd).add(i));
+        for pfd in fds.iter_mut() {
             pfd.revents = 0;
 
             if pfd.fd < 0 {
@@ -2628,10 +2543,7 @@ pub fn sys_getegid() -> SyscallResult {
 
 /// Sleep for the specified duration.
 pub fn sys_nanosleep(req: *const u8, _rem: *mut u8) -> SyscallResult {
-    validate_user_ptr(req as u64, 16)?;
-    // SAFETY: validate_user_ptr above bounded 16 bytes (= sizeof(Timespec))
-    // at req; Timespec is repr(C) POD.
-    let ts = unsafe { &*(req as *const Timespec) };
+    let ts: Timespec = usercopy::get_user(req as u64)?;
     let ms = ts.tv_sec * 1000 + ts.tv_nsec / 1_000_000;
     let target = crate::interrupts::pit::uptime_ms() + ms;
 
@@ -2653,13 +2565,8 @@ pub fn sys_nanosleep(req: *const u8, _rem: *mut u8) -> SyscallResult {
 /// A filesystem without truncate support answers with its own error (the
 /// initramfs, being read-only, EACCES) - never a silent success.
 pub fn sys_truncate(path: *const u8, length: u64) -> SyscallResult {
-    let path_len = validate_user_string(path as u64)?;
-    // SAFETY: validate_user_string above confirmed [path, path+path_len) is
-    // user-mapped and NUL-terminated.
-    let path_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let path_owned = usercopy::read_user_string(path as u64, 4096)?;
+    let path_str = path_owned.as_str();
 
     // SAFETY: mount_table singleton - same as sys_chmod.
     let (fs, ino) = unsafe {
@@ -2685,11 +2592,11 @@ pub fn sys_truncate(path: *const u8, length: u64) -> SyscallResult {
 
 /// Get file status by fd.
 pub fn sys_fstat(fd: i32, buf: *mut u8) -> SyscallResult {
-    validate_user_ptr(buf as u64, core::mem::size_of::<StatBuf>())?;
+    validate_user_ptr_mut(buf as u64, core::mem::size_of::<StatBuf>())?;
 
-    // SAFETY: cli/sti window for fd-table lookup; buf bounded by
-    // validate_user_ptr above so copy_nonoverlapping into it is in-range.
-    unsafe {
+    // SAFETY: cli/sti window for the fd-table lookup; the StatBuf is built
+    // inside it and copied out through put_user afterwards.
+    let stat = unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
         let result = crate::task::scheduler::with_current_fd_table(|fds| {
             let file = fds.get(fd).map_err(map_vfs_error)?;
@@ -2708,17 +2615,14 @@ pub fn sys_fstat(fd: i32, buf: *mut u8) -> SyscallResult {
                 st_rdev_major: meta.dev_major,
                 st_rdev_minor: meta.dev_minor,
             };
-            core::ptr::copy_nonoverlapping(
-                &stat as *const StatBuf as *const u8,
-                buf,
-                core::mem::size_of::<StatBuf>(),
-            );
-            Ok(0i64)
+            Ok(stat)
         })
         .unwrap_or(Err(SyscallError::EBADF));
         core::arch::asm!("sti", options(nomem, nostack));
-        result
-    }
+        result?
+    };
+    usercopy::put_user(buf as u64, stat)?;
+    Ok(0)
 }
 
 // ─────────────────────────────────────────────────
@@ -2779,13 +2683,8 @@ pub fn sys_lseek(fd: i32, offset: i64, whence: i32) -> SyscallResult {
 
 /// Check file accessibility.
 pub fn sys_access(path: *const u8, _mode: u32) -> SyscallResult {
-    let path_len = validate_user_string(path as u64)?;
-    // SAFETY: validate_user_string above confirmed [path, path+path_len) is
-    // user-mapped and NUL-terminated.
-    let path_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let path_owned = usercopy::read_user_string(path as u64, 4096)?;
+    let path_str = path_owned.as_str();
 
     // SAFETY: mount_table is a kernel singleton initialised once at boot.
     let (fs, ino) = unsafe {
@@ -2816,13 +2715,8 @@ pub fn sys_access(path: *const u8, _mode: u32) -> SyscallResult {
 // ─────────────────────────────────────────────────
 
 pub fn sys_chmod(path: *const u8, mode: u32) -> SyscallResult {
-    let path_len = validate_user_string(path as u64)?;
-    // SAFETY: validate_user_string above confirmed [path, path+path_len) is
-    // user-mapped and NUL-terminated.
-    let path_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let path_owned = usercopy::read_user_string(path as u64, 4096)?;
+    let path_str = path_owned.as_str();
 
     // SAFETY: mount_table singleton — same as sys_access.
     let (fs, ino) = unsafe {
@@ -2844,13 +2738,8 @@ pub fn sys_chmod(path: *const u8, mode: u32) -> SyscallResult {
 }
 
 pub fn sys_chown(path: *const u8, uid: u32, gid: u32) -> SyscallResult {
-    let path_len = validate_user_string(path as u64)?;
-    // SAFETY: validate_user_string above confirmed [path, path+path_len) is
-    // user-mapped and NUL-terminated.
-    let path_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(path, path_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let path_owned = usercopy::read_user_string(path as u64, 4096)?;
+    let path_str = path_owned.as_str();
 
     // SAFETY: mount_table singleton — same as sys_access.
     let (fs, ino) = unsafe {
@@ -2896,18 +2785,9 @@ pub fn sys_umask(mask: u32) -> SyscallResult {
 /// what callers expect and what makes `ln` fall back to a copy on real
 /// systems.
 pub fn sys_link(old: *const u8, new: *const u8) -> SyscallResult {
-    let old_len = validate_user_string(old as u64)?;
-    let new_len = validate_user_string(new as u64)?;
-    // SAFETY: validate_user_string confirmed both ranges are user-mapped and
-    // NUL-terminated.
-    let (old_str, new_str) = unsafe {
-        (
-            core::str::from_utf8(core::slice::from_raw_parts(old, old_len))
-                .map_err(|_| SyscallError::EINVAL)?,
-            core::str::from_utf8(core::slice::from_raw_parts(new, new_len))
-                .map_err(|_| SyscallError::EINVAL)?,
-        )
-    };
+    let old_owned = usercopy::read_user_string(old as u64, 4096)?;
+    let new_owned = usercopy::read_user_string(new as u64, 4096)?;
+    let (old_str, new_str) = (old_owned.as_str(), new_owned.as_str());
 
     // SAFETY: mount_table is a kernel singleton initialised once at boot.
     let mt = unsafe { crate::vfs::mount::mount_table() };
@@ -2959,10 +2839,7 @@ pub fn sys_link(old: *const u8, new: *const u8) -> SyscallResult {
 /// PIT has to keep firing or nothing drains the NIC and the reply never
 /// arrives. Same pattern as sys_connect.
 pub fn sys_icmp_echo(ip: *const u8, timeout_ms: u32) -> SyscallResult {
-    validate_user_ptr(ip as u64, 4)?;
-    // SAFETY: validate_user_ptr bounded [ip, ip+4) to user space.
-    let addr = unsafe { core::slice::from_raw_parts(ip, 4) };
-    let dst = [addr[0], addr[1], addr[2], addr[3]];
+    let dst: [u8; 4] = usercopy::get_user(ip as u64)?;
 
     // 32 bytes, the conventional ping payload size.
     let payload = [0x61u8; 32];
@@ -3002,18 +2879,9 @@ pub fn sys_readlink(_path: *const u8, _buf: *mut u8, _bufsiz: usize) -> SyscallR
 /// created a new one and unlinked the old, and did not move an empty file
 /// at all.
 pub fn sys_rename(old: *const u8, new: *const u8) -> SyscallResult {
-    let old_len = validate_user_string(old as u64)?;
-    let new_len = validate_user_string(new as u64)?;
-    // SAFETY: validate_user_string above bounded [old, old+old_len).
-    let old_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(old, old_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
-    // SAFETY: validate_user_string above bounded [new, new+new_len).
-    let new_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(new, new_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let old_owned = usercopy::read_user_string(old as u64, 4096)?;
+    let new_owned = usercopy::read_user_string(new as u64, 4096)?;
+    let (old_str, new_str) = (old_owned.as_str(), new_owned.as_str());
 
     // SAFETY: mount_table is a kernel singleton.
     let mt = unsafe { crate::vfs::mount::mount_table() };
@@ -3194,23 +3062,28 @@ pub fn sys_connect(fd: i32, addr: *const u8, len: u32) -> SyscallResult {
 }
 
 pub fn sys_send(fd: i32, buf: *const u8, len: usize, _flags: u32) -> SyscallResult {
-    validate_user_ptr(buf as u64, len)?;
+    // Copied into the kernel first, like sys_write; at most USER_IO_CHUNK
+    // bytes per call.
+    let chunk = len.min(USER_IO_CHUNK);
+    let mut data = alloc::vec![0u8; chunk];
+    usercopy::copy_from_user(&mut data, buf as u64)?;
     let pid = crate::task::scheduler::current_pid();
-    // SAFETY: validate_user_ptr above bounded [buf, buf+len) to user space.
-    let data = unsafe { core::slice::from_raw_parts(buf, len) };
     if let Some(conn_id) = crate::net::tcp_id_by_fd(pid, fd) {
-        crate::net::tcp::send(conn_id, data).map_err(|_| SyscallError::EPIPE)?;
-        return Ok(len as i64);
+        crate::net::tcp::send(conn_id, &data).map_err(|_| SyscallError::EPIPE)?;
+        return Ok(chunk as i64);
     }
-    let n = crate::net::send(pid, fd, data).map_err(map_net_error)?;
+    let n = crate::net::send(pid, fd, &data).map_err(map_net_error)?;
     Ok(n as i64)
 }
 
 pub fn sys_recv(fd: i32, buf: *mut u8, len: usize, _flags: u32) -> SyscallResult {
-    validate_user_ptr(buf as u64, len)?;
+    // Received into a kernel buffer and copied out at the end, like
+    // sys_read; the user range is checked for writability first.
+    validate_user_ptr_mut(buf as u64, len)?;
+    let chunk = len.min(USER_IO_CHUNK);
+    let mut bounce = alloc::vec![0u8; chunk];
+    let out = &mut bounce[..];
     let pid = crate::task::scheduler::current_pid();
-    // SAFETY: validate_user_ptr above bounded [buf, buf+len) to user space.
-    let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
     if let Some(conn_id) = crate::net::tcp_id_by_fd(pid, fd) {
         // Block until something arrives, EOF is observed, or 5 s elapse.
         // PIT must be running so timer_handler drains the NIC RX queue.
@@ -3242,9 +3115,12 @@ pub fn sys_recv(fd: i32, buf: *mut u8, len: usize, _flags: u32) -> SyscallResult
         unsafe {
             core::arch::asm!("cli", options(nomem, nostack));
         }
-        return result;
+        let n = result?;
+        usercopy::copy_to_user(buf as u64, &bounce[..n as usize])?;
+        return Ok(n);
     }
     let n = crate::net::recv(pid, fd, out).map_err(map_net_error)?;
+    usercopy::copy_to_user(buf as u64, &bounce[..n])?;
     Ok(n as i64)
 }
 
@@ -3252,17 +3128,13 @@ pub fn sys_gethostbyname(name_ptr: *const u8, name_len: usize, ip_out: *mut u8) 
     if name_len == 0 || name_len > 253 {
         return Err(SyscallError::EINVAL);
     }
-    validate_user_ptr(name_ptr as u64, name_len)?;
-    validate_user_ptr(ip_out as u64, 4)?;
-    // SAFETY: validate_user_ptr above bounded [name_ptr, name_ptr+name_len).
-    let bytes = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
-    let name = core::str::from_utf8(bytes).map_err(|_| SyscallError::EINVAL)?;
+    validate_user_ptr_mut(ip_out as u64, 4)?;
+    let mut bytes = alloc::vec![0u8; name_len];
+    usercopy::copy_from_user(&mut bytes, name_ptr as u64)?;
+    let name = core::str::from_utf8(&bytes).map_err(|_| SyscallError::EINVAL)?;
     match crate::net::stack::resolve(name) {
         Some(ip) => {
-            // SAFETY: ip_out bounded to 4 bytes by the validate_user_ptr above.
-            unsafe {
-                core::ptr::copy_nonoverlapping(ip.as_ptr(), ip_out, 4);
-            }
+            usercopy::copy_to_user(ip_out as u64, &ip)?;
             Ok(0)
         }
         None => Err(SyscallError::ETIMEDOUT),
@@ -3322,7 +3194,7 @@ pub fn sys_getsockopt(
 /// Wait for a specific child (or any child if pid == -1).
 pub fn sys_waitpid(pid: i32, status_ptr: *mut i32, options: u32) -> SyscallResult {
     if !status_ptr.is_null() {
-        validate_user_ptr(status_ptr as u64, 4)?;
+        validate_user_ptr_mut(status_ptr as u64, 4)?;
     }
     sys_wait(pid, status_ptr as u64, options)
 }
@@ -3341,27 +3213,19 @@ pub fn sys_pipe2(fds: *mut i32, _flags: u32) -> SyscallResult {
 
 /// UTS name structure: 5 fields × 65 bytes each = 325 bytes.
 pub fn sys_uname(buf: *mut u8) -> SyscallResult {
-    validate_user_ptr(buf as u64, 325)?;
-    // SAFETY: validate_user_ptr above bounded [buf, buf+325) to user space;
-    // all subsequent offsets (0, 65, 130, 195, 260) + max-len writes fit.
-    unsafe {
-        core::ptr::write_bytes(buf, 0, 325);
-        // sysname
-        let sysname = b"RacOS";
-        core::ptr::copy_nonoverlapping(sysname.as_ptr(), buf, sysname.len());
-        // nodename
-        let nodename = b"racos";
-        core::ptr::copy_nonoverlapping(nodename.as_ptr(), buf.add(65), nodename.len());
-        // release
-        let release = b"0.1.0";
-        core::ptr::copy_nonoverlapping(release.as_ptr(), buf.add(130), release.len());
-        // version
-        let version = b"#1 RacOS";
-        core::ptr::copy_nonoverlapping(version.as_ptr(), buf.add(195), version.len());
-        // machine
-        let machine = b"x86_64";
-        core::ptr::copy_nonoverlapping(machine.as_ptr(), buf.add(260), machine.len());
+    // Five 65-byte fields (sysname, nodename, release, version, machine),
+    // built in the kernel and copied out once.
+    let mut out = [0u8; 325];
+    for (offset, field) in [
+        (0usize, &b"RacOS"[..]),
+        (65, &b"racos"[..]),
+        (130, &b"0.1.0"[..]),
+        (195, &b"#1 RacOS"[..]),
+        (260, &b"x86_64"[..]),
+    ] {
+        out[offset..offset + field.len()].copy_from_slice(field);
     }
+    usercopy::copy_to_user(buf as u64, &out)?;
     Ok(0)
 }
 
@@ -3378,31 +3242,17 @@ pub fn sys_mount(
 ) -> SyscallResult {
     require_cap(crate::security::capability::CAP_SYS_ADMIN)?;
 
-    let src_str = if src.is_null() {
+    let src_owned = if src.is_null() {
         None
     } else {
-        let src_len = validate_user_string(src as u64)?;
-        // SAFETY: validate_user_string above bounded [src, src+src_len).
-        let src = unsafe {
-            core::str::from_utf8(core::slice::from_raw_parts(src, src_len))
-                .map_err(|_| SyscallError::EINVAL)?
-        };
-        Some(src)
+        Some(usercopy::read_user_string(src as u64, 4096)?)
     };
+    let src_str = src_owned.as_deref();
 
-    let target_len = validate_user_string(target as u64)?;
-    let fstype_len = validate_user_string(fstype as u64)?;
-
-    // SAFETY: validate_user_string above bounded [target, target+target_len).
-    let target_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(target, target_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
-    // SAFETY: validate_user_string above bounded [fstype, fstype+fstype_len).
-    let fstype_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(fstype, fstype_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let target_owned = usercopy::read_user_string(target as u64, 4096)?;
+    let fstype_owned = usercopy::read_user_string(fstype as u64, 4096)?;
+    let target_str = target_owned.as_str();
+    let fstype_str = fstype_owned.as_str();
 
     if !target_str.starts_with('/') {
         return Err(SyscallError::EINVAL);
@@ -3477,12 +3327,8 @@ pub fn sys_mount(
 pub fn sys_umount(target: *const u8) -> SyscallResult {
     require_cap(crate::security::capability::CAP_SYS_ADMIN)?;
 
-    let target_len = validate_user_string(target as u64)?;
-    // SAFETY: validate_user_string above bounded [target, target+target_len).
-    let target_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(target, target_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let target_owned = usercopy::read_user_string(target as u64, 4096)?;
+    let target_str = target_owned.as_str();
     if !target_str.starts_with('/') {
         return Err(SyscallError::EINVAL);
     }
@@ -3525,18 +3371,12 @@ pub fn sys_mkfs(
     if src_len == 0 || src_len > 64 || fstype_len == 0 || fstype_len > 16 {
         return Err(SyscallError::EINVAL);
     }
-    validate_user_ptr(src as u64, src_len)?;
-    validate_user_ptr(fstype as u64, fstype_len)?;
-    // SAFETY: validate_user_ptr above bounded [src, src+src_len).
-    let src_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(src, src_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
-    // SAFETY: validate_user_ptr above bounded [fstype, fstype+fstype_len).
-    let fstype_str = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(fstype, fstype_len))
-            .map_err(|_| SyscallError::EINVAL)?
-    };
+    let mut src_bytes = alloc::vec![0u8; src_len];
+    usercopy::copy_from_user(&mut src_bytes, src as u64)?;
+    let mut fstype_bytes = alloc::vec![0u8; fstype_len];
+    usercopy::copy_from_user(&mut fstype_bytes, fstype as u64)?;
+    let src_str = core::str::from_utf8(&src_bytes).map_err(|_| SyscallError::EINVAL)?;
+    let fstype_str = core::str::from_utf8(&fstype_bytes).map_err(|_| SyscallError::EINVAL)?;
 
     let dev_name = src_str.strip_prefix("/dev/").unwrap_or(src_str);
 
@@ -3651,6 +3491,7 @@ pub fn sys_ftruncate(fd: i32, length: u64) -> SyscallResult {
 
 /// iovec structure for scatter/gather I/O.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct IoVec {
     iov_base: u64,
     iov_len: u64,
@@ -3665,16 +3506,14 @@ pub fn sys_writev(fd: i32, iov_ptr: *const u8, iovcnt: i32) -> SyscallResult {
 
     let mut total = 0i64;
     for i in 0..iovcnt as usize {
-        // SAFETY: iov_ptr + iovcnt*sizeof(IoVec) bounded above; i < iovcnt.
-        let iov = unsafe { &*((iov_ptr as *const IoVec).add(i)) };
+        // Each iovec is read through get_user; sys_write checks and copies
+        // the payload it names.
+        let iov: IoVec =
+            usercopy::get_user(iov_ptr as u64 + (i * core::mem::size_of::<IoVec>()) as u64)?;
         if iov.iov_len == 0 {
             continue;
         }
-        validate_user_ptr(iov.iov_base, iov.iov_len as usize)?;
-        // SAFETY: validate_user_ptr above bounded the iov payload.
-        let buf =
-            unsafe { core::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len as usize) };
-        match sys_write(fd, buf.as_ptr(), buf.len()) {
+        match sys_write(fd, iov.iov_base as *const u8, iov.iov_len as usize) {
             Ok(n) => total += n,
             Err(e) => {
                 if total > 0 {
@@ -3696,12 +3535,13 @@ pub fn sys_readv(fd: i32, iov_ptr: *const u8, iovcnt: i32) -> SyscallResult {
 
     let mut total = 0i64;
     for i in 0..iovcnt as usize {
-        // SAFETY: iov_ptr + iovcnt*sizeof(IoVec) bounded above; i < iovcnt.
-        let iov = unsafe { &*((iov_ptr as *const IoVec).add(i)) };
+        // Each iovec is read through get_user; sys_read checks and fills
+        // the payload it names.
+        let iov: IoVec =
+            usercopy::get_user(iov_ptr as u64 + (i * core::mem::size_of::<IoVec>()) as u64)?;
         if iov.iov_len == 0 {
             continue;
         }
-        validate_user_ptr(iov.iov_base, iov.iov_len as usize)?;
         match sys_read(fd, iov.iov_base as *mut u8, iov.iov_len as usize) {
             Ok(n) => {
                 total += n;
@@ -3803,29 +3643,33 @@ pub fn sys_hostname(buf: *mut u8, len: usize, set: u32) -> SyscallResult {
     if set != 0 {
         // Set hostname — requires CAP_SYS_ADMIN
         require_cap(crate::security::capability::CAP_SYS_ADMIN)?;
-        validate_user_ptr(buf as u64, len)?;
         let new_len = len.min(255);
+        let mut incoming = [0u8; 255];
+        usercopy::copy_from_user(&mut incoming[..new_len], buf as u64)?;
         // SAFETY: mutating HOSTNAME + HOSTNAME_LEN — single-CPU MVP, no
-        // concurrent set_hostname callers. buf bounded above.
+        // concurrent set_hostname callers.
         unsafe {
             let hname = &mut *core::ptr::addr_of_mut!(HOSTNAME);
-            core::ptr::copy_nonoverlapping(buf as *const u8, hname.as_mut_ptr(), new_len);
+            hname[..new_len].copy_from_slice(&incoming[..new_len]);
             *core::ptr::addr_of_mut!(HOSTNAME_LEN) = new_len;
         }
         Ok(0)
     } else {
         // Get hostname
-        validate_user_ptr(buf as u64, len)?;
+        validate_user_ptr_mut(buf as u64, len)?;
         // SAFETY: read HOSTNAME / HOSTNAME_LEN — single-CPU MVP, no concurrent
-        // setter; buf bounded above; copy_len <= len-1 leaves room for NUL.
-        unsafe {
+        // setter.
+        let (out, copy_len) = unsafe {
             let hname = &*core::ptr::addr_of!(HOSTNAME);
             let hlen = *core::ptr::addr_of!(HOSTNAME_LEN);
             let copy_len = hlen.min(len.saturating_sub(1));
-            core::ptr::copy_nonoverlapping(hname.as_ptr(), buf, copy_len);
-            *buf.add(copy_len) = 0;
-            Ok(copy_len as i64)
-        }
+            let mut out = [0u8; 256];
+            out[..copy_len].copy_from_slice(&hname[..copy_len]);
+            (out, copy_len)
+        };
+        // copy_len <= len-1 leaves room for the NUL inside the checked range.
+        usercopy::copy_to_user(buf as u64, &out[..copy_len + 1])?;
+        Ok(copy_len as i64)
     }
 }
 
@@ -3838,7 +3682,8 @@ pub fn sys_hostname(buf: *mut u8, len: usize, set: u32) -> SyscallResult {
 /// Uses a per-call seeded LCG. This is NOT cryptographically secure,
 /// but is adequate for the kernel MVP. Mixes TSC, PIT, and PID for entropy.
 pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> SyscallResult {
-    validate_user_ptr(buf as u64, len)?;
+    validate_user_ptr_mut(buf as u64, len)?;
+    let len = len.min(USER_IO_CHUNK);
     // Mix multiple entropy sources
     let tsc: u64;
     // SAFETY: rdtsc has no operands beyond eax/edx output; always available
@@ -3856,15 +3701,14 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, _flags: u32) -> SyscallResult {
         .wrapping_add(pit)
         .wrapping_mul(2862933555777941757)
         .wrapping_add(pid);
-    // SAFETY: validate_user_ptr above bounded [buf, buf+len); i < len.
-    unsafe {
-        for i in 0..len {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            *buf.add(i) = (state >> 33) as u8;
-        }
+    let mut out = alloc::vec![0u8; len];
+    for byte in out.iter_mut() {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *byte = (state >> 33) as u8;
     }
+    usercopy::copy_to_user(buf as u64, &out)?;
     Ok(len as i64)
 }
 

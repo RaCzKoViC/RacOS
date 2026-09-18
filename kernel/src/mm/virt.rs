@@ -261,6 +261,60 @@ pub unsafe fn unmap_page(pml4_phys: u64, virt: VirtAddr) -> Result<PhysFrame, &'
     Ok(frame)
 }
 
+/// What a *user-mode* access to `virt` would be allowed to do under the
+/// page table at `pml4_phys`: the PRESENT / USER / WRITABLE bits folded
+/// (ANDed) across every level of the walk, exactly as the CPU evaluates
+/// them for ring 3, plus the leaf's other flags. `None` if any level is
+/// not present. Handles 1 GiB and 2 MiB leaves.
+///
+/// This is what a syscall must ask before touching a pointer a process
+/// handed it: a page the process itself could not read (a kernel page, an
+/// unmapped one) or could not write (its own text) must be refused, not
+/// reached in ring 0.
+///
+/// # Safety
+/// `pml4_phys` must be a live page table whose frames are identity-mapped,
+/// which is true of every process table this kernel builds.
+pub unsafe fn user_access_flags(pml4_phys: u64, virt: u64) -> Option<u64> {
+    let v = VirtAddr(virt);
+    let folded_mask = flags::USER | flags::WRITABLE;
+
+    let pml4 = &*(pml4_phys as *const PageTable);
+    let e4 = pml4.entries[v.pml4_index()];
+    if !e4.is_present() {
+        return None;
+    }
+    let mut folded = e4.flags() & folded_mask;
+
+    let pdpt = &*(e4.frame()?.addr() as *const PageTable);
+    let e3 = pdpt.entries[v.pdpt_index()];
+    if !e3.is_present() {
+        return None;
+    }
+    folded &= e3.flags();
+    if e3.flags() & flags::HUGE_PAGE != 0 {
+        return Some((e3.flags() & !folded_mask) | folded);
+    }
+
+    let pd = &*(e3.frame()?.addr() as *const PageTable);
+    let e2 = pd.entries[v.pd_index()];
+    if !e2.is_present() {
+        return None;
+    }
+    folded &= e2.flags();
+    if e2.flags() & flags::HUGE_PAGE != 0 {
+        return Some((e2.flags() & !folded_mask) | folded);
+    }
+
+    let pt = &*(e2.frame()?.addr() as *const PageTable);
+    let e1 = pt.entries[v.pt_index()];
+    if !e1.is_present() {
+        return None;
+    }
+    folded &= e1.flags();
+    Some((e1.flags() & !folded_mask) | folded)
+}
+
 /// Ensure a page table entry points to a sub-table.
 /// If not present, allocate a new frame for the sub-table with the given flags.
 /// If already present, OR in additional flags (e.g., USER for user-page mappings).

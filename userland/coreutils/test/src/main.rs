@@ -117,6 +117,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_truncate_semantics();
     test_coreutils_preserve_data();
     test_rename_semantics();
+    test_usercopy_rejects_bad_pointers();
     test_persistent_mount_layout();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
@@ -1720,6 +1721,151 @@ fn test_rename_semantics() {
         && fat_ok
     {
         println("T38-RENAME-OK");
+    }
+}
+
+/// Two pages, page-aligned, in .bss: a buffer that crosses a page boundary
+/// inside a mapped region, for the positive case below.
+#[repr(C, align(4096))]
+struct TwoPages([u8; 8192]);
+static TWO_PAGES: TwoPages = TwoPages([0u8; 8192]);
+
+/// A syscall handed a pointer the process could not touch itself must say
+/// EFAULT - not read it, not write it, not fault in ring 0. Before this
+/// group `validate_user_ptr` checked null, `ptr <= 0x7FFF_FFFF_FFFF` and
+/// overflow, nothing about the page tables. The kernel is linked at
+/// 0x100000 and identity-mapped as supervisor pages, so a kernel address
+/// passed every check: `write(1, 0x100000, 64)` printed kernel bytes,
+/// `read` into a kernel address wrote kernel memory in ring 0, and an
+/// unmapped address page-faulted in the kernel, which parks the CPU.
+///
+/// The order matters for the red run on the old kernel: the leaks come
+/// first and show in the log; the first unmapped pointer then halts the
+/// guest, and the writes into kernel memory are never reached.
+fn test_usercopy_rejects_bad_pointers() {
+    println("\n[test] user pointers: mapped, user, right direction");
+
+    const EFAULT: i64 = -14;
+    const KERNEL_TEXT: u64 = 0x0010_0000; // where the kernel is linked
+    const IDENTITY_RAM: u64 = 0x1000_0000; // physical RAM, identity-mapped, supervisor
+    const UNMAPPED: u64 = 0x0000_1000_0000_0000; // canonical, below the user limit, nothing there
+    const BELOW_STACK: u64 = 0x7FFF_FFDE_F000; // the page under the user stack
+    const STACK_LAST_PAGE: u64 = 0x7FFF_FFFE_F000; // last page of the user stack
+    const NONCANON_LOW: u64 = 0x8000_0000_0000_0000;
+    const KERNEL_HALF: u64 = 0xFFFF_8000_0000_0000;
+
+    let devnull = open(b"/dev/null\0", O_RDWR, 0).unwrap_or(-1);
+    let dn = devnull as u64;
+
+    // SAFETY: every raw syscall below hands the kernel a pointer on purpose;
+    // the point of the test is that the kernel refuses it. Nothing here is
+    // dereferenced by this process.
+    let w = |fd: u64, ptr: u64, len: u64| unsafe { libc_lite::syscall3(SYS_WRITE, fd, ptr, len) };
+    let r = |fd: u64, ptr: u64, len: u64| unsafe { libc_lite::syscall3(SYS_READ, fd, ptr, len) };
+    let o = |ptr: u64| unsafe { libc_lite::syscall3(SYS_OPEN, ptr, 0, 0) };
+    let st =
+        |path: &[u8], buf: u64| unsafe { libc_lite::syscall2(SYS_STAT, path.as_ptr() as u64, buf) };
+
+    // --- reads of memory the process does not own --------------------------
+    let leak_text = w(1, KERNEL_TEXT, 64) == EFAULT;
+    check!(
+        "write(1, kernel text) is EFAULT, not a kernel memory leak",
+        leak_text
+    );
+    let leak_ram = w(dn, IDENTITY_RAM, 16) == EFAULT;
+    check!("write(fd, identity-mapped RAM) is EFAULT", leak_ram);
+    let path_in_kernel = o(KERNEL_TEXT) == EFAULT;
+    check!("open(path in kernel memory) is EFAULT", path_in_kernel);
+
+    // --- the checks that already held: non-canonical, overflow, null --------
+    let noncanon = w(dn, NONCANON_LOW, 1) == EFAULT && w(dn, KERNEL_HALF, 1) == EFAULT;
+    check!(
+        "non-canonical and kernel-half addresses are EFAULT",
+        noncanon
+    );
+    let overflow =
+        w(dn, 0x7FFF_FFFF_FFF0, 0x100) == EFAULT && w(dn, 0x7FFF_FFFF_FFFF, u64::MAX) == EFAULT;
+    check!(
+        "a range that overflows or leaves user space is EFAULT",
+        overflow
+    );
+    let null = r(dn, 0, 1) == EFAULT && o(0) == EFAULT;
+    check!("a null pointer is EFAULT", null);
+
+    // --- what must keep working ---------------------------------------------
+    let two_pages = w(dn, TWO_PAGES.0.as_ptr() as u64, 8192) == 8192;
+    check!(
+        "a buffer crossing a page boundary inside a mapping is accepted",
+        two_pages
+    );
+    let text_addr = main as *const () as u64;
+    let text_read = w(dn, text_addr, 16) == 16;
+    check!(
+        "reading from the process's own text (R-X) is accepted",
+        text_read
+    );
+    let stack_read = w(dn, STACK_LAST_PAGE, 0x1000) == 0x1000;
+    check!("reading a whole mapped stack page is accepted", stack_read);
+
+    // --- unmapped: the old kernel page-faults in ring 0 here and halts -----
+    let unmapped_stat = st(b"/\0", UNMAPPED) == EFAULT;
+    check!(
+        "stat into an unmapped buffer is EFAULT, not a kernel page fault",
+        unmapped_stat
+    );
+    let unmapped_w = w(dn, UNMAPPED, 16) == EFAULT && w(dn, BELOW_STACK, 16) == EFAULT;
+    check!("write from an unmapped address is EFAULT", unmapped_w);
+    let unmapped_open = o(UNMAPPED) == EFAULT && o(BELOW_STACK) == EFAULT;
+    check!(
+        "open with an unmapped path pointer is EFAULT",
+        unmapped_open
+    );
+    let crosses = w(dn, STACK_LAST_PAGE, 0x2000) == EFAULT;
+    check!(
+        "a range that runs off the end of the stack mapping is EFAULT",
+        crosses
+    );
+
+    // --- writes: the direction must be checked too --------------------------
+    let ro_text = r(dn, text_addr, 1) == EFAULT;
+    check!(
+        "read into the process's own text (not writable) is EFAULT",
+        ro_text
+    );
+    let into_kernel = st(b"/\0", KERNEL_TEXT) == EFAULT && r(dn, KERNEL_TEXT, 16) == EFAULT;
+    check!("stat/read into kernel memory is EFAULT", into_kernel);
+    let into_ram = r(dn, IDENTITY_RAM, 16) == EFAULT;
+    check!("read into identity-mapped RAM is EFAULT", into_ram);
+
+    // --- and the kernel is still alive and consistent afterwards -----------
+    let alive = shell_run(
+        b"echo still-here > /tmp/uc_alive; c=$(cat /tmp/uc_alive); test \"$c\" = still-here\0",
+    ) == Some(0);
+    check!("the shell still runs after every refused pointer", alive);
+
+    if devnull >= 0 {
+        let _ = close(devnull);
+    }
+
+    if leak_text
+        && leak_ram
+        && path_in_kernel
+        && noncanon
+        && overflow
+        && null
+        && two_pages
+        && text_read
+        && stack_read
+        && unmapped_stat
+        && unmapped_w
+        && unmapped_open
+        && crosses
+        && ro_text
+        && into_kernel
+        && into_ram
+        && alive
+    {
+        println("T39-USERCOPY-OK");
     }
 }
 
