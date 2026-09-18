@@ -143,8 +143,7 @@ impl Virtqueue {
     /// (queues live for the lifetime of the kernel).
     pub fn new(queue_size: u16) -> Result<Self, VqError> {
         let layout = layout_for(queue_size).ok_or(VqError::InvalidSize)?;
-        let frame =
-            phys::alloc_contiguous(layout.frame_count).map_err(|_| VqError::OutOfMemory)?;
+        let frame = phys::alloc_contiguous(layout.frame_count).map_err(|_| VqError::OutOfMemory)?;
         let base_phys = frame.addr();
         let avail_phys = base_phys + layout.avail_offset as u64;
         let used_phys = base_phys + layout.used_offset as u64;
@@ -152,11 +151,7 @@ impl Virtqueue {
         // Zero the entire device-visible allocation.
         // SAFETY: identity-mapped, exclusive owner.
         unsafe {
-            core::ptr::write_bytes(
-                base_phys as *mut u8,
-                0,
-                layout.frame_count * FRAME_SIZE,
-            );
+            core::ptr::write_bytes(base_phys as *mut u8, 0, layout.frame_count * FRAME_SIZE);
         }
 
         let desc = base_phys as *mut VirtqDesc;
