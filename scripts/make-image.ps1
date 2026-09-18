@@ -14,11 +14,20 @@
 
 param(
     [string]$Profile   = "debug",
-    [string]$TargetDir = "C:\Users\Maciej\RacOS-target",
+    [string]$TargetDir = "",
     [string]$EspDir    = "esp"
 )
 
 $ErrorActionPreference = "Stop"
+$Root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+Set-Location $Root
+
+if (-not $TargetDir) {
+    $TargetDir = & cargo metadata --format-version 1 --no-deps --quiet 2>$null |
+        ConvertFrom-Json | Select-Object -ExpandProperty target_directory
+}
+# Keep cargo output and the paths staged below on the same target directory.
+$env:CARGO_TARGET_DIR = $TargetDir
 
 Write-Host "=== RacOS Image Builder ===" -ForegroundColor Cyan
 
