@@ -116,6 +116,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_large_files_and_dirs();
     test_truncate_semantics();
     test_coreutils_preserve_data();
+    test_rename_semantics();
     test_persistent_mount_layout();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
@@ -1501,6 +1502,224 @@ fn test_coreutils_preserve_data() {
         && mv_plain == Some(0)
     {
         println("T37-PRESERVE-OK");
+    }
+}
+
+/// Read the whole file at `path` into `buf`; returns the byte count.
+fn read_file_into(path: &[u8], buf: &mut [u8]) -> Option<usize> {
+    let fd = open(path, 0, 0).ok()?;
+    let mut total = 0usize;
+    while total < buf.len() {
+        match read(fd, &mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(_) => break,
+        }
+    }
+    let _ = close(fd);
+    Some(total)
+}
+
+/// rename(2) must be a rename: one directory operation that keeps the
+/// inode, replaces an existing target, moves directories, and either
+/// happens or does not. Before this group `sys_rename` read the whole
+/// file into memory, created a new one, wrote it and unlinked the old:
+/// three separate operations plus a data copy (nothing for the journal
+/// to protect), `st_ino` changed, an existing target was EEXIST instead
+/// of replaced, directories failed, an empty file was not moved at all
+/// (`if size > 0`) while the call returned 0, and the destination path
+/// was resolved in the *source's* filesystem with no EXDEV.
+fn test_rename_semantics() {
+    println("\n[test] rename(2) semantics");
+
+    // --- an empty file moves --------------------------------------------
+    let _ = shell_run(b"touch /mnt/rn_empty\0");
+    let r = rename(b"/mnt/rn_empty\0", b"/mnt/rn_empty2\0");
+    let empty_moved = r.is_ok()
+        && stat_size(b"/mnt/rn_empty\0").is_none()
+        && stat_size(b"/mnt/rn_empty2\0") == Some(0);
+    check!("rename moves an empty file", empty_moved);
+
+    // --- the inode survives: it is a rename, not a copy ------------------
+    let seeded = shell_run(
+        b"echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef > /mnt/rn_s1; \
+          cat /mnt/rn_s1 /mnt/rn_s1 /mnt/rn_s1 /mnt/rn_s1 > /mnt/rn_s2; \
+          cat /mnt/rn_s2 /mnt/rn_s2 /mnt/rn_s2 /mnt/rn_s2 > /mnt/rn_s1; \
+          cat /mnt/rn_s1 /mnt/rn_s1 /mnt/rn_s1 /mnt/rn_s1 > /mnt/rn_s2; \
+          cat /mnt/rn_s2 /mnt/rn_s2 /mnt/rn_s2 /mnt/rn_s2 > /mnt/rn_big; \
+          rm /mnt/rn_s1 /mnt/rn_s2\0",
+    );
+    let before = stat_ident(b"/mnt/rn_big\0");
+    let free_before = racfs_free_blocks();
+    let r = rename(b"/mnt/rn_big\0", b"/mnt/rn_big2\0");
+    let after = stat_ident(b"/mnt/rn_big2\0");
+    let free_after = racfs_free_blocks();
+    let tail_ok = shell_run(
+        b"t=$(tail -1 /mnt/rn_big2); n=$(wc -c < /mnt/rn_big2); \
+          test \"$n\" -eq 16640 && \
+          test \"$t\" = 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\0",
+    );
+    let same_inode = seeded == Some(0)
+        && r.is_ok()
+        && before.is_some()
+        && before == after
+        && stat_size(b"/mnt/rn_big\0").is_none()
+        && free_before == free_after
+        && tail_ok == Some(0);
+    check!(
+        "rename keeps st_ino and st_dev, moves no data, frees no blocks",
+        same_inode
+    );
+
+    // --- an existing target is replaced, and its blocks come back ---------
+    let _ = shell_run(b"cat /mnt/rn_big2 > /mnt/rn_victim; echo new > /mnt/rn_src\0");
+    let victim_blocks = 34; // 16640 bytes: 33 data + 1 indirect
+    let free0 = racfs_free_blocks();
+    let r = rename(b"/mnt/rn_src\0", b"/mnt/rn_victim\0");
+    let free1 = racfs_free_blocks();
+    let mut content = [0u8; 16];
+    let n = read_file_into(b"/mnt/rn_victim\0", &mut content).unwrap_or(0);
+    let replaced = r.is_ok()
+        && n == 4
+        && &content[..4] == b"new\n"
+        && stat_size(b"/mnt/rn_src\0").is_none()
+        && matches!((free0, free1), (Some(a), Some(b)) if b == a + victim_blocks);
+    check!(
+        "rename onto an existing file replaces it and frees its blocks",
+        replaced
+    );
+
+    // --- two names of one inode: POSIX says do nothing, successfully ------
+    let _ = shell_run(b"echo shared > /mnt/rn_l1; ln /mnt/rn_l1 /mnt/rn_l2\0");
+    let r = rename(b"/mnt/rn_l1\0", b"/mnt/rn_l2\0");
+    let links_ok = r.is_ok()
+        && stat_ident(b"/mnt/rn_l1\0").is_some()
+        && stat_ident(b"/mnt/rn_l1\0") == stat_ident(b"/mnt/rn_l2\0");
+    check!(
+        "rename between two hard links of one file is a successful no-op",
+        links_ok
+    );
+
+    // --- directories move, with their contents ---------------------------
+    let _ = shell_run(b"mkdir /mnt/rn_d1; echo inside > /mnt/rn_d1/f; mkdir /mnt/rn_d1/sub\0");
+    let r = rename(b"/mnt/rn_d1\0", b"/mnt/rn_d2\0");
+    let dir_moved = r.is_ok()
+        && shell_run(b"c=$(cat /mnt/rn_d2/f); test \"$c\" = inside && test -e /mnt/rn_d2/sub\0")
+            == Some(0)
+        && stat_ident(b"/mnt/rn_d1\0").is_none();
+    check!("rename moves a directory with its contents", dir_moved);
+
+    // Into another directory: the entry leaves one parent and joins another.
+    let _ = shell_run(b"mkdir /mnt/rn_home\0");
+    let r = rename(b"/mnt/rn_d2\0", b"/mnt/rn_home/d\0");
+    let dir_reparented = r.is_ok()
+        && shell_run(b"c=$(cat /mnt/rn_home/d/f); test \"$c\" = inside\0") == Some(0)
+        && stat_ident(b"/mnt/rn_d2\0").is_none();
+    check!(
+        "rename moves a directory into another directory",
+        dir_reparented
+    );
+
+    // --- refusals ----------------------------------------------------------
+    let cycle = rename(b"/mnt/rn_home\0", b"/mnt/rn_home/d/sub/x\0") == Err(-22);
+    check!(
+        "rename of a directory into its own subtree is EINVAL",
+        cycle
+    );
+    let _ = shell_run(b"mkdir /mnt/rn_full; echo x > /mnt/rn_full/y; mkdir /mnt/rn_emptydir\0");
+    let notempty = rename(b"/mnt/rn_emptydir\0", b"/mnt/rn_full\0") == Err(-39)
+        && stat_ident(b"/mnt/rn_emptydir\0").is_some();
+    check!("rename onto a non-empty directory is ENOTEMPTY", notempty);
+    let onto_empty = rename(b"/mnt/rn_full\0", b"/mnt/rn_emptydir\0").is_ok()
+        && shell_run(b"c=$(cat /mnt/rn_emptydir/y); test \"$c\" = x\0") == Some(0)
+        && stat_ident(b"/mnt/rn_full\0").is_none();
+    check!("rename onto an empty directory replaces it", onto_empty);
+    let _ = shell_run(b"echo f > /mnt/rn_file\0");
+    let notdir = rename(b"/mnt/rn_emptydir\0", b"/mnt/rn_file\0") == Err(-20);
+    check!("rename of a directory onto a file is ENOTDIR", notdir);
+    let isdir = rename(b"/mnt/rn_file\0", b"/mnt/rn_emptydir\0") == Err(-21);
+    check!("rename of a file onto a directory is EISDIR", isdir);
+    let missing = rename(b"/mnt/rn_nope\0", b"/mnt/rn_nope2\0") == Err(-2);
+    check!("rename of a missing source is ENOENT", missing);
+
+    // --- across mounts: EXDEV, and mv falls back to a copy -----------------
+    let _ = shell_run(b"echo cross > /tmp/rn_x\0");
+    let exdev =
+        rename(b"/tmp/rn_x\0", b"/mnt/rn_x\0") == Err(-18) && stat_size(b"/tmp/rn_x\0") == Some(6);
+    check!("rename across mounts is EXDEV and leaves the source", exdev);
+    let mv_cross = shell_run(
+        b"mv /tmp/rn_x /mnt/rn_x; rc=$?; test -e /tmp/rn_x && exit 1; \
+          c=$(cat /mnt/rn_x); test \"$rc\" -eq 0 && test \"$c\" = cross\0",
+    );
+    check!(
+        "mv across mounts still moves (copy fallback)",
+        mv_cross == Some(0)
+    );
+
+    // --- mv within one filesystem is now a rename --------------------------
+    let _ = shell_run(b"echo viamv > /mnt/rn_m1\0");
+    let m_before = stat_ident(b"/mnt/rn_m1\0");
+    let mv_same = shell_run(b"mv /mnt/rn_m1 /mnt/rn_m2\0");
+    let m_after = stat_ident(b"/mnt/rn_m2\0");
+    check!(
+        "mv within a filesystem keeps the inode",
+        mv_same == Some(0) && m_before.is_some() && m_before == m_after
+    );
+
+    // --- subtree mounts resolve relative to their own root -----------------
+    let _ = shell_run(b"echo home > /home/rn_h1\0");
+    let r = rename(b"/home/rn_h1\0", b"/home/rn_h2\0");
+    let home_ok = r.is_ok()
+        && shell_run(b"c=$(cat /home/rn_h2); test \"$c\" = home || exit 1; test -e /home/rn_h1 && exit 1; exit 0\0")
+            == Some(0)
+        && stat_size(b"/mnt/rn_h2\0").is_none();
+    check!(
+        "rename on a subtree mount stays inside that subtree",
+        home_ok
+    );
+
+    // --- tmpfs and FAT32 implement it too ----------------------------------
+    let _ = shell_run(b"echo t > /tmp/rn_t1\0");
+    let t_before = stat_ident(b"/tmp/rn_t1\0");
+    let tmp_ok = rename(b"/tmp/rn_t1\0", b"/tmp/rn_t2\0").is_ok()
+        && stat_ident(b"/tmp/rn_t2\0") == t_before
+        && stat_ident(b"/tmp/rn_t1\0").is_none();
+    check!("rename works on tmpfs and keeps the inode", tmp_ok);
+    let _ = shell_run(b"echo fat > /fat/rn_f1; mkdir /fat/rn_dir\0");
+    let fat_ok = rename(b"/fat/rn_f1\0", b"/fat/rn_dir/f2\0").is_ok()
+        && shell_run(b"c=$(cat /fat/rn_dir/f2); test \"$c\" = fat || exit 1; test -e /fat/rn_f1 && exit 1; exit 0\0")
+            == Some(0);
+    check!("rename works on FAT32, across directories", fat_ok);
+
+    let _ = shell_run(
+        b"rm /mnt/rn_empty2 /mnt/rn_big2 /mnt/rn_victim /mnt/rn_l1 /mnt/rn_l2 /mnt/rn_file \
+             /mnt/rn_x /mnt/rn_m2 /home/rn_h2 /tmp/rn_t2 /fat/rn_dir/f2; \
+          rm /mnt/rn_home/d/f; rmdir /mnt/rn_home/d/sub /mnt/rn_home/d /mnt/rn_home; \
+          rm /mnt/rn_emptydir/y; rmdir /mnt/rn_emptydir /fat/rn_dir\0",
+    );
+
+    if empty_moved
+        && same_inode
+        && replaced
+        && links_ok
+        && dir_moved
+        && dir_reparented
+        && cycle
+        && notempty
+        && onto_empty
+        && notdir
+        && isdir
+        && missing
+        && exdev
+        && mv_cross == Some(0)
+        && mv_same == Some(0)
+        && m_before.is_some()
+        && m_before == m_after
+        && home_ok
+        && tmp_ok
+        && fat_ok
+    {
+        println("T38-RENAME-OK");
     }
 }
 
