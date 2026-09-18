@@ -28,6 +28,12 @@ pub mod flags {
     pub const DIRTY: u64 = 1 << 6;
     pub const HUGE_PAGE: u64 = 1 << 7;
     pub const GLOBAL: u64 = 1 << 8;
+    /// Software bit (ignored by the CPU): this leaf belongs to the user
+    /// process even when USER is clear. That is how a PROT_NONE page looks
+    /// - present, not user-accessible, still the process's to free at exit,
+    /// to copy on fork, and to make accessible again with mprotect.
+    /// Without it, "no USER bit" reads as "shared kernel page" below.
+    pub const USER_OWNED: u64 = 1 << 9;
     pub const NO_EXECUTE: u64 = 1 << 63;
 
     /// Kernel code: present, not writable, global, no-execute disabled
@@ -242,11 +248,20 @@ pub unsafe fn unmap_page(pml4_phys: u64, virt: VirtAddr) -> Result<PhysFrame, &'
     if !pd_entry.is_present() {
         return Err("Not mapped (no PD)");
     }
+    if pd_entry.flags() & flags::HUGE_PAGE != 0 {
+        // A 1 GiB leaf: reading its frame as a page directory would treat
+        // data as page-table entries. Only 4 KiB mappings are unmapped here.
+        return Err("Huge page (1 GiB), not a 4 KiB mapping");
+    }
     let pd = &mut *(pd_entry.frame().ok_or("Corrupt PD entry")?.addr() as *mut PageTable);
 
     let pt_entry = &pd.entries[virt.pd_index()];
     if !pt_entry.is_present() {
         return Err("Not mapped (no PT)");
+    }
+    if pt_entry.flags() & flags::HUGE_PAGE != 0 {
+        // A 2 MiB leaf (the identity-mapped kernel and RAM): as above.
+        return Err("Huge page (2 MiB), not a 4 KiB mapping");
     }
     let pt = &mut *(pt_entry.frame().ok_or("Corrupt PT entry")?.addr() as *mut PageTable);
 
@@ -259,6 +274,43 @@ pub unsafe fn unmap_page(pml4_phys: u64, virt: VirtAddr) -> Result<PhysFrame, &'
     pte.clear();
     invlpg(virt.0);
     Ok(frame)
+}
+
+/// Replace the flags of the 4 KiB mapping at `virt`, keeping its frame.
+/// Refuses huge leaves for the same reason `unmap_page` does.
+///
+/// # Safety
+/// `pml4_phys` must be a live page table whose frames are identity-mapped;
+/// the caller must own the mapping (see mm::vm) and flush the TLB entry.
+pub unsafe fn set_page_flags(
+    pml4_phys: u64,
+    virt: VirtAddr,
+    new_flags: u64,
+) -> Result<(), &'static str> {
+    let pml4 = &*(pml4_phys as *const PageTable);
+    let e4 = pml4.entries[virt.pml4_index()];
+    if !e4.is_present() {
+        return Err("Not mapped (no PDPT)");
+    }
+    let pdpt = &*(e4.frame().ok_or("Corrupt PDPT entry")?.addr() as *const PageTable);
+    let e3 = pdpt.entries[virt.pdpt_index()];
+    if !e3.is_present() || e3.flags() & flags::HUGE_PAGE != 0 {
+        return Err("Not a 4 KiB mapping");
+    }
+    let pd = &*(e3.frame().ok_or("Corrupt PD entry")?.addr() as *const PageTable);
+    let e2 = pd.entries[virt.pd_index()];
+    if !e2.is_present() || e2.flags() & flags::HUGE_PAGE != 0 {
+        return Err("Not a 4 KiB mapping");
+    }
+    let pt = &mut *(e2.frame().ok_or("Corrupt PT entry")?.addr() as *mut PageTable);
+    let pte = &mut pt.entries[virt.pt_index()];
+    if !pte.is_present() {
+        return Err("Not mapped");
+    }
+    let frame = pte.frame().ok_or("Corrupt PTE")?;
+    pte.set(frame, new_flags);
+    invlpg(virt.0);
+    Ok(())
 }
 
 /// What a *user-mode* access to `virt` would be allowed to do under the
@@ -540,8 +592,8 @@ unsafe fn free_table_level_user_only(table_phys: u64, level: u8, free_mapped: bo
             continue;
         }
 
-        // Skip shared kernel mappings (non-USER entries).
-        if entry.flags() & flags::USER == 0 {
+        // Skip shared kernel mappings (neither USER nor USER_OWNED).
+        if entry.flags() & (flags::USER | flags::USER_OWNED) == 0 {
             continue;
         }
 
@@ -626,7 +678,7 @@ unsafe fn clone_table_level(src_table_phys: u64, level: u8) -> Result<u64, &'sta
             continue;
         }
 
-        if src.entries[i].flags() & flags::USER == 0 {
+        if src.entries[i].flags() & (flags::USER | flags::USER_OWNED) == 0 {
             // Keep kernel mappings shared between processes.
             dst.entries[i] = src.entries[i];
             continue;

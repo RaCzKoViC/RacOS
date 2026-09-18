@@ -116,6 +116,10 @@ pub struct Task {
     /// Current working directory (absolute path, no trailing slash except root).
     pub cwd: [u8; 256],
     pub cwd_len: usize,
+    /// What is mapped where in this task's address space (mm::vm). Empty
+    /// for kernel tasks; shared between the threads of one process;
+    /// duplicated by fork.
+    pub vm: alloc::sync::Arc<crate::mm::vm::VmSpaceCell>,
 }
 
 impl Task {
@@ -192,6 +196,7 @@ impl Task {
             name_len: len,
             cwd: cwd_buf,
             cwd_len: 1,
+            vm: crate::mm::vm::VmSpaceCell::new(crate::mm::vm::VmSpace::new()),
         })
     }
 
@@ -221,6 +226,7 @@ impl Task {
             name_len: 4,
             cwd: cwd_buf,
             cwd_len: 1,
+            vm: crate::mm::vm::VmSpaceCell::new(crate::mm::vm::VmSpace::new()),
         }
     }
 }
