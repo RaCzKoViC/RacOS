@@ -35,9 +35,11 @@ pub fn init() {
                 dev.bus, dev.slot, dev.func,
                 net.mac[0], net.mac[1], net.mac[2], net.mac[3], net.mac[4], net.mac[5]
             );
+            let (rx_queue_size, tx_queue_size) = net.queue_sizes();
             crate::serial::serial_println!(
-                "[  0.001210] DRIVERS: VirtIO-Net queues up (queue_size={}, RX buffers pre-posted)",
-                net.queue_size()
+                "[  0.001210] DRIVERS: VirtIO-Net queues up (rx_queue_size={}, tx_queue_size={}, RX buffers pre-posted)",
+                rx_queue_size,
+                tx_queue_size,
             );
             let mut slot = NIC.lock();
             *slot = Some(Box::new(net));

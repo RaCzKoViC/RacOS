@@ -228,9 +228,9 @@ impl VirtioNet {
         Ok(vq)
     }
 
-    /// Device-reported size of the receive queue.
-    pub fn queue_size(&self) -> u16 {
-        self.rx.size
+    /// Device-reported receive and transmit queue sizes.
+    pub fn queue_sizes(&self) -> (u16, u16) {
+        (self.rx.size, self.tx.size)
     }
 
     fn post_initial_rx(&mut self) -> Result<(), VirtioNetError> {
