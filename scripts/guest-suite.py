@@ -104,6 +104,8 @@ PROMPT_RE = re.compile(r"racsh\$ ")
 # chunk, so "wait for the banner, then look for a prompt after it" races.
 BANNER_THEN_PROMPT_RE = re.compile(r"racsh 0\.1\.0[\s\S]*?racsh\$ ")
 RESULTS_RE = re.compile(r"=== Results: (\d+) passed, (\d+) failed ===")
+FSCK_CLEAN_RE = re.compile(r"RACFS sda: fsck clean")
+FSCK_DIRTY_RE = re.compile(r"RACFS sda: fsck (found|could not run).*")
 EXIT_RE = re.compile(r"(?m)^RACOS-TEST-EXIT=(\d+)\s*$")
 EXIT_THEN_PROMPT_RE = re.compile(r"(?m)^RACOS-TEST-EXIT=\d+\s*$[\s\S]*racsh\$ ")
 MARKER_RE = re.compile(r"(?m)^([A-Z0-9][A-Z0-9-]*-(?:OK|FAIL))\b")
@@ -337,6 +339,13 @@ def self_test():
     expect(BANNER_THEN_PROMPT_RE.search("boot\nracsh 0.1.0\n[ NETSTACK ] up\n") is None,
            "H: banner without a prompt -> not ready")
 
+    # I: the mount-time fsck verdict, as kernel/src/main.rs prints it.
+    expect(FSCK_CLEAN_RE.search("[  0.000368] RACFS sda: fsck clean\n") is not None,
+           "I: 'fsck clean' is recognised")
+    dirty = "[  0.000368] RACFS sda: fsck found leaked=3 unallocated_in_use=0 doubly_claimed=0 dangling=0 out_of_range=0 sb_drift=1\n"
+    expect(FSCK_CLEAN_RE.search(dirty) is None and FSCK_DIRTY_RE.search(dirty) is not None,
+           "I: a dirty fsck line is not clean and is quoted back")
+
     print("")
     if failures:
         print("SELF-TEST FAIL (%d)" % len(failures))
@@ -548,14 +557,21 @@ def run(args):
 
     # A fresh zero-filled disk every run: the suite's racfs assertions expect
     # a first-boot format, and a locked file means another QEMU still owns it.
-    try:
-        if os.path.exists(disk_path):
-            os.remove(disk_path)
-        with open(disk_path, "wb") as f:
-            f.truncate(DISK_SIZE_BYTES)
-    except OSError as e:
-        print("ERROR: cannot recreate %s (%s) - is a previous QEMU still running?" % (disk_path, e))
-        return 2
+    # --keep-disk boots the previous run's disk instead, which is how the
+    # mount-time fsck gets to judge what the suite left behind.
+    if args.keep_disk:
+        if not os.path.isfile(disk_path):
+            print("ERROR: --keep-disk but %s does not exist" % disk_path)
+            return 2
+    else:
+        try:
+            if os.path.exists(disk_path):
+                os.remove(disk_path)
+            with open(disk_path, "wb") as f:
+                f.truncate(DISK_SIZE_BYTES)
+        except OSError as e:
+            print("ERROR: cannot recreate %s (%s) - is a previous QEMU still running?" % (disk_path, e))
+            return 2
 
     cmd = [qemu] + machine_args(ovmf, esp_dir, disk_path, args.smp,
                                 with_disk=not args.no_disk, with_net=not args.no_net)
@@ -593,6 +609,22 @@ def run(args):
             print("the suite needs /mnt on an AHCI disk and a VirtIO-net NIC; this machine does not have them")
             return 1
         print("devices present: " + ", ".join(n for n, _ in REQUIRED_DEVICES))
+
+        # --- fsck verdict on the disk as mounted -----------------------------
+        # The kernel checks the racfs on sda at mount time and says so in one
+        # of these lines. On a fresh disk "clean" is trivial; with --keep-disk
+        # it is the judgement on everything the previous run did.
+        boot_text = guest.text()
+        if FSCK_CLEAN_RE.search(boot_text):
+            print("fsck on sda: clean")
+        else:
+            m = FSCK_DIRTY_RE.search(boot_text)
+            print("FAIL: fsck on sda did not report clean: %s" % (m.group(0) if m else "no fsck line"))
+            return 1
+        if args.boot_only:
+            print("--boot-only: stopping after boot readiness, devices and fsck")
+            print("BOOT-ONLY PASS")
+            return 0
 
         # --- a few plain commands, each waiting for its prompt --------------
         for c in ("pwd", "echo ci-smoke-ok", "cat /proc/version"):
@@ -656,6 +688,10 @@ def main(argv=None):
     p.add_argument("--silence", type=int, default=60, help="seconds of no serial output = hang")
     p.add_argument("--no-disk", action="store_true", help="omit the AHCI disk (negative test)")
     p.add_argument("--no-net", action="store_true", help="omit the VirtIO-net NIC (negative test)")
+    p.add_argument("--keep-disk", action="store_true",
+                   help="boot the existing disk image instead of a fresh one (fsck judges the last run)")
+    p.add_argument("--boot-only", action="store_true",
+                   help="stop after boot readiness, device check and the fsck verdict; do not run the suite")
     p.add_argument("--self-test", action="store_true", help="grade fixture logs and exit")
     args = p.parse_args(argv)
 
