@@ -11,6 +11,54 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Fixed — the coreutils that copy data no longer lose it
+
+- **`mv f f` deleted f; `mv a b` with b a hard link of a emptied both;
+  `cp f f` emptied f - all with exit 0.** mv and cp are copy-then-unlink
+  and never asked whether source and destination were one file; with
+  `O_TRUNC` working (above) the copy emptied the shared inode before a
+  byte was read. Both now compare `(st_dev, st_ino)` first: mv leaves the
+  same file alone with exit 0, as POSIX rename does; cp refuses with
+  "are the same file" before the destination is opened. Review item D
+  (P1), the `mv` half; the kernel's `sys_rename` is the next change.
+
+- **`cat big | wc -c` said 4096 for an 8320-byte file.** A pipe holds
+  4 KiB; the write end returns a short count or EAGAIN when full; cat,
+  cp, mv and tee did `let _ = write(...)`. Every pipeline carrying more
+  than 4 KiB silently lost the rest, with exit 0. libc-lite gains
+  `write_all()` - loops over short counts, yields and retries on EAGAIN,
+  a zero-length success is EIO, success only once every byte is out -
+  and the four tools use it, as do libc-lite's print helpers. cat and cp
+  report a failed write and exit 1; tee reports a failing output once,
+  drops it, keeps feeding the others and exits 1 (GNU behaviour); mv
+  unlinks the source only after the byte count and the destination's
+  fstat size match, otherwise says the source was left in place and
+  removes a destination it created itself.
+
+- **Two kernel pieces, so this is testable.** `stat`/`fstat` report
+  `st_dev` as the mount's position in the mount table (`OpenFile` carries
+  it from open) - it was always 0, so tmpfs inode 5 "equalled" racfs
+  inode 5 and a same-file check could not exist. And `/dev/full`: reads
+  zeros, every write fails with ENOSPC - the write error a test can
+  inject without filling a disk. `docs/specs/KERNEL_ABI.md` §6.1 now
+  shows the StatBuf the kernel actually lays out (it listed fields the
+  struct never had).
+
+- **Regression test first: `T37-PRESERVE-OK`, 16 assertions, red on the
+  tree before the fix (10 of 16 fail; 204 passed, 10 failed) and green
+  after (214/0).** st_dev identity across tmpfs/racfs and hard links;
+  /dev/full semantics; mv onto itself and onto its hard link; cp onto
+  itself; 8320 and 16640 bytes through `cat |`, `cat | tee |` and
+  `cat | tail -1`; mv/cp/cat/tee into /dev/full failing with the source
+  intact and tee's stdout still fed; a plain mv still moving.
+
+- Known and deliberately left for their own changes: the pipe write end
+  returns a short count or EAGAIN on a blocking descriptor instead of
+  waiting for room as the read end does (stage R3); other tools with
+  large stdout output (`sed`, `awk`, `grep`, `head`, `tail`, `sort`)
+  still use bare `write`; racsh's `test ! -e` returns 1 whether or not
+  the file exists; `ls` of a missing path lists `/`.
+
 ### Fixed — overwriting a file now shortens it: truncate, ftruncate and O_TRUNC
 
 - **`echo X > f` left the old tail in place.** `sys_open` treated `O_TRUNC`

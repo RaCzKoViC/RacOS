@@ -104,6 +104,12 @@ The RaCore kernel ABI defines the binary interface between user space processes 
 
 ### 6.1 StatBuf
 
+As the kernel lays it out (`kernel/src/syscall/handlers.rs`), 72 bytes;
+userland passes an 80-byte buffer. Offsets: `st_dev` 0, `st_ino` 8,
+`st_mode` 16, `st_nlink` 20, `st_uid` 24, `st_gid` 28, `st_size` 32,
+`st_atime` 40, `st_mtime` 48, `st_ctime` 56, `st_rdev_major` 64,
+`st_rdev_minor` 68.
+
 ```rust
 #[repr(C)]
 pub struct StatBuf {
@@ -114,13 +120,19 @@ pub struct StatBuf {
     pub st_uid: u32,
     pub st_gid: u32,
     pub st_size: u64,
-    pub st_blksize: u32,
-    pub st_blocks: u64,
     pub st_atime: u64,
     pub st_mtime: u64,
     pub st_ctime: u64,
+    pub st_rdev_major: u32,
+    pub st_rdev_minor: u32,
 }
 ```
+
+`st_dev` is the 1-based position of the file's mount in the mount table
+(0 for pipes and sockets). Together with `st_ino` it identifies a file:
+two names of one file agree on both, files on different mounts differ in
+`st_dev` even when their inode numbers coincide. It is stable for the
+life of a boot and is not a persistent device number.
 
 ### 6.2 Open Flags
 
