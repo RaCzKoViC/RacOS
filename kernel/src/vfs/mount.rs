@@ -86,6 +86,23 @@ impl MountTable {
     pub fn entries(&self) -> &[MountEntry] {
         &self.mounts
     }
+
+    /// The `st_dev` a file on `fs` reports: the mount's 1-based position in
+    /// this table, 0 if `fs` is not mounted (pipes, sockets).
+    ///
+    /// Together with the inode number this is what identifies a file:
+    /// tmpfs inode 5 and racfs inode 5 are different files, and two names of
+    /// one file on one mount agree on both numbers. Stable for the life of
+    /// a boot, which is what `mv`/`cp` need to refuse to copy a file onto
+    /// itself; it is not a persistent device number and is not meant as one.
+    pub fn device_id(&self, fs: &Arc<dyn Filesystem>) -> u64 {
+        let want = Arc::as_ptr(fs) as *const () as usize;
+        self.mounts
+            .iter()
+            .position(|m| Arc::as_ptr(&m.fs) as *const () as usize == want)
+            .map(|i| i as u64 + 1)
+            .unwrap_or(0)
+    }
 }
 
 /// Flush every block-backed mount in the global mount table.

@@ -115,6 +115,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_fsck_reports_clean();
     test_large_files_and_dirs();
     test_truncate_semantics();
+    test_coreutils_preserve_data();
     test_persistent_mount_layout();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
@@ -1322,6 +1323,184 @@ fn test_truncate_semantics() {
         && dev_ok
     {
         println("T36-TRUNCATE-OK");
+    }
+}
+
+/// (st_dev, st_ino) of the file at `path`, or None if stat fails.
+fn stat_ident(path: &[u8]) -> Option<(u64, u64)> {
+    let mut raw = [0u8; 80];
+    stat(path, &mut raw).ok()?;
+    // SAFETY: the kernel filled `raw` with a StatBuf (80 bytes, repr(C)).
+    let st = unsafe { &*(raw.as_ptr() as *const StatBuf) };
+    Some((st.st_dev, st.st_ino))
+}
+
+/// The coreutils that copy data must not lose it. Before this group, each
+/// of these reported success (exit 0) while destroying data:
+///
+/// - `mv f f` deleted f: mv is copy-then-unlink, and it never asked whether
+///   source and destination were the same file. With O_TRUNC now working
+///   the copy first emptied the shared inode, then unlinked the only name.
+/// - `mv a b` with b a hard link of a emptied both names the same way;
+///   `cp f f` emptied f.
+/// - `cat big | wc -c` said 4096 for an 8320-byte file: a pipe holds 4 KiB,
+///   the write end returns a short count or EAGAIN when it is full, and
+///   cat, cp, mv and tee did `let _ = write(...)` - every pipeline carrying
+///   more than 4 KiB silently lost the rest.
+///
+/// Two kernel pieces make the fixes testable: `st_dev` in stat/fstat, so
+/// that (st_dev, st_ino) identifies a file across filesystems, and
+/// `/dev/full`, whose writes fail with ENOSPC, so that "a write error must
+/// not cost the source" can be demonstrated without filling a disk.
+fn test_coreutils_preserve_data() {
+    println("\n[test] coreutils preserve data (mv-to-self, short writes)");
+
+    // --- st_dev: the identity a same-file check needs ----------------------
+    let _ = shell_run(b"echo one > /tmp/id1; echo one > /mnt/id1; ln /mnt/id1 /mnt/id1link\0");
+    let tmp_id = stat_ident(b"/tmp/id1\0");
+    let mnt_id = stat_ident(b"/mnt/id1\0");
+    let link_id = stat_ident(b"/mnt/id1link\0");
+    let dev_nonzero = matches!((tmp_id, mnt_id), (Some((a, _)), Some((b, _))) if a != 0 && b != 0);
+    check!("stat reports a non-zero st_dev", dev_nonzero);
+    let dev_differs = matches!((tmp_id, mnt_id), (Some((a, _)), Some((b, _))) if a != b);
+    check!("st_dev differs between tmpfs and racfs", dev_differs);
+    let link_same = mnt_id.is_some() && mnt_id == link_id;
+    check!("a hard link has the same (st_dev, st_ino)", link_same);
+
+    // --- /dev/full: the write error you can inject ------------------------
+    let mut full_ok = false;
+    if let Ok(fd) = open(b"/dev/full\0", O_RDWR, 0) {
+        let mut z = [0xAAu8; 16];
+        let r = read(fd, &mut z);
+        let w = write(fd, b"anything");
+        full_ok = r == Ok(16) && z.iter().all(|&b| b == 0) && w == Err(-28);
+        let _ = close(fd);
+    }
+    check!(
+        "/dev/full reads zeros and refuses writes with ENOSPC",
+        full_ok
+    );
+
+    // --- mv onto itself, and onto its own hard link ------------------------
+    let mv_self = shell_run(
+        b"echo hello > /mnt/pv_self; mv /mnt/pv_self /mnt/pv_self; rc=$?; \
+          c=$(cat /mnt/pv_self); test \"$rc\" -eq 0 && test \"$c\" = hello\0",
+    );
+    check!(
+        "mv f f leaves f and its content in place, exit 0",
+        mv_self == Some(0)
+    );
+    let mv_link = shell_run(
+        b"echo hello > /mnt/pv_a; ln /mnt/pv_a /mnt/pv_b; mv /mnt/pv_a /mnt/pv_b; rc=$?; \
+          a=$(cat /mnt/pv_a); b=$(cat /mnt/pv_b); \
+          test \"$rc\" -eq 0 && test \"$a\" = hello && test \"$b\" = hello\0",
+    );
+    check!(
+        "mv a b with b a hard link of a keeps both names and the data",
+        mv_link == Some(0)
+    );
+
+    // --- cp onto itself ----------------------------------------------------
+    let cp_self = shell_run(
+        b"echo data > /mnt/pv_cp; cp /mnt/pv_cp /mnt/pv_cp; rc=$?; \
+          c=$(cat /mnt/pv_cp); test \"$rc\" -ne 0 && test \"$c\" = data\0",
+    );
+    check!("cp f f fails and does not truncate f", cp_self == Some(0));
+
+    // --- pipelines carry more than the 4 KiB a pipe holds ------------------
+    // 65 * 128 = 8320 bytes, then 16640: two and four pipe-fulls.
+    let seeded = shell_run(
+        b"echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef > /mnt/pv_s1; \
+          cat /mnt/pv_s1 /mnt/pv_s1 /mnt/pv_s1 /mnt/pv_s1 > /mnt/pv_s2; \
+          cat /mnt/pv_s2 /mnt/pv_s2 /mnt/pv_s2 /mnt/pv_s2 > /mnt/pv_s1; \
+          cat /mnt/pv_s1 /mnt/pv_s1 /mnt/pv_s1 /mnt/pv_s1 > /mnt/pv_s2; \
+          cat /mnt/pv_s2 /mnt/pv_s2 > /mnt/pv_8k; \
+          cat /mnt/pv_8k /mnt/pv_8k > /mnt/pv_16k; \
+          n=$(wc -c < /mnt/pv_8k); m=$(wc -c < /mnt/pv_16k); \
+          test \"$n\" -eq 8320 && test \"$m\" -eq 16640\0",
+    );
+    check!(
+        "8320- and 16640-byte seed files are in place",
+        seeded == Some(0)
+    );
+    let pipe_cat = shell_run(b"n=$(cat /mnt/pv_8k | wc -c); test \"$n\" -eq 8320\0");
+    check!(
+        "cat 8320 bytes through a pipe delivers all of them",
+        pipe_cat == Some(0)
+    );
+    let pipe_tee = shell_run(
+        b"n=$(cat /mnt/pv_16k | tee /mnt/pv_copy | wc -c); m=$(wc -c < /mnt/pv_copy); \
+          test \"$n\" -eq 16640 && test \"$m\" -eq 16640\0",
+    );
+    check!(
+        "cat | tee | wc carries 16640 bytes to both outputs",
+        pipe_tee == Some(0)
+    );
+    let pipe_tail = shell_run(b"t=$(cat /mnt/pv_16k | tail -1); test \"$t\" = 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\0");
+    check!(
+        "the last line of the piped file arrives intact",
+        pipe_tail == Some(0)
+    );
+
+    // --- a write error must not cost the source ----------------------------
+    let mv_full = shell_run(
+        b"echo keep > /mnt/pv_keep; mv /mnt/pv_keep /dev/full; rc=$?; \
+          c=$(cat /mnt/pv_keep); test \"$rc\" -ne 0 && test \"$c\" = keep\0",
+    );
+    check!(
+        "mv into /dev/full fails and leaves the source intact",
+        mv_full == Some(0)
+    );
+    let cp_full = shell_run(b"cp /mnt/pv_keep /dev/full; rc=$?; test \"$rc\" -ne 0\0");
+    check!("cp into /dev/full fails", cp_full == Some(0));
+    let cat_full = shell_run(b"cat /mnt/pv_keep > /dev/full; rc=$?; test \"$rc\" -ne 0\0");
+    check!(
+        "cat > /dev/full reports the write error",
+        cat_full == Some(0)
+    );
+    let tee_full = shell_run(
+        b"cat /mnt/pv_keep | tee /dev/full > /mnt/pv_teeout; rc=$?; \
+          c=$(cat /mnt/pv_teeout); test \"$rc\" -ne 0 && test \"$c\" = keep\0",
+    );
+    check!(
+        "tee /dev/full still writes stdout and exits non-zero",
+        tee_full == Some(0)
+    );
+
+    // --- and a plain move still moves -------------------------------------
+    // (`test ! -e` is not used: racsh's `test` returns 1 for `! -e` whether
+    // the file exists or not - a separate defect, noted for its own PR.)
+    let mv_plain = shell_run(
+        b"echo plain > /mnt/pv_m1; mv /mnt/pv_m1 /mnt/pv_m2; rc=$?; \
+          test -e /mnt/pv_m1 && exit 1; \
+          c=$(cat /mnt/pv_m2); test \"$rc\" -eq 0 && test \"$c\" = plain\0",
+    );
+    check!("mv a b still moves a to b", mv_plain == Some(0));
+
+    let _ = shell_run(
+        b"rm /tmp/id1 /mnt/id1 /mnt/id1link /mnt/pv_self /mnt/pv_a /mnt/pv_b /mnt/pv_cp \
+             /mnt/pv_s1 /mnt/pv_s2 /mnt/pv_8k /mnt/pv_16k /mnt/pv_copy /mnt/pv_keep \
+             /mnt/pv_teeout /mnt/pv_m2\0",
+    );
+
+    if dev_nonzero
+        && dev_differs
+        && link_same
+        && full_ok
+        && mv_self == Some(0)
+        && mv_link == Some(0)
+        && cp_self == Some(0)
+        && seeded == Some(0)
+        && pipe_cat == Some(0)
+        && pipe_tee == Some(0)
+        && pipe_tail == Some(0)
+        && mv_full == Some(0)
+        && cp_full == Some(0)
+        && cat_full == Some(0)
+        && tee_full == Some(0)
+        && mv_plain == Some(0)
+    {
+        println("T37-PRESERVE-OK");
     }
 }
 

@@ -48,6 +48,10 @@ if ($LASTEXITCODE -ne 0) { throw "Kernel build failed" }
 # pointer might be misaligned (false-positive on this nightly), and crash
 # the shell mid-pipeline. We don't lose much by disabling them in userland
 # — the kernel-side UB checks stay on via its own RUSTFLAGS earlier.
+# Traced 2026-09-18 with a user-stack dump from the #UD handler: the check
+# trips inside compiler_builtins' compare_bytes (memcmp), which build-std
+# compiles here, on its 16-byte unaligned-read path; racsh hit it on the
+# second `$(...)` of a session. build-image.sh passes the same flag.
 $env:RUSTFLAGS = "$OldRustFlags -C debug-assertions=off"
 
 # --- Step 2: Build coreutils ---

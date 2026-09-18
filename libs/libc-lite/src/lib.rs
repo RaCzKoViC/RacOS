@@ -270,6 +270,33 @@ pub fn write(fd: i32, buf: &[u8]) -> Result<usize, i64> {
     }
 }
 
+/// Write every byte of `buf` to `fd`, or fail.
+///
+/// `write` may take fewer bytes than offered (a pipe with less room than
+/// the buffer takes what fits) or refuse for the moment (EAGAIN on a full
+/// pipe). Treating either as done is how `cat big | wc -c` came to answer
+/// 4096 for an 8320-byte file. This loops until the whole buffer is out:
+/// a short count continues from where it stopped, EAGAIN yields the CPU to
+/// whoever is draining the other end and tries again, and a zero-length
+/// success - which would loop forever - is reported as EIO. The only
+/// success is every byte written.
+pub fn write_all(fd: i32, buf: &[u8]) -> Result<(), i64> {
+    const EAGAIN: i64 = -11;
+    const EIO: i64 = -5;
+    let mut done = 0usize;
+    while done < buf.len() {
+        match write(fd, &buf[done..]) {
+            Ok(0) => return Err(EIO),
+            Ok(n) => done += n,
+            Err(EAGAIN) => {
+                let _ = sched_yield();
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /// Otwórz plik.
 pub fn open(path: &[u8], flags: u32, mode: u32) -> Result<i32, i64> {
     // SAFETY: syscall ABI; path pointer comes from a &[u8] (caller must
@@ -1427,24 +1454,24 @@ pub fn getpeername(fd: i32, addr: &mut SockAddrIn) -> Result<(), i64> {
 
 /// Zapisz string do stdout (fd 1).
 pub fn print(s: &str) {
-    let _ = write(1, s.as_bytes());
+    let _ = write_all(1, s.as_bytes());
 }
 
 /// Zapisz string + newline do stdout.
 pub fn println(s: &str) {
     print(s);
-    let _ = write(1, b"\n");
+    let _ = write_all(1, b"\n");
 }
 
 /// Zapisz string do stderr (fd 2).
 pub fn eprint(s: &str) {
-    let _ = write(2, s.as_bytes());
+    let _ = write_all(2, s.as_bytes());
 }
 
 /// Zapisz string + newline do stderr.
 pub fn eprintln(s: &str) {
     eprint(s);
-    let _ = write(2, b"\n");
+    let _ = write_all(2, b"\n");
 }
 
 // ─────────────────────────────────────────────────

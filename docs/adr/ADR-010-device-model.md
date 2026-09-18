@@ -23,6 +23,7 @@ The kernel needs a device model for user space to access hardware and pseudo-dev
 | Serial COM1 | char | 1 | /dev/serial0 |
 | Null | char | 2 | /dev/null |
 | Zero | char | 3 | /dev/zero |
+| Full | char | 3:1 | /dev/full (reads zeros, every write is ENOSPC - the injectable write error) |
 | Console | char | 4 | /dev/console |
 | TTY | char | 5 | /dev/ttyN |
 | PTY master | char | 6 | /dev/ptmx |

@@ -86,6 +86,26 @@ impl DeviceOps for ZeroDevice {
     }
 }
 
+/// /dev/full: reads like /dev/zero, every write fails with ENOSPC.
+///
+/// This is the write error you can inject on purpose. A tool that copies
+/// data has to prove that a failed write costs nothing but the copy - not
+/// the source - and filling a real filesystem to find out is slow and
+/// leaves a mess. `mv src /dev/full` must fail and leave src alone.
+pub struct FullDevice;
+
+impl DeviceOps for FullDevice {
+    fn read(&self, _offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
+        for byte in buf.iter_mut() {
+            *byte = 0;
+        }
+        Ok(buf.len())
+    }
+    fn write(&self, _offset: u64, _buf: &[u8]) -> VfsResult<usize> {
+        Err(VfsError::NoSpace)
+    }
+}
+
 /// /dev/console and /dev/serial0 — outputs to serial port.
 pub struct SerialDevice;
 
@@ -266,6 +286,7 @@ impl Devfs {
         self.register("serial0", DeviceType::Char, 1, 0, Arc::new(SerialDevice));
         self.register("null", DeviceType::Char, 2, 0, Arc::new(NullDevice));
         self.register("zero", DeviceType::Char, 3, 0, Arc::new(ZeroDevice));
+        self.register("full", DeviceType::Char, 3, 1, Arc::new(FullDevice));
         self.register("console", DeviceType::Char, 4, 0, Arc::new(SerialDevice));
         self.register("urandom", DeviceType::Char, 1, 9, Arc::new(UrandomDevice));
         self.register("random", DeviceType::Char, 1, 8, Arc::new(UrandomDevice));
