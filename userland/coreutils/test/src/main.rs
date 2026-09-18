@@ -89,7 +89,15 @@ fn print_i32(n: i32) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+pub extern "C" fn main(_argc: i32, argv: *const *const u8) -> i32 {
+    // One test needs code running in an image that was reached through
+    // exec(2), which means this binary has to be that image. `--vm-after-exec`
+    // is that mode: it runs those assertions alone and reports them in the
+    // exit status, instead of the whole suite (which would recurse).
+    if arg(argv, 1) == Some(b"--vm-after-exec".as_slice()) {
+        return vm_record_after_exec_child();
+    }
+
     println("=== RacOS System Test Suite ===");
 
     test_getpid();
@@ -119,6 +127,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_rename_semantics();
     test_usercopy_rejects_bad_pointers();
     test_vm_mappings();
+    test_vm_record_after_exec();
     test_persistent_mount_layout();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
@@ -2147,6 +2156,150 @@ fn test_vm_mappings() {
 /// anyway still succeeds, still reads back, and still looks correct -- it
 /// just put the file in the disk root. Checking the file through /mnt is what
 /// separates "it worked" from "it went where it was supposed to".
+/// Fixed hints for the mappings the pre-exec image makes: one per
+/// assertion, because a `munmap` that wrongly succeeds takes its area out
+/// of the record and would hide the next check.
+const VM_EXEC_A: u64 = 0x2000_0010_0000; // munmap must refuse it
+const VM_EXEC_B: u64 = 0x2000_0020_0000; // mprotect must refuse it
+const VM_EXEC_C: u64 = 0x2000_0030_0000; // mmap must be able to hand it out
+
+/// The assertions that have to run in an image reached through exec(2).
+/// Returns a bitmask of failures, 0 when all hold - the exit status the
+/// parent decodes.
+///
+/// exec replaces the image; the mapping record has to be replaced with it.
+/// `from_elf` builds the right one for the new image, but until 2026-09
+/// `replace_current_image` copied the context, the kernel stack, the page
+/// table and the name - and left `Task.vm` pointing at the OLD image's
+/// record, which the new one then inherited.
+///
+/// Both sides of the exec are this same binary, so the ELF segments and
+/// the stack coincide: what discriminates a stale record from a fresh one
+/// is the anonymous mappings the pre-exec image made. They are gone from
+/// the address space (the page table was freed), so the new image must not
+/// own them.
+fn vm_record_after_exec_child() -> i32 {
+    const PAGE: usize = 4096;
+    const ANON: u32 = MAP_PRIVATE | MAP_ANONYMOUS;
+    const RW: u32 = PROT_READ | PROT_WRITE;
+    const EINVAL: i64 = -22;
+    const ENOMEM: i64 = -12;
+
+    let mut fail = 0i32;
+
+    // 1. A page the previous image mapped is not this image's to unmap.
+    if munmap(VM_EXEC_A, PAGE) != Err(EINVAL) {
+        fail |= 1;
+    }
+    // 2. Nor to reprotect.
+    if mprotect(VM_EXEC_B, PAGE, PROT_READ) != Err(ENOMEM) {
+        fail |= 2;
+    }
+    // 3. And its address is free, so the hint has to be honoured.
+    match mmap(VM_EXEC_C, PAGE, RW, ANON, -1, 0) {
+        Ok(addr) if addr == VM_EXEC_C => {}
+        _ => fail |= 4,
+    }
+    // 4. The record is a working record, not merely an empty one: a fresh
+    //    mapping can be made, written and released.
+    match mmap(0, PAGE, RW, ANON, -1, 0) {
+        Ok(addr) => {
+            let p = addr as *mut u8;
+            // SAFETY: addr is a fresh RW anonymous page of this process.
+            let wrote = unsafe {
+                *p = 0x3C;
+                *p == 0x3C
+            };
+            if !wrote || munmap(addr, PAGE).is_err() {
+                fail |= 8;
+            }
+        }
+        Err(_) => fail |= 8,
+    }
+    // 5. This image's own stack is this image's (invariant: it holds either
+    //    way with the same binary on both sides, and must never stop).
+    let local = 0u64;
+    let stack_page = (&local as *const u64 as u64) & !(PAGE as u64 - 1);
+    if mprotect(stack_page, PAGE, RW).is_err() {
+        fail |= 16;
+    }
+
+    fail
+}
+
+/// exec(2) must install the new image's mapping record. See
+/// `vm_record_after_exec_child` for what the child asserts and why.
+fn test_vm_record_after_exec() {
+    println("\n[test] exec installs the new image's mapping record");
+
+    const PAGE: usize = 4096;
+    const ANON: u32 = MAP_PRIVATE | MAP_ANONYMOUS;
+    const RW: u32 = PROT_READ | PROT_WRITE;
+
+    let status = match fork() {
+        Ok(0) => {
+            // The image that execs: stake out the three hinted pages, then
+            // hand the process to a fresh copy of this binary.
+            let a = mmap(VM_EXEC_A, PAGE, RW, ANON, -1, 0);
+            let b = mmap(VM_EXEC_B, PAGE, RW, ANON, -1, 0);
+            let c = mmap(VM_EXEC_C, PAGE, RW, ANON, -1, 0);
+            if a != Ok(VM_EXEC_A) || b != Ok(VM_EXEC_B) || c != Ok(VM_EXEC_C) {
+                exit(64); // the hints are meant to be free; nothing to test
+            }
+            let path = b"/bin/racos-test\0";
+            let arg0 = b"racos-test\0";
+            let arg1 = b"--vm-after-exec\0";
+            let argv: [*const u8; 3] = [arg0.as_ptr(), arg1.as_ptr(), core::ptr::null()];
+            let _ = exec_args(path, &argv);
+            exit(65); // exec returned: it failed
+        }
+        Ok(pid) => {
+            let mut status: i32 = -1;
+            if waitpid(pid, &mut status, 0).is_err() {
+                check!("waitpid on the exec'd child", false);
+                return;
+            }
+            status
+        }
+        Err(_) => {
+            check!("fork for the exec test", false);
+            return;
+        }
+    };
+
+    if status == 64 {
+        check!("the three hinted pages were free before exec", false);
+        return;
+    }
+    if status == 65 {
+        check!("exec /bin/racos-test --vm-after-exec", false);
+        return;
+    }
+    check!(
+        "exec'd child reported a verdict",
+        status >= 0 && status < 32
+    );
+
+    check!(
+        "munmap of the previous image's page returns EINVAL",
+        status & 1 == 0
+    );
+    check!(
+        "mprotect of the previous image's page returns ENOMEM",
+        status & 2 == 0
+    );
+    check!(
+        "the freed hint is available to the new image's mmap",
+        status & 4 == 0
+    );
+    check!("the new image can map, write and unmap", status & 8 == 0);
+    check!("the new image owns its own stack", status & 16 == 0);
+
+    if status == 0 {
+        println("T42-VM-EXEC-OK");
+    }
+}
+
 fn test_persistent_mount_layout() {
     println("\n[test] persistent mount layout");
 

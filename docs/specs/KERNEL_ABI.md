@@ -168,7 +168,11 @@ life of a boot and is not a persistent device number.
 The kernel keeps a per-process record of every mapping (`kernel/src/mm/vm.rs`:
 the ELF segments and the stack from exec, and each anonymous mapping),
 which is what `munmap` and `mprotect` check a range against. A fork gets
-its own copy of the record; CLONE_VM threads share it.
+its own copy of the record; CLONE_VM threads share it. The record belongs
+to the image rather than to the process: `exec` replaces it along with the
+page table, so a mapping made before an `exec` is not the new image's to
+`munmap` or `mprotect` (EINVAL / ENOMEM) and its address is free for the
+new image to reuse.
 
 ## 7. Pointer Validation
 

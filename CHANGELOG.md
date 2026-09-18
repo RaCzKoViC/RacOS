@@ -11,6 +11,31 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Fixed — exec installs the new image's mapping record
+
+- **A process that `exec`'d kept the mapping record of the image it had
+  just left.** `sys_exec` goes through `replace_current_image`, which
+  rebuilds the task field by field — context, kernel stack, page table,
+  name, signals — and never took `Task.vm`, so the record `from_elf` had
+  built for the new image was dropped while the old one survived the
+  page table it described. Anonymous mappings made before the exec stayed
+  "owned": `munmap` on them returned 0 instead of `EINVAL` and their
+  addresses were never handed out again; `mprotect` changed the record
+  before failing on the absent page; and an image whose segments fell
+  outside the stale record could have been handed one of its own
+  addresses by `mmap`. `fork`+`exec` is the affected path — racterm's
+  shell; `sys_spawn` was sound, building the task whole.
+- **Regression test `T42-VM-EXEC-OK`:** the child mmaps three pages at
+  fixed hints and execs this same binary with `--vm-after-exec`, a mode
+  that runs those assertions alone and reports them in its exit status.
+  Both sides of the exec are one binary, so the segments and the stack
+  coincide and the anonymous mappings are what tells a stale record from
+  a fresh one. Red 283/2, green 285/0.
+- `libc-lite` gains **`exec_args`**: `sys_exec` has always accepted an
+  argv (the kernel assembles it in `collect_user_argv`), the wrapper
+  simply never passed one, so no chosen code could be run in an exec'd
+  image.
+
 ### Fixed — `/proc` lists running processes, so `ps` and `top` show them
 
 - **`ps` printed its header and nothing else; `top` reported

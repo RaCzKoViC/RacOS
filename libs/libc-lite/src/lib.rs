@@ -376,6 +376,24 @@ pub fn exec(path: &[u8]) -> Result<(), i64> {
     }
 }
 
+/// Run a new program in this process, passing arguments.
+///
+/// `argv` is an array of pointers to NUL-terminated strings, itself
+/// NULL-terminated - the same shape `spawn_args` takes. `exec` above
+/// sends a null argv, which the kernel turns into a one-element argv of
+/// the path; this is the wrapper for everything else. On success there is
+/// no return: the image is replaced.
+pub fn exec_args(path: &[u8], argv: &[*const u8]) -> Result<(), i64> {
+    // SAFETY: syscall ABI; pointers come from &[u8] / &[*const u8]
+    // (caller's responsibility to NUL-terminate argv).
+    let ret = unsafe { syscall3(SYS_EXEC, path.as_ptr() as u64, argv.as_ptr() as u64, 0) };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
+}
+
 /// Utwórz nowy proces potomny z ELF.
 pub fn spawn(path: &[u8]) -> Result<i32, i64> {
     // SAFETY: syscall ABI; path pointer comes from a &[u8].
