@@ -67,11 +67,11 @@ The RaCore kernel ABI defines the binary interface between user space processes 
 | Nr | Name | Args | Return | Stability |
 |----|------|------|--------|-----------|
 | 0 | sys_exit | status: i32 | — (noreturn) | Stable |
-| 11 | sys_exec | path: *const u8, argv: *const *const u8, envp: *const *const u8 | 0 or error | Stable |
-| 12 | sys_spawn | path: *const u8, argv: *const *const u8, envp: *const *const u8 | child_pid or error | Stable |
+| 11 | sys_exec | path: *const u8, argv: *const *const u8, envp: *const *const u8 | no return on success, or error. EACCES when the caller may not search a directory of the path or the file is not a regular file it may execute (an execute bit it can use - `CAP_DAC_OVERRIDE` does not grant one), ENOENT when the name is not there, ENOEXEC for an empty or unparseable image. | Stable |
+| 12 | sys_spawn | path: *const u8, argv: *const *const u8, envp: *const *const u8 | child_pid or error; the same permission rules as sys_exec. | Stable |
 | 13 | sys_wait | pid: i32, status: *mut i32, options: u32 | pid or error | Stable |
 | 14 | sys_getpid | — | pid | Stable |
-| 17 | sys_kill | pid: i32, signal: i32 | 0 or error | Stable |
+| 17 | sys_kill | pid: i32, signal: i32 | 0 or error. The sender's real or effective UID must equal the target's real or effective UID, unless it holds `CAP_KILL`; SIGCONT is also allowed within one session. EPERM when the target exists and may not be signalled, ESRCH when it does not exist. `signal` 0 sends nothing and answers the permission question alone (0 / EPERM / ESRCH), judged as for a signal without SIGCONT's session exception. | Stable |
 
 ### 5.2 File Operations
 
@@ -85,6 +85,10 @@ The RaCore kernel ABI defines the binary interface between user space processes 
 | 9 | sys_dup | oldfd: i32 | newfd or error | Stable |
 | 10 | sys_dup2 | oldfd: i32, newfd: i32 | newfd or error | Stable |
 | 15 | sys_chdir | path: *const u8 | 0 or error | Stable |
+
+**Path resolution and permission.** Every syscall that takes a path resolves it as the calling process: each directory walked through must grant that process search (execute) permission, or the syscall answers EACCES - whatever the mode of the file at the end of the path. The exception is the components above a mount point: the resolver jumps straight to the deepest mount, and a mount point need not exist in the filesystem underneath (`/tmp`, `/dev`, `/proc`, `/mnt`, `/var` and `/fat` have no directory of their own in the initramfs), so a path's prefix above a mount is not a barrier. A caller holding `CAP_DAC_OVERRIDE` passes every directory.
+
+**Credentials.** `sys_setuid` reduces the capability masks along with the UID: leaving root (real UID no longer 0) clears the permitted set, dropping the effective UID from root clears the effective set, raising it back restores effective from permitted. Dropping privileges is therefore one-way, and `setuid(0)` afterwards is EPERM.
 | 18 | sys_getcwd | buf: *mut u8, size: usize | 0 or error | Stable |
 | 16 | sys_ioctl | fd: i32, request: u64, arg: u64 | 0 or error | Unstable |
 | 48 | sys_rename | old: *const u8, new: *const u8 | 0 or error. A rename, not a copy: the inode keeps its number; an existing `new` is replaced (a directory only if empty - ENOTEMPTY); directories move with their contents (into their own subtree: EINVAL); two names of one inode: 0 and no change; EXDEV across mounts; ENOTDIR / EISDIR when the types of `old` and an existing `new` differ. racfs: one journal transaction. | Stable |

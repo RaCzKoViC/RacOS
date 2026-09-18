@@ -97,7 +97,15 @@ A snapshot. For the detailed list of what's enabled vs deferred, read
 
 **Shipped and enforced:**
 
-- DAC (owner/group/other RWX) on every path-aware syscall.
+- DAC (owner/group/other RWX) on every path-aware syscall, and search
+  permission on every directory a path is resolved through (except the
+  components above a mount point, which need not exist below it).
+- Execute permission on exec/spawn; a file with no `x` bit does not run,
+  root included.
+- Signal authorization: the sender's UID must match the target's unless
+  it holds `CAP_KILL`.
+- `setuid` takes the capability masks with it, so dropping privileges is
+  one-way.
 - Capability model: `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_SETUID`,
   `CAP_SETGID`, `CAP_CHOWN`, `CAP_SYS_ADMIN`, `CAP_SYS_BOOT`. Risky
   syscalls (`mount`/`umount`/`mkfs`/`reboot`/`chown`/`setuid`/`setgid`)

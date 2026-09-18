@@ -68,7 +68,7 @@ being asked; PR #39 is not closed without an assessment against `main`.
 | 3b | `vfs: atomic rename; mv uses rename(2)` | ✅ [#54](https://github.com/RaCzKoViC/RacOS/pull/54) — `T38-RENAME-OK`, 232/0, crash test proves "exactly one name" |
 | 4 | `syscall: validate user mappings and introduce usercopy` | ✅ [#55](https://github.com/RaCzKoViC/RacOS/pull/55) — `kernel/src/syscall/usercopy.rs`, `T39-USERCOPY-OK`, 249/0 |
 | 5 | `vm: track mappings and enforce mmap/munmap/mprotect` | 🔄 in review — `kernel/src/mm/vm.rs`, `T40-VM-OK`, 269/0 |
-| 6 | `security: enforce exec/signal/path permissions and capability drop` | ⏳ next. Execute DAC in exec/spawn; owner check in kill; path-walk execute permission on every directory; setuid drops capability masks; tests for an unprivileged user and parent–child |
+| 6 | `security: enforce exec/signal/path permissions and capability drop` | 🔄 in review — `dac::can_exec`, `security::process::can_signal`, `mount::lookup_path_as`, `capability::drop_for_uid_change`; `T43-AUTHZ-OK`, 310/0 |
 | 7 | `racfs: enter recovery on dangerous fsck and define durable commit barriers` | ⏳ transactions over 60 journal slots must split or refuse, not bypass the journal; BlockDevice flush/barrier between WAL phases; a dangerous fsck result mounts read-only and skips the boot-time persistence test |
 | 8 | `libc-lite: reclaim heap allocations; add long-session regression` | ⏳ a freeing allocator, then growth through the now-real `mmap`; 10 000 commands / scrollback / repeated open-close without a monotonic leak |
 
@@ -82,6 +82,28 @@ being asked; PR #39 is not closed without an assessment against `main`.
   the system. Also the `#PF` handler decodes its frame through
   `TSS.RSP0-40`, which is wrong for a fault taken in ring 0, so its
   `RIP`/`CS` in the log are garbage for nested faults.
+- **`/bin/sleep` wedges the guest.** It busy-waits on `clock_gettime`
+  with no yield; a shell running `sleep 2`, or any process letting it run
+  to completion, stops the whole machine - no further output, on
+  `main`'s kernel as much as on a branch. The suite never caught it
+  because its one user (`test_signal_default_terminate`) kills it within
+  a moment. Its own PR, together with a real `nanosleep` for userland.
+- **A process killed by a signal exits with status -1**, so a parent
+  cannot tell it from a process that returned -1; POSIX encodes the
+  signal in the wait status.
+- **tmpfs keeps a file's data in one kernel `Vec`**, so copying a
+  ~2.5 MB coreutil into `/tmp` asks the heap for 4 MiB and panics the
+  kernel instead of returning ENOSPC.
+- **Search permission costs the suite ~45% of its wall time** (~170 s to
+  ~247 s locally), and the cause is not the work it does: the
+  per-directory metadata read is skipped for a caller with
+  CAP_DAC_OVERRIDE, and the credentials read is now a plain read.
+  Stubbing the two helpers out recovers the time even in groups that
+  make no path syscalls, which points at code layout under TCG. Worth a
+  bisect with a smaller kernel diff.
+- **Mount points should exist as directories** in the filesystem they
+  are mounted over, so a path's prefix above a mount is a barrier like
+  any other directory.
 - **`exec` with threads** frees the page table under the siblings of a
   `CLONE_VM` group and leaves them holding the old mapping record; POSIX
   terminates them. Whole-group teardown is its own change.
