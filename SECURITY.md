@@ -113,9 +113,12 @@ A snapshot. For the detailed list of what's enabled vs deferred, read
 - Per-task kernel-stack guard page with a sentinel byte checked on
   every context switch — kernel-stack overflows are detected and
   panic with the offending PID instead of corrupting another task.
-- `validate_user_ptr` / `validate_user_string` on every syscall
-  argument that crosses the ring boundary; the bounds check is the
-  documented invariant in every `// SAFETY:` annotation in
+- `usercopy` on every syscall argument that crosses the ring boundary:
+  each page of the range must be present and user-accessible (and
+  writable for a destination) in the calling process's page table, and
+  data moves through `copy_from_user`/`copy_to_user`/`get_user`/
+  `put_user` with the check and the access under interrupts-off; that
+  is the documented invariant in every `// SAFETY:` annotation in
   `kernel/src/syscall/handlers.rs` (every block annotated as part of
   T4.2 — see `bash scripts/check-unsafe-safety.sh --strict`).
 - **Mandatory CI gate**: `Unsafe-safety annotation lint (--strict)`

@@ -166,11 +166,32 @@ life of a boot and is not a persistent device number.
 
 ## 7. Pointer Validation
 
-All user-space pointers passed to syscalls are validated:
-1. Must be within user address space (below 0x0000_7FFF_FFFF_FFFF)
-2. Must be properly aligned for the data type
-3. Must be mapped in the process page tables
-4. Kernel never trusts user pointers — always copies data via safe accessors
+Every user pointer a syscall receives goes through `kernel/src/syscall/usercopy.rs`
+(since 2026-09; before that only the address range was checked, and a
+kernel address passed):
+
+1. Null, above `0x0000_7FFF_FFFF_FFFF`, or a range that overflows or
+   leaves user space: `EFAULT`.
+2. Every page of the range must be mapped in the calling process's page
+   table with the USER bit at every level - the question the CPU asks
+   for a ring-3 access. A kernel page (the identity-mapped kernel, physical
+   RAM) or an unmapped page is `EFAULT`, not a ring-0 access or fault.
+3. A range the kernel will write (a `read` buffer, a `stat` buffer, `pipe`
+   fds, `poll` revents, ...) must also be writable at every level; the
+   process's own text is a valid source, never a valid destination.
+4. The kernel copies: `copy_from_user`/`copy_to_user`/`get_user`/`put_user`
+   move data between user and kernel memory with the check and the copy
+   done with interrupts off; `read`/`write`/`send`/`recv` go through a
+   kernel bounce buffer of at most 64 KiB per call (a short count past
+   that, as POSIX allows); strings (`open` paths, `argv`, `envp`) are
+   copied with each page checked before it is scanned, 4096 bytes at
+   most (`ENAMETOOLONG`).
+5. No alignment is required of user pointers; scalar accesses are
+   unaligned reads and writes.
+
+Not yet done: recovering from a page fault taken in ring 0 (an exception
+table). The check and the access happen on the same thread and page
+table with interrupts off, which is the guarantee relied on instead.
 
 ## 8. Future Syscalls (planned, not yet assigned)
 
