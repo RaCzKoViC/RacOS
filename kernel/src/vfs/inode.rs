@@ -104,6 +104,8 @@ pub enum VfsError {
     TooManyOpenFiles,
     BrokenPipe,
     WouldBlock,
+    /// A directory that must be empty for the operation is not (ENOTEMPTY).
+    DirectoryNotEmpty,
 }
 
 /// Result type for VFS operations.

@@ -862,6 +862,141 @@ impl Fat32Fs {
 
     /// Remove a file or empty subdirectory. Returns Err(IsADirectory) for
     /// non-empty dirs (kept as IsADirectory to avoid plumbing ENOTEMPTY).
+    /// Count the entries of directory `dir_cluster` other than "." and "..".
+    fn dir_live_entries(&self, dir_cluster: u32) -> VfsResult<u32> {
+        let mut n = 0u32;
+        self.for_each_dir_slot(dir_cluster, |_, _, e| {
+            if e.is_deleted() || e.is_lfn() || e.is_volume() {
+                return None;
+            }
+            let name = e.get_name();
+            if name != "." && name != ".." {
+                n += 1;
+            }
+            None::<()>
+        })?;
+        Ok(n)
+    }
+
+    /// True if directory `dir` lies anywhere below directory `top`.
+    fn is_below(&self, top: u32, dir: u32) -> VfsResult<bool> {
+        let mut stack: Vec<u32> = Vec::new();
+        stack.push(top);
+        let mut visited = 0u32;
+        while let Some(cur) = stack.pop() {
+            visited += 1;
+            if visited > self.total_clusters.saturating_add(2) {
+                return Err(VfsError::IoError);
+            }
+            let mut found = false;
+            let mut subdirs: Vec<u32> = Vec::new();
+            self.for_each_dir_slot(cur, |_, _, e| {
+                if e.is_deleted() || e.is_lfn() || e.is_volume() || !e.is_dir() {
+                    return None;
+                }
+                let name = e.get_name();
+                if name == "." || name == ".." {
+                    return None;
+                }
+                let c = e.get_cluster();
+                if c == dir {
+                    found = true;
+                    return Some(());
+                }
+                subdirs.push(c);
+                None::<()>
+            })?;
+            if found {
+                return Ok(true);
+            }
+            stack.extend(subdirs);
+        }
+        Ok(false)
+    }
+
+    /// rename(2) within this FAT32: the entry keeps its cluster chain, an
+    /// existing target is replaced, a directory moves with its contents and
+    /// its ".." is repointed. Same rules and error codes as racfs::rename.
+    ///
+    /// FAT has no journal, so this is not atomic against a crash the way
+    /// racfs's is; what it does guarantee is the order - the new entry is
+    /// on disk before the old one is marked free - so there is no moment
+    /// at which the file has no name, and no data is ever copied.
+    pub fn rename(
+        &self,
+        old_dir: u32,
+        old_name: &str,
+        new_dir: u32,
+        new_name: &str,
+    ) -> VfsResult<()> {
+        let (old_lba, old_slot, entry) = self
+            .find_dir_entry(old_dir, old_name)?
+            .ok_or(VfsError::NotFound)?;
+        let (name8, ext3) = encode_short_name(new_name)?;
+        let cluster = entry.get_cluster();
+        let src_is_dir = entry.is_dir();
+
+        let existing = self.find_dir_entry(new_dir, new_name)?;
+        if let Some((_, _, dst)) = &existing {
+            if dst.get_cluster() == cluster {
+                return Ok(());
+            }
+            match (src_is_dir, dst.is_dir()) {
+                (true, false) => return Err(VfsError::NotADirectory),
+                (false, true) => return Err(VfsError::IsADirectory),
+                (true, true) if self.dir_live_entries(dst.get_cluster())? > 0 => {
+                    return Err(VfsError::DirectoryNotEmpty)
+                }
+                _ => {}
+            }
+        }
+        if src_is_dir
+            && old_dir != new_dir
+            && (new_dir == cluster || self.is_below(cluster, new_dir)?)
+        {
+            return Err(VfsError::InvalidArgument);
+        }
+
+        if existing.is_some() {
+            // unlink marks the target's entry free and releases its chain.
+            self.unlink(new_dir, new_name)?;
+        }
+
+        let mut renamed = entry;
+        renamed.name = name8;
+        renamed.ext = ext3;
+        if old_dir == new_dir {
+            // Same directory: the entry changes its name in place.
+            self.write_dir_entry(old_lba, old_slot, &renamed)?;
+        } else {
+            let (lba, slot) = self.find_or_alloc_dir_slot(new_dir)?;
+            self.write_dir_entry(lba, slot, &renamed)?;
+            let mut sector = [0u8; SECTOR_SIZE];
+            self.device
+                .read_sector(old_lba, &mut sector)
+                .map_err(|_| VfsError::IoError)?;
+            sector[old_slot * DIR_ENTRY_SIZE] = DIR_FREE;
+            self.device
+                .write_sector(old_lba, &sector)
+                .map_err(|_| VfsError::IoError)?;
+            if src_is_dir {
+                // ".." lives in slot 1 of the directory's first cluster and
+                // stores 0 for the root cluster, as create_dir writes it.
+                let parent_for_dotdot = if new_dir == self.bpb.root_cluster {
+                    0
+                } else {
+                    new_dir
+                };
+                if let Some((lba, slot, mut dotdot)) = self.find_dir_entry(cluster, "..")? {
+                    dotdot.set_cluster(parent_for_dotdot);
+                    self.write_dir_entry(lba, slot, &dotdot)?;
+                }
+            }
+            self.remember_parent(new_dir, cluster);
+        }
+        Ok(())
+    }
+
     pub fn unlink(&self, parent_cluster: u32, name: &str) -> VfsResult<()> {
         let (lba, slot, entry) = self
             .find_dir_entry(parent_cluster, name)?

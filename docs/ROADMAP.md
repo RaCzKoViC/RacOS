@@ -181,8 +181,8 @@ covered by `T20-*`, `T21-COREUTILS-OK`, `T21-HARDLINK-OK`, `T22-ALIAS-OK` and
   operation's sectors are copied into the journal and a commit record is
   written before any of them is allowed in place, so a crash leaves the
   filesystem entirely before the operation or entirely after it.
-  `create` / `unlink` / `link` / `set_metadata` / `truncate` each run as
-  one transaction; replay happens at mount, before `check()`.
+  `create` / `unlink` / `link` / `set_metadata` / `truncate` / `rename`
+  each run as one transaction; replay happens at mount, before `check()`.
 
   The journal lives in `[1, bitmap_start)` and its length is derived the
   same way the bitmap's is, so an image from before it existed reports a

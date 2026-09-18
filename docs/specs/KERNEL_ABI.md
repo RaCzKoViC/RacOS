@@ -42,12 +42,14 @@ The RaCore kernel ABI defines the binary interface between user space processes 
 | -4 | EINTR | Interrupted system call |
 | -5 | EIO | I/O error |
 | -6 | ENXIO | No such device or address |
+| -8 | ENOEXEC | Exec format error (was -39 until 2026-09) |
 | -9 | EBADF | Bad file descriptor |
 | -11 | EAGAIN | Try again |
 | -12 | ENOMEM | Out of memory |
 | -13 | EACCES | Permission denied |
 | -14 | EFAULT | Bad address |
 | -17 | EEXIST | File exists |
+| -18 | EXDEV | Cross-device link or rename |
 | -20 | ENOTDIR | Not a directory |
 | -21 | EISDIR | Is a directory |
 | -22 | EINVAL | Invalid argument |
@@ -56,6 +58,7 @@ The RaCore kernel ABI defines the binary interface between user space processes 
 | -28 | ENOSPC | No space left on device |
 | -36 | ENAMETOOLONG | Filename too long |
 | -38 | ENOSYS | Function not implemented |
+| -39 | ENOTEMPTY | Directory not empty |
 
 ## 5. Syscall Table v1
 
@@ -84,6 +87,7 @@ The RaCore kernel ABI defines the binary interface between user space processes 
 | 15 | sys_chdir | path: *const u8 | 0 or error | Stable |
 | 18 | sys_getcwd | buf: *mut u8, size: usize | 0 or error | Stable |
 | 16 | sys_ioctl | fd: i32, request: u64, arg: u64 | 0 or error | Unstable |
+| 48 | sys_rename | old: *const u8, new: *const u8 | 0 or error. A rename, not a copy: the inode keeps its number; an existing `new` is replaced (a directory only if empty - ENOTEMPTY); directories move with their contents (into their own subtree: EINVAL); two names of one inode: 0 and no change; EXDEV across mounts; ENOTDIR / EISDIR when the types of `old` and an existing `new` differ. racfs: one journal transaction. | Stable |
 | 38 | sys_truncate | path: *const u8, length: u64 | 0 or error (EISDIR for a directory, EINVAL for a non-regular file, EACCES without write permission or on a read-only filesystem) | Stable |
 | 70 | sys_ftruncate | fd: i32, length: u64 | 0 or error (EINVAL unless fd is a regular file open for writing) | Stable |
 

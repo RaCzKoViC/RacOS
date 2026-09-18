@@ -6,8 +6,10 @@ use libc_lite;
 /// mv — move or rename file
 /// Usage: mv source dest
 ///
-/// Implemented as copy-then-unlink (the kernel's rename is not an atomic
-/// rename yet). Two rules make that safe:
+/// rename(2) first: within one filesystem that is one directory operation
+/// that keeps the inode and, on racfs, one journal transaction. Only when
+/// the kernel answers EXDEV - the two paths are on different mounts - does
+/// mv fall back to copy-then-unlink, and two rules keep that safe:
 ///
 /// - source and destination that are the same file - the same path, or two
 ///   hard links to one inode - are left alone with exit 0, as POSIX rename
@@ -70,6 +72,32 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         }
         None => false,
     };
+
+    // The real thing. Anything but "different filesystems" is an answer.
+    const EXDEV: i64 = -18;
+    match libc_lite::rename(src_path, dst_path) {
+        Ok(()) => return 0,
+        Err(EXDEV) => {}
+        Err(e) => {
+            let _ = libc_lite::write_all(2, b"mv: cannot rename ");
+            let _ = libc_lite::write_all(2, &src_path[..src_len]);
+            let _ = libc_lite::write_all(2, b" to ");
+            let _ = libc_lite::write_all(2, &dst_path[..dst_len]);
+            let _ = libc_lite::write_all(
+                2,
+                match e {
+                    -2 => b": No such file or directory\n" as &[u8],
+                    -13 => b": Permission denied\n",
+                    -20 => b": Not a directory\n",
+                    -21 => b": Is a directory\n",
+                    -22 => b": Invalid argument\n",
+                    -39 => b": Directory not empty\n",
+                    _ => b"\n",
+                },
+            );
+            return 1;
+        }
+    }
 
     let src_fd = match libc_lite::open(src_path, 0, 0) {
         Ok(fd) => fd,

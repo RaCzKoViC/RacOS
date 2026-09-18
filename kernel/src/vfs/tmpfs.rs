@@ -222,6 +222,130 @@ impl Tmpfs {
         Ok(())
     }
 
+    /// The live child of directory `parent_ino` called `name`, with its
+    /// position in the parent's list.
+    fn find_child(&self, parent_ino: InodeNum, name: &str) -> VfsResult<Option<(usize, InodeNum)>> {
+        let nodes = self.nodes();
+        let parent = nodes.get(parent_ino as usize).ok_or(VfsError::NotFound)?;
+        if parent.file_type != FileType::Directory || parent.removed {
+            return Err(VfsError::NotADirectory);
+        }
+        for (i, &cino) in parent.children.iter().enumerate() {
+            if let Some(child) = nodes.get(cino as usize) {
+                if !child.removed && child.name == name {
+                    return Ok(Some((i, cino)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// True if directory `dir` lies anywhere below directory `top`.
+    fn is_below(&self, top: InodeNum, dir: InodeNum) -> bool {
+        let nodes = self.nodes();
+        let mut stack: Vec<InodeNum> = Vec::new();
+        stack.push(top);
+        let mut visited = 0usize;
+        while let Some(cur) = stack.pop() {
+            visited += 1;
+            if visited > nodes.len() + 1 {
+                return true; // a cycle is as bad as a hit; refuse
+            }
+            if let Some(node) = nodes.get(cur as usize) {
+                for &c in &node.children {
+                    if c == dir {
+                        return true;
+                    }
+                    if nodes
+                        .get(c as usize)
+                        .map(|n| n.file_type == FileType::Directory && !n.removed)
+                        .unwrap_or(false)
+                    {
+                        stack.push(c);
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// rename(2) within this tmpfs: the node keeps its inode number, an
+    /// existing target is replaced, a directory moves with its contents.
+    /// Same rules and error codes as racfs::rename.
+    pub fn rename(
+        &self,
+        old_parent: InodeNum,
+        old_name: &str,
+        new_parent: InodeNum,
+        new_name: &str,
+    ) -> VfsResult<()> {
+        if new_name.is_empty() {
+            return Err(VfsError::InvalidArgument);
+        }
+        let (src_idx, src_ino) = self
+            .find_child(old_parent, old_name)?
+            .ok_or(VfsError::NotFound)?;
+        let existing = self.find_child(new_parent, new_name)?;
+        let src_is_dir = {
+            let nodes = self.nodes();
+            nodes[src_ino as usize].file_type == FileType::Directory
+        };
+        if let Some((_, dst_ino)) = existing {
+            if dst_ino == src_ino {
+                return Ok(());
+            }
+            let nodes = self.nodes();
+            let dst = &nodes[dst_ino as usize];
+            let dst_is_dir = dst.file_type == FileType::Directory;
+            let dst_live_children = dst
+                .children
+                .iter()
+                .filter(|&&c| nodes.get(c as usize).map(|n| !n.removed).unwrap_or(false))
+                .count();
+            match (src_is_dir, dst_is_dir) {
+                (true, false) => return Err(VfsError::NotADirectory),
+                (false, true) => return Err(VfsError::IsADirectory),
+                (true, true) if dst_live_children > 0 => return Err(VfsError::DirectoryNotEmpty),
+                _ => {}
+            }
+        }
+        if src_is_dir
+            && old_parent != new_parent
+            && (new_parent == src_ino || self.is_below(src_ino, new_parent))
+        {
+            return Err(VfsError::InvalidArgument);
+        }
+
+        // Replace the target the way unlink releases a node.
+        if let Some((dst_idx, dst_ino)) = existing {
+            let nodes = self.nodes_mut();
+            let data_size = nodes[dst_ino as usize].data.len();
+            self.set_total_bytes(self.total_bytes().saturating_sub(data_size));
+            nodes[dst_ino as usize].data = Vec::new();
+            nodes[dst_ino as usize].removed = true;
+            nodes[new_parent as usize].children.remove(dst_idx);
+        }
+
+        let nodes = self.nodes_mut();
+        // The source's position may have shifted if the target shared its
+        // parent and sat before it; look it up again.
+        let src_idx = if old_parent == new_parent && existing.is_some() {
+            nodes[old_parent as usize]
+                .children
+                .iter()
+                .position(|&c| c == src_ino)
+                .ok_or(VfsError::NotFound)?
+        } else {
+            src_idx
+        };
+        nodes[src_ino as usize].name = String::from(new_name);
+        if old_parent != new_parent {
+            nodes[old_parent as usize].children.remove(src_idx);
+            nodes[new_parent as usize].children.push(src_ino);
+        }
+        Ok(())
+    }
+
     /// Look up a path relative to the tmpfs root. Returns (parent_ino, leaf_ino).
     /// If the path has only one component (e.g., "foo"), returns (0, ino_of_foo).
     pub fn lookup_path(&self, path: &str) -> VfsResult<InodeNum> {

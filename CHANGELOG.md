@@ -11,6 +11,63 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Fixed — rename(2) is a rename
+
+- **`sys_rename` read the whole file into memory, created a new one,
+  wrote it and unlinked the old.** Three operations plus a data copy, so
+  nothing for the journal to hold together; `st_ino` changed; an existing
+  target was EEXIST instead of replaced; directories failed; the
+  destination path was resolved in the *source's* filesystem and the full
+  path was split from the disk root, so a subtree mount such as `/home`
+  landed in the wrong directory; there was no EXDEV; and an empty file
+  was not moved at all (`if size > 0`) while the call returned 0. Review
+  item D (P1), the kernel half.
+
+- **Now one directory operation in each filesystem, with one contract.**
+  racfs: one journalled transaction, like `create` / `unlink` /
+  `truncate` - the new entry is added before the old one goes and both
+  land in the same commit, so a crash leaves the file under exactly one
+  of its names, never neither and never both; a directory moves with its
+  contents, and a move into its own subtree is refused by a walk down
+  from the source (racfs directories carry no `..`). tmpfs: the node
+  keeps its inode, changes parent and name. FAT32: the entry keeps its
+  cluster chain, is renamed in place within a directory or written into
+  the new directory before the old slot is freed, and a moved directory's
+  `..` is repointed; no journal, so not crash-atomic - the comment says
+  so. Shared rules: two names of one inode → success and no change
+  (POSIX); directory onto file ENOTDIR; file onto directory EISDIR; onto
+  a non-empty directory ENOTEMPTY; into its own subtree EINVAL; across
+  mounts EXDEV. Paths resolve relative to their mount.
+
+- **`ENOTEMPTY` (-39) exists now; `ENOEXEC` moves from -39 to -8.** The
+  kernel had ENOEXEC at -39, which is ENOTEMPTY's number on every POSIX
+  system (ENOEXEC is 8). Nothing in userland matched on it. Both are in
+  the ABI error table now, with EXDEV (-18), which was in use but not
+  listed.
+
+- **`mv` calls `rename(2)` first** and only on EXDEV falls back to the
+  copy-then-unlink path of the previous entry; any other error is
+  reported and mv exits 1. `mv` within one filesystem keeps the inode.
+
+- **Regression test first: `T38-RENAME-OK`, 18 assertions, red on the
+  tree before the fix (16 of 18 fail; 216 passed, 16 failed) and green
+  after (232/0).** An empty file moves; `st_ino`/`st_dev` unchanged, no
+  data moved, no block freed; an existing target replaced and its 34
+  blocks back; hard links: successful no-op; directories move, also into
+  another directory; own subtree EINVAL, non-empty ENOTEMPTY, empty
+  directory replaced, ENOTDIR / EISDIR / ENOENT; EXDEV across mounts and
+  `mv` still moves; `mv` keeps the inode; `/home` resolves inside its
+  subtree; tmpfs and FAT32.
+
+- **`test-crash-consistency.ps1` now proves the property the journal
+  buys.** A 1300-byte file is renamed back and forth inside the churn
+  loop; after every hard kill the next boot must find it under exactly
+  one of its two names with all 1300 bytes - 4/4. The gate's markers
+  (`CHURN-ARMED`, `SEED-READY`, `KEEP-READY`) are matched as output at
+  the start of a line: matching them anywhere also matched the guest's
+  echo of the command being typed, returned before the command ran, and
+  the next line was typed into a busy shell and partly dropped.
+
 ### Fixed — the coreutils that copy data no longer lose it
 
 - **`mv f f` deleted f; `mv a b` with b a hard link of a emptied both;
