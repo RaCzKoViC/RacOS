@@ -2248,6 +2248,31 @@ fn test_ps_lists_running_processes() {
     check!("waitpid returns the ps child", waited.unwrap_or(-1) == pid);
     check!("ps exits with status 0", status == 0);
 
+    // Exit 0 with an empty table is what ps did for months: /proc never
+    // listed a single PID directory (readdir had a comment where the
+    // scheduler scan should have been), so `ps` printed the header and
+    // `top` reported "tasks: 0" while lookups of /proc/<pid> worked. The
+    // table has to show the processes that exist while ps runs: init
+    // (PID 1), this test, and ps itself.
+    // (grep here is RacOS's: literal match, always exit 0, no -q - so the
+    // verdicts come from the text it prints.)
+    let proc_lists_1 = shell_run(b"test \"$(ls /proc | sort | head -1)\" = 1\0");
+    check!("/proc lists PID 1", proc_lists_1 == Some(0));
+    let ps_init = shell_run(b"test -n \"$(ps | grep init)\"\0");
+    check!("ps lists init", ps_init == Some(0));
+    let ps_self = shell_run(b"test -n \"$(ps | grep racos-test)\"\0");
+    check!("ps lists racos-test itself", ps_self == Some(0));
+    let ps_rows = shell_run(b"n=$(ps | wc -l); test \"$n\" -gt 3\0");
+    check!(
+        "ps prints more than the header (init, test, sh, ps)",
+        ps_rows == Some(0)
+    );
+    let ps_pid1 = shell_run(b"test \"$(ps | grep init | awk '{print $1}')\" = 1\0");
+    check!("init is PID 1 in the table", ps_pid1 == Some(0));
+    let top_tasks =
+        shell_run(b"t=$(/bin/top | grep tasks: | cut -d ' ' -f 2); test \"$t\" -gt 0\0");
+    check!("top counts the tasks it lists", top_tasks == Some(0));
+
     if waited.unwrap_or(-1) == pid && status == 0 {
         println("T33-PS-OK");
     }
