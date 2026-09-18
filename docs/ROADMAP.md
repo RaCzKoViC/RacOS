@@ -110,6 +110,12 @@ being asked; PR #39 is not closed without an assessment against `main`.
 - **Documentation drift** noted by the review and not yet fixed: ADR
   memory-model status; the root `tests/` directory of mocks; milestone
   vs release vs ABI version numbering.
+- **Found during manual testing (2026-09-18):** the VT console showed a
+  staircase (fixed: `tty: output processing (ONLCR)`); the rainbow
+  status bar at the bottom of the screen is test scaffolding in the
+  UI (its own PR); `Task.vm` is not replaced on `exec`
+  (`replace_current_image` keeps the old image's mapping record; only
+  fork+exec - racterm - is affected, `spawn` builds a fresh task).
 
 ---
 
@@ -530,6 +536,14 @@ moves to the parallel tracks as nice-to-have.
   that sound). One cell per character, replacement-boxed when the
   128-glyph font cannot show it; 3 new host tests. Writing those tests
   found `CSI G` (CHA) unimplemented — also fixed.
+- ✅ **Output processing (ONLCR)** — the emulator behind the VT treats
+  LF as a terminal does (down one row, same column), and until 2026-09
+  nothing in front of it added the CR a process never writes: every
+  line on the framebuffer console started where the previous one ended.
+  `line_discipline::onlcr` is now the one place for the `OPOST|ONLCR`
+  rule, applied at the VT and at the PTY slave→master path (racterm's
+  own grid had the same staircase). Kernel smoke reads the VT grid back
+  to prove it; racos-test proves the PTY contract.
 - ⏳ Bitmap font: 8x16 still; a 16x16 option and real non-ASCII glyph
   coverage remain open.
 - ⏳ **Mouse-tracking modes** (1000 / 1006) — blocked on a mouse driver;

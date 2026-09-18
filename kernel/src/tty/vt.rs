@@ -87,11 +87,20 @@ impl VtManager {
     }
 
     /// Feed output bytes to the current VT and repaint what changed.
+    ///
+    /// The bytes are a process's output as written; the emulator behind
+    /// the VT is a terminal, so they get the tty output processing on the
+    /// way in (`line_discipline::onlcr`: a bare LF becomes CR LF). The
+    /// runs are fed as slices, not byte by byte, so a UTF-8 sequence
+    /// still reaches the decoder whole.
     pub fn write(&mut self, bytes: &[u8]) {
         // The old cursor cell must repaint even if its row is otherwise
         // clean, or the screen accumulates ghost cursors.
         let (cr, _) = self.last_cursor;
-        self.vts[self.current_vt].term.feed(bytes);
+        let term = &mut self.vts[self.current_vt].term;
+        for (_, chunk) in super::line_discipline::onlcr(bytes) {
+            term.feed(chunk);
+        }
         self.render_row_if_valid(cr);
         self.render_dirty();
     }
@@ -315,6 +324,36 @@ pub fn vt_print(s: &str) {
             // Pre-init fallback: the boot console.
             console.write_str(s);
         }
+    }
+}
+
+/// Where the active VT's cursor is, as (row, col). CI smoke only: the
+/// smoke feeds bytes through `vt_print` and reads the grid back, the one
+/// way to assert what the screen shows without a screendump.
+#[cfg(feature = "ci-smoke")]
+pub fn probe_cursor() -> Option<(usize, usize)> {
+    // SAFETY: VT_MANAGER is a boot-once singleton; single-CPU MVP.
+    unsafe {
+        VT_MANAGER.as_ref().map(|mgr| {
+            let term = &mgr.vts[mgr.current_vt].term;
+            (term.cursor.row, term.cursor.col)
+        })
+    }
+}
+
+/// The character in the active VT's cell (row, col). CI smoke only.
+#[cfg(feature = "ci-smoke")]
+pub fn probe_cell(row: usize, col: usize) -> Option<char> {
+    // SAFETY: VT_MANAGER is a boot-once singleton; single-CPU MVP.
+    unsafe {
+        VT_MANAGER.as_ref().and_then(|mgr| {
+            let term = &mgr.vts[mgr.current_vt].term;
+            if row < term.buffer.rows && col < term.buffer.cols {
+                Some(term.buffer.get(row, col).character)
+            } else {
+                None
+            }
+        })
     }
 }
 

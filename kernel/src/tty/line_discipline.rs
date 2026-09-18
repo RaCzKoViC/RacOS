@@ -54,6 +54,48 @@ pub enum LdiscOutput {
     None,
 }
 
+/// Output processing - the termios `OPOST | ONLCR` rule, applied where a
+/// byte stream written by a process is handed to a terminal: the kernel VT
+/// (`tty::vt`) and a PTY master. A program ends a line with a bare LF; a
+/// terminal does with LF exactly what the name says - down one row, same
+/// column - so the CR has to be added on the way or every line starts
+/// where the previous one ended and the screen becomes a staircase. The
+/// serial console driver applies the same rule for its wire (`SerialWriter`).
+///
+/// There is no per-tty `oflag` yet; ONLCR is the only output mode. An
+/// explicit CR LF is not collapsed (Linux ONLCR does not either).
+///
+/// Yields `(consumed, bytes)`: `bytes` go to the terminal, `consumed` is
+/// how many input bytes they stand for (1 for the CR LF pair, the run
+/// length otherwise), so a bounded sink can report how much it took.
+pub fn onlcr(data: &[u8]) -> Onlcr<'_> {
+    Onlcr { rest: data }
+}
+
+pub struct Onlcr<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> Iterator for Onlcr<'a> {
+    type Item = (usize, &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let first = *self.rest.first()?;
+        if first == b'\n' {
+            self.rest = &self.rest[1..];
+            return Some((1, b"\r\n"));
+        }
+        let run = self
+            .rest
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(self.rest.len());
+        let (chunk, rest) = self.rest.split_at(run);
+        self.rest = rest;
+        Some((run, chunk))
+    }
+}
+
 /// The line discipline state.
 pub struct LineDiscipline {
     mode: LineMode,

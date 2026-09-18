@@ -151,6 +151,8 @@ impl DeviceOps for SerialDevice {
 
         // Mirror console output to the active virtual terminal so the
         // framebuffer view in QEMU shows the same session as /dev/console.
+        // The VT applies tty output processing (bare LF -> CR LF) itself,
+        // as SerialWriter does for the serial wire above.
         if let Ok(s) = core::str::from_utf8(buf) {
             crate::tty::vt::vt_print(s);
         } else {

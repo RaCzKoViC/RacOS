@@ -11,6 +11,29 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Fixed — a bare LF returns the carriage on the framebuffer console and on a PTY
+
+- **Every line on the VT console started where the previous one ended.**
+  Since the VT is rendered from a real terminal emulator (v0.4 §4.2), LF
+  meant what it means to a terminal - down one row, same column - and
+  nothing in front of it added the CR a process never writes, so the
+  screen was a staircase wrapping at the right edge. The PTY had the
+  same gap: the master read exactly the bytes the slave wrote, and
+  racterm's own grid drew the same staircase. Only the serial wire was
+  right, because `SerialWriter` has always added the CR itself.
+- **`line_discipline::onlcr`** is the one place for the termios
+  `OPOST|ONLCR` rule (an allocation-free iterator: runs unchanged, CR LF
+  per LF, with the input bytes each chunk stands for), applied at the two
+  sinks that hand a byte stream to a terminal: the VT (`VtManager::write`)
+  and the PTY slave→master path (`slave_write`, a CR LF pair queued whole
+  or not at all so the count is always input bytes fully delivered). An
+  explicit CR LF is not collapsed, as on Linux; there is no per-tty
+  `oflag` yet, ONLCR is the only output mode.
+- **Tests first:** kernel smoke `vt::onlcr_bare_lf_returns_carriage`
+  reads the VT grid back through two ci-smoke-only probes (red: cursor at
+  column 11, column 0 blank); racos-test "TTY output processing" checks
+  the PTY contract, `T41-TTY-ONLCR-OK` (red 270/3, green 273/0).
+
 ### Fixed — mmap, munmap and mprotect enforce what they promise
 
 - **`mmap` ignored `prot`, mapped any address, and `munmap` freed kernel
