@@ -118,6 +118,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     test_coreutils_preserve_data();
     test_rename_semantics();
     test_usercopy_rejects_bad_pointers();
+    test_vm_mappings();
     test_persistent_mount_layout();
     test_init_engine_supervises_shell();
     test_ps_lists_running_processes();
@@ -1866,6 +1867,273 @@ fn test_usercopy_rejects_bad_pointers() {
         && alive
     {
         println("T39-USERCOPY-OK");
+    }
+}
+
+/// Exit status the kernel gives a process killed by a user-mode page
+/// fault (128 + SIGSEGV).
+const KILLED_BY_FAULT: i32 = 139;
+
+/// Run `f` in a forked child and report how the child ended: Some(status)
+/// from waitpid, None if fork or wait failed. A protection violation must
+/// kill the process, so every "this access must be refused" case below
+/// runs in a child and the parent reads the verdict.
+fn in_child(f: impl FnOnce()) -> Option<i32> {
+    match fork() {
+        Ok(0) => {
+            f();
+            exit(0);
+        }
+        Ok(pid) => {
+            let mut status: i32 = -1;
+            if waitpid(pid, &mut status, 0).is_err() {
+                return None;
+            }
+            Some(status)
+        }
+        Err(_) => None,
+    }
+}
+
+/// mmap/munmap/mprotect must enforce what they promise. Before this group
+/// `mmap` ignored `prot` (everything was RW+NX), mapped a caller-supplied
+/// address anywhere without looking - over an existing mapping or over
+/// the identity-mapped kernel - and handed out addresses from one global
+/// bump cursor shared by every process and never reused; `munmap` freed
+/// the frames of any present page, kernel pages included; `mprotect`
+/// returned 0 without doing anything. A process asking for a read-only
+/// page, a guard page or W^X got the answer "yes" and none of it.
+fn test_vm_mappings() {
+    println("\n[test] mmap / munmap / mprotect enforce their contract");
+
+    const PAGE: usize = 4096;
+    const ANON: u32 = MAP_PRIVATE | MAP_ANONYMOUS;
+    const RW: u32 = PROT_READ | PROT_WRITE;
+    const EINVAL: i64 = -22;
+    const EEXIST: i64 = -17;
+    const ENOMEM: i64 = -12;
+
+    // --- an ordinary anonymous mapping -------------------------------------
+    let a = mmap(0, 3 * PAGE, RW, ANON, -1, 0);
+    let b = mmap(0, PAGE, RW, ANON, -1, 0);
+    let basic = match (a, b) {
+        (Ok(a), Ok(b)) => {
+            let pa = a as *mut u8;
+            // SAFETY: a is a fresh RW anonymous mapping of 3 pages.
+            let ok = unsafe {
+                *pa = 0x5A;
+                *pa.add(3 * PAGE - 1) = 0xA5;
+                *pa == 0x5A && *pa.add(3 * PAGE - 1) == 0xA5 && *pa.add(PAGE) == 0
+            };
+            ok && a % PAGE as u64 == 0
+                && b % PAGE as u64 == 0
+                && (b + PAGE as u64 <= a || a + 3 * PAGE as u64 <= b)
+        }
+        _ => false,
+    };
+    check!(
+        "anonymous RW mappings are page-aligned, zeroed, writable, disjoint",
+        basic
+    );
+    let a = a.unwrap_or(0);
+    let b = b.unwrap_or(0);
+
+    // --- PROT_READ: readable, and a write kills the writer -----------------
+    let ro = mmap(0, PAGE, PROT_READ, ANON, -1, 0).unwrap_or(0);
+    // SAFETY: ro is a mapped page; reading it is allowed.
+    let ro_read = ro != 0 && unsafe { *(ro as *const u8) } == 0;
+    check!("a PROT_READ page reads as zero", ro_read);
+    let ro_write = in_child(|| {
+        // SAFETY: deliberately writing a read-only page; the kernel must
+        // kill this child, which is the assertion.
+        unsafe {
+            core::ptr::write_volatile(ro as *mut u8, 1);
+        }
+    });
+    check!(
+        "writing a PROT_READ page kills the process (139)",
+        ro_write == Some(KILLED_BY_FAULT)
+    );
+
+    // --- PROT_NONE: any access kills -----------------------------------------
+    let none = mmap(0, PAGE, PROT_NONE, ANON, -1, 0).unwrap_or(0);
+    let none_read = in_child(|| {
+        // SAFETY: deliberately touching a PROT_NONE page; must be fatal.
+        unsafe {
+            let _ = core::ptr::read_volatile(none as *const u8);
+        }
+    });
+    check!(
+        "reading a PROT_NONE page kills the process (139)",
+        none != 0 && none_read == Some(KILLED_BY_FAULT)
+    );
+
+    // --- mprotect changes the answer ---------------------------------------
+    let m_down = mprotect(a, PAGE, PROT_READ);
+    let down_write = in_child(|| {
+        // SAFETY: page a was just made read-only; the write must be fatal.
+        unsafe {
+            core::ptr::write_volatile(a as *mut u8, 2);
+        }
+    });
+    check!(
+        "mprotect RW->R makes a write fatal",
+        m_down.is_ok() && down_write == Some(KILLED_BY_FAULT)
+    );
+    let m_up = mprotect(ro, PAGE, RW);
+    // SAFETY: ro was just made writable.
+    let up_write = m_up.is_ok()
+        && unsafe {
+            core::ptr::write_volatile(ro as *mut u8, 7);
+            core::ptr::read_volatile(ro as *const u8) == 7
+        };
+    check!("mprotect R->RW makes the page writable", up_write);
+    let m_outside = mprotect(0x0000_2000_0000_0000, PAGE, RW);
+    check!(
+        "mprotect outside any mapping is ENOMEM",
+        m_outside == Err(ENOMEM)
+    );
+    let m_kernel = mprotect(0x0010_0000, PAGE, RW);
+    check!(
+        "mprotect on a kernel address is ENOMEM",
+        m_kernel == Err(ENOMEM)
+    );
+
+    // --- munmap: whole, partial, and refusals -------------------------------
+    let u_b = munmap(b, PAGE);
+    let after_unmap = in_child(|| {
+        // SAFETY: b was just unmapped; touching it must be fatal.
+        unsafe {
+            let _ = core::ptr::read_volatile(b as *const u8);
+        }
+    });
+    check!(
+        "munmap makes the page unreachable (139)",
+        u_b.is_ok() && after_unmap == Some(KILLED_BY_FAULT)
+    );
+    // The middle page of a: both ends survive, the hole is dead.
+    let u_mid = munmap(a + PAGE as u64, PAGE);
+    // SAFETY: pages 0 and 2 of a are still mapped (page 0 read-only).
+    let ends_ok = u_mid.is_ok()
+        && unsafe {
+            *(a as *const u8) == 0x5A
+                && *((a + 2 * PAGE as u64 + PAGE as u64 - 1) as *const u8) == 0xA5
+        };
+    let hole_dead = in_child(|| {
+        // SAFETY: the middle page is gone; must be fatal.
+        unsafe {
+            let _ = core::ptr::read_volatile((a + PAGE as u64) as *const u8);
+        }
+    });
+    check!(
+        "munmap of a middle page keeps both ends and kills access to the hole",
+        ends_ok && hole_dead == Some(KILLED_BY_FAULT)
+    );
+    let u_unmapped = munmap(0x0000_2000_0000_0000, PAGE);
+    check!(
+        "munmap of an unmapped range is EINVAL",
+        u_unmapped == Err(EINVAL)
+    );
+    let u_misaligned = munmap(a + 1, PAGE);
+    check!(
+        "munmap of a misaligned address is EINVAL",
+        u_misaligned == Err(EINVAL)
+    );
+
+    // --- the address hint, MAP_FIXED, and reuse ----------------------------
+    let hint = 0x0000_2000_0010_0000u64;
+    let hinted = mmap(hint, PAGE, RW, ANON, -1, 0);
+    check!("a hint at a free address is honoured", hinted == Ok(hint));
+    // A hint over a live mapping must not clobber it: a's first page still
+    // holds 0x5A afterwards and the new mapping lands elsewhere.
+    let over = mmap(a, PAGE, RW, ANON, -1, 0);
+    // SAFETY: page 0 of a is mapped read-only and still holds its byte.
+    let not_clobbered = matches!(over, Ok(v) if v != a) && unsafe { *(a as *const u8) } == 0x5A;
+    check!(
+        "a hint over a live mapping goes elsewhere and clobbers nothing",
+        not_clobbered
+    );
+    let fixed_over = mmap(a, PAGE, RW, ANON | MAP_FIXED, -1, 0);
+    check!(
+        "MAP_FIXED over a live mapping is EEXIST",
+        fixed_over == Err(EEXIST)
+    );
+    let fixed_kernel = mmap(0x0010_0000, PAGE, RW, ANON | MAP_FIXED, -1, 0);
+    check!(
+        "MAP_FIXED at a kernel address is EINVAL",
+        fixed_kernel == Err(EINVAL)
+    );
+    // Reuse: unmap the hinted page, map one page again; the same address
+    // comes back - the space is returned, not consumed for good.
+    let _ = munmap(hint, PAGE);
+    let again = mmap(hint, PAGE, RW, ANON, -1, 0);
+    check!("an unmapped address is available again", again == Ok(hint));
+    if let Ok(v) = over {
+        let _ = munmap(v, PAGE);
+    }
+    let _ = munmap(hint, PAGE);
+
+    // --- fork: the child gets its own copy -------------------------------
+    let shared = mmap(0, PAGE, RW, ANON, -1, 0).unwrap_or(0);
+    // SAFETY: shared is a fresh RW page.
+    unsafe {
+        *(shared as *mut u8) = 1;
+    }
+    let child = in_child(|| {
+        // SAFETY: the child writes its own copy; the parent must not see it.
+        unsafe {
+            *(shared as *mut u8) = 2;
+        }
+    });
+    // SAFETY: shared is still mapped in the parent.
+    let parent_sees = unsafe { *(shared as *const u8) };
+    check!(
+        "a forked child writes its own copy of the mapping",
+        child == Some(0) && parent_sees == 1
+    );
+    let _ = munmap(shared, PAGE);
+
+    // --- and the kernel's own pages are not the process's to unmap ---------
+    // On the old kernel this freed the frame under the kernel text; it is
+    // last on purpose.
+    let u_kernel = munmap(0x0010_0000, PAGE);
+    check!("munmap of a kernel page is EINVAL", u_kernel == Err(EINVAL));
+    let alive = shell_run(
+        b"echo vm-alive > /tmp/vm_alive; c=$(cat /tmp/vm_alive); test \"$c\" = vm-alive\0",
+    ) == Some(0);
+    check!("the system still runs afterwards", alive);
+
+    let _ = munmap(a, PAGE);
+    let _ = munmap(a + 2 * PAGE as u64, PAGE);
+    let _ = munmap(ro, PAGE);
+    let _ = munmap(none, PAGE);
+
+    if basic
+        && ro_read
+        && ro_write == Some(KILLED_BY_FAULT)
+        && none_read == Some(KILLED_BY_FAULT)
+        && m_down.is_ok()
+        && down_write == Some(KILLED_BY_FAULT)
+        && up_write
+        && m_outside == Err(ENOMEM)
+        && m_kernel == Err(ENOMEM)
+        && u_b.is_ok()
+        && after_unmap == Some(KILLED_BY_FAULT)
+        && ends_ok
+        && hole_dead == Some(KILLED_BY_FAULT)
+        && u_unmapped == Err(EINVAL)
+        && u_misaligned == Err(EINVAL)
+        && hinted == Ok(hint)
+        && not_clobbered
+        && fixed_over == Err(EEXIST)
+        && fixed_kernel == Err(EINVAL)
+        && again == Ok(hint)
+        && child == Some(0)
+        && parent_sees == 1
+        && u_kernel == Err(EINVAL)
+        && alive
+    {
+        println("T40-VM-OK");
     }
 }
 

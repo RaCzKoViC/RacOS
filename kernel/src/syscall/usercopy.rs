@@ -23,6 +23,7 @@
 
 use super::error::SyscallError;
 use crate::mm::virt::{flags, read_cr3, user_access_flags};
+use crate::sync::with_irqs_off;
 
 /// Highest address a user pointer may name (canonical lower half).
 pub const USER_SPACE_MAX: u64 = 0x0000_7FFF_FFFF_FFFF;
@@ -37,28 +38,6 @@ pub enum Access {
     /// The kernel writes the range (a read(2) buffer, a stat buffer). A
     /// page the process can write it can also read, so Write implies Read.
     Write,
-}
-
-/// Run `f` with interrupts disabled, restoring IF afterwards.
-///
-/// Nesting-safe: handlers already open cli/sti windows of their own, so
-/// this must not enable interrupts a caller had disabled.
-fn with_irqs_off<T>(f: impl FnOnce() -> T) -> T {
-    let rflags: u64;
-    // SAFETY: reading RFLAGS and clearing IF; IF is restored below from the
-    // saved copy. No memory is touched by these instructions.
-    unsafe {
-        core::arch::asm!("pushfq", "pop {}", out(reg) rflags, options(nomem));
-        core::arch::asm!("cli", options(nomem, nostack));
-    }
-    let result = f();
-    if rflags & (1 << 9) != 0 {
-        // SAFETY: IF was set on entry; restoring it re-enables what we took.
-        unsafe {
-            core::arch::asm!("sti", options(nomem, nostack));
-        }
-    }
-    result
 }
 
 /// Is every page of `[ptr, ptr + len)` one the current process may access

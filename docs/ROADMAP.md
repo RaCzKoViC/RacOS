@@ -2,10 +2,15 @@
 
 > Status: Living document
 > Created: 2026-06-16
-> Last updated: 2026-06-16 (post-v0.1.0, milestone framing adopted)
+> Last updated: 2026-09-18 (review-driven plan R1–R7 adopted, §0)
 
 This is the source of truth for project direction. Every PR with a meaningful
 scope change should also touch this file.
+
+**Where to resume:** §0 below is the current working plan. It lists the
+stages, the PRs in order with their status, the acceptance criteria and
+the follow-ups found on the way. Start there; the milestone sections
+(§1–§9) are the longer-range context.
 
 The plan is organised around **release milestones** that ship user-visible
 value: **v0.2** (usable shell), **v0.3** (persistent storage), **v0.4**
@@ -16,6 +21,95 @@ TLS crypto).
 The bootstrap-phase tiered plan (Tier 1-4) closed with **v0.1.0**. Detailed
 historical context lives in [`CHANGELOG.md`](../CHANGELOG.md) and in the
 ADR implementation-status sections under [`docs/adr/`](adr/).
+
+---
+
+## 0. Current plan — the review of 2026-09-18, stages R1–R7
+
+A full technical review of `main` at `f61c2c1` (2026-09-18) ranked the
+defects and fixed the order of work: first make the base trustworthy,
+then correctness of memory, files and permissions, then long sessions,
+then the terminal and the desktop on top of stable APIs. Its findings
+are the source of priorities; this section tracks them.
+
+**Rules every PR under this plan follows:** one PR = one problem, no
+refactor mixed with a fix; the PR starts with a test that shows the
+defect (red before, green after; negative cases included); after every
+change: `cargo fmt --check`, host tests, `check-unsafe-safety.sh
+--strict`, the full guest battery on the canonical machine with a
+complete `0 failed` verdict (`scripts/guest-suite.py`,
+`scripts/run-all-gates.ps1`), CI green; no symptomatic fixes (a
+filesystem bug is fixed in `InodeOps` and the filesystems, not in a
+tool); unsupported operations return an explicit error, never a fake
+success; images are built from the same sources as the kernel under
+test; docs and this roadmap follow the code; SAFETY comments name the
+invariant and its owner; no releases, tags or public comments without
+being asked; PR #39 is not closed without an assessment against `main`.
+
+### Stages and acceptance
+
+| Stage | Scope | Done when |
+|---|---|---|
+| **R1 trustworthy base** | CI on the canonical machine, full verdict, one machine definition locally and in CI | 10 consecutive complete runs on one SHA, all required groups run, 0 failures; readiness instead of sleeps |
+| **R2 memory and data** | usercopy / VM / DAC / truncate / rename / racfs recovery | negative syscall tests pass; no file lost on short write or crash; a damaged FS takes no writes |
+| **R3 long sessions and events** | allocator, real `poll`, FD/CLOEXEC, signal invariants, init units | 10 000 commands and repeated start/stop with no monotonic leak; correct blocking and wakeup on FDs |
+| **R4 usable terminal** | font with Polish glyphs, resize, scrollback, independent PTYs, racshrc, persistent history | "Zażółć gęślą jaźń" renders; two terminals share neither input nor state; config survives a reboot |
+| **R5 first desktop** | shared memory/IPC, software compositor, focus/input/window lifecycle; RacTerm as a client | two terminals + an editor, move/resize, save and read after reboot, an app crash loses no session |
+| **R6 application platform** | rpkg deploy/rollback, rapt versions/arch/signatures, SDK and a sample app | install and update a real app, refuse a bad signature and an unmet dependency, recover from an interrupted install |
+| **R7 performance and hardware** | CoW, VirtIO-GPU, per-CPU scheduler/TSS/IPI, block driver as needed | compared against a baseline on the same VM; no isolation regression; p95/p99 recorded |
+
+### The PRs, in order
+
+| # | PR | Status |
+|---|---|---|
+| 1 | `ci: align QEMU devices and require complete guest verdict` | ✅ [#51](https://github.com/RaCzKoViC/RacOS/pull/51) — `scripts/guest-suite.py`, one driver for Windows and CI, 176/0 |
+| 2 | `vfs: implement truncate and O_TRUNC semantics` | ✅ [#52](https://github.com/RaCzKoViC/RacOS/pull/52) — `T36-TRUNCATE-OK`, 198/0 |
+| 3 | `coreutils: preserve data for mv-to-self and short writes` | ✅ [#53](https://github.com/RaCzKoViC/RacOS/pull/53) — `write_all`, `st_dev`, `/dev/full`, `T37-PRESERVE-OK`, 214/0 |
+| 3b | `vfs: atomic rename; mv uses rename(2)` | ✅ [#54](https://github.com/RaCzKoViC/RacOS/pull/54) — `T38-RENAME-OK`, 232/0, crash test proves "exactly one name" |
+| 4 | `syscall: validate user mappings and introduce usercopy` | ✅ [#55](https://github.com/RaCzKoViC/RacOS/pull/55) — `kernel/src/syscall/usercopy.rs`, `T39-USERCOPY-OK`, 249/0 |
+| 5 | `vm: track mappings and enforce mmap/munmap/mprotect` | 🔄 in review — `kernel/src/mm/vm.rs`, `T40-VM-OK`, 269/0 |
+| 6 | `security: enforce exec/signal/path permissions and capability drop` | ⏳ next. Execute DAC in exec/spawn; owner check in kill; path-walk execute permission on every directory; setuid drops capability masks; tests for an unprivileged user and parent–child |
+| 7 | `racfs: enter recovery on dangerous fsck and define durable commit barriers` | ⏳ transactions over 60 journal slots must split or refuse, not bypass the journal; BlockDevice flush/barrier between WAL phases; a dangerous fsck result mounts read-only and skips the boot-time persistence test |
+| 8 | `libc-lite: reclaim heap allocations; add long-session regression` | ⏳ a freeing allocator, then growth through the now-real `mmap`; 10 000 commands / scrollback / repeated open-close without a monotonic leak |
+
+### Follow-ups found on the way (each its own PR, in rough priority)
+
+- **Pipe write end** returns a short count or EAGAIN on a blocking
+  descriptor instead of waiting for room as the read end does; every
+  pipeline over 4 KiB relied on `write_all`'s retry. R3.
+- **A user-mode `#UD`/`#GP` parks the CPU** (`cli; hlt`) where a
+  user-mode page fault kills the process: one `ud2` in any program halts
+  the system. Also the `#PF` handler decodes its frame through
+  `TSS.RSP0-40`, which is wrong for a fault taken in ring 0, so its
+  `RIP`/`CS` in the log are garbage for nested faults.
+- **Ring-0 page-fault recovery** (an exception table) so a user pointer
+  that goes bad between check and access ends in EFAULT rather than a
+  kernel fault; usercopy's interrupts-off window is the guarantee
+  relied on instead today.
+- **`build-image.sh` / `.ps1`: a missing binary must fail the build**,
+  and the `boot-smoke` / `kernel-smoke` CI jobs still pack the
+  git-tracked `initramfs-root/bin` instead of building from source.
+- **CI `apt-get update`** fails the job when an unrelated third-party
+  mirror on the runner image is mid-sync.
+- **Persistence, journal replay and graphics smokes as CI jobs** (today
+  PowerShell-only gates).
+- The remaining tools with large stdout (`sed`, `awk`, `grep`, `head`,
+  `tail`, `sort`) still use bare `write`; racsh `test ! -e` returns 1
+  regardless; `ls missing-path` lists `/`.
+- **Bootloader**: accepts an ELF with `e_phentsize = 0`; needs header
+  size checks, checked arithmetic, per-segment bounds, `filesz <= memsz`,
+  entry-point range. **rapt**: `lib >= 2.0.0` is satisfied by `lib
+  1.0.0` (resolver ignores versions). **rpkg**: no staging/rollback, no
+  signatures, 64 KiB limit.
+- **`getrandom` is an LCG**, not a CSPRNG: no TLS or key material on it
+  until an entropy model and a CSPRNG exist (ADR first).
+- **RacInit** loads three fixed unit names; `Requires` failure does not
+  block; oneshot waits on any child.
+- **R1 closing check**: 10 consecutive complete CI runs on one SHA
+  (4/4 done on #51's SHA so far).
+- **Documentation drift** noted by the review and not yet fixed: ADR
+  memory-model status; the root `tests/` directory of mocks; milestone
+  vs release vs ABI version numbering.
 
 ---
 
@@ -509,10 +603,12 @@ The next "system becomes a platform" milestone:
 
 ### 5.5 Memory model improvements
 
-- **Real `mmap`** — `sys_mmap` returns `ENOSYS` today. Anon pages,
-  file-backed pages, `PROT_*` enforcement.
+- ✅ **Anonymous `mmap`, `munmap`, `mprotect` with a per-process mapping
+  record** (2026-09, R2 PR 5): `PROT_*` enforced per page, hints and
+  `MAP_FIXED` with collision refusal, ownership checks on `munmap` /
+  `mprotect`, address reuse. `kernel/src/mm/vm.rs`; `T40-VM-OK`.
+- **File-backed `mmap`** — still `ENOSYS`.
 - **CoW on `sys_fork`** — fork copies every page eagerly today.
-- **`mprotect`** — works for `noexec`/`nowrite` flags but doesn't TLB-flush.
 
 ### 5.6 Stability + DX
 

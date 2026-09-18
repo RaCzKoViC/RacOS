@@ -885,101 +885,171 @@ pub fn sys_getpid() -> SyscallResult {
 // Syscall 6: sys_mmap
 // ─────────────────────────────────────────────────
 
+/// Page-table flags for a PROT_* value on a user page. PROT_NONE keeps the
+/// page present but takes the USER bit away, so any ring-3 access faults
+/// and usercopy refuses it too - which is exactly what PROT_NONE means.
+fn page_flags_for_prot(prot: u32) -> u64 {
+    use crate::mm::virt::flags as vf;
+    use crate::mm::vm;
+    let mut f = vf::PRESENT | vf::USER_OWNED;
+    if prot & vm::PROT_MASK != 0 {
+        f |= vf::USER;
+    }
+    if prot & vm::PROT_WRITE != 0 {
+        f |= vf::WRITABLE;
+    }
+    if prot & vm::PROT_EXEC == 0 {
+        f |= vf::NO_EXECUTE;
+    }
+    f
+}
+
+/// The current task's address-space record, or None for a kernel task.
+fn current_vm() -> Option<alloc::sync::Arc<crate::mm::vm::VmSpaceCell>> {
+    // SAFETY: cli/sti window around the scheduler read, as current_creds
+    // does; cloning the Arc is the only thing done inside it.
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+        let vm = crate::task::scheduler::with_current_task(|t| {
+            if t.page_table_phys == 0 {
+                None
+            } else {
+                Some(t.vm.clone())
+            }
+        })
+        .flatten();
+        core::arch::asm!("sti", options(nomem, nostack));
+        vm
+    }
+}
+
 /// Map memory into the process address space.
+///
+/// Anonymous, private mappings only (file-backed is ENOSYS). `prot` is
+/// honoured page by page; `addr` is a hint - used when the range is free,
+/// otherwise the mapping goes to the highest free gap below MMAP_TOP -
+/// and with MAP_FIXED it is a requirement: EINVAL outside the user range
+/// or unaligned, EEXIST over a live mapping (POSIX would silently replace
+/// it; nothing here relies on that, and refusing is the safer contract).
+/// Frames come one page at a time and are all returned if any step fails.
 pub fn sys_mmap(
     addr: u64,
     length: usize,
-    _prot: u32,
+    prot: u32,
     flags: u32,
     fd: i32,
     _offset: u64,
 ) -> SyscallResult {
-    use crate::mm::virt::flags as vf;
+    use crate::mm::vm::{self, AreaKind, VmArea};
     use crate::mm::{phys, virt};
 
+    const MAP_FIXED: u32 = 0x10;
     const MAP_ANONYMOUS: u32 = 0x20;
 
-    if length == 0 {
+    if length == 0 || prot & !vm::PROT_MASK != 0 {
         return Err(SyscallError::EINVAL);
     }
-
     if flags & MAP_ANONYMOUS == 0 {
         if fd < 0 {
             return Err(SyscallError::EBADF);
         }
-        crate::serial::serial_println!(
-            "[ SYSC ] mmap(file-backed) not implemented yet: fd={}, len={}",
-            fd,
-            length
-        );
-        return Err(SyscallError::ENOSYS); // File-backed mmap: Phase 2f
+        return Err(SyscallError::ENOSYS); // File-backed mmap: not implemented
     }
-
-    // Allocate physical frames for the anonymous mapping.
-    let pages = (length + 0xFFF) / 0x1000;
-    let frame = phys::alloc_contiguous(pages).map_err(|_| SyscallError::ENOMEM)?;
-    let phys_addr = frame.addr();
-
-    // Zero the allocation.
-    // SAFETY: phys::alloc_contiguous just returned this exclusive range; no
-    // typed reference exists for it yet.
-    unsafe {
-        core::ptr::write_bytes(phys_addr as *mut u8, 0, pages * 0x1000);
-    }
+    let len = (length as u64)
+        .checked_add(vm::PAGE_SIZE - 1)
+        .ok_or(SyscallError::ENOMEM)?
+        & !(vm::PAGE_SIZE - 1);
+    let pages = (len / vm::PAGE_SIZE) as usize;
 
     let pt = crate::task::scheduler::current_page_table_phys();
-    if pt != 0 {
-        // Map into the user process page table.
-        let virt_addr = if addr != 0 {
+    if pt == 0 {
+        // Kernel task: a contiguous physical block, identity-mapped.
+        let frame = phys::alloc_contiguous(pages).map_err(|_| SyscallError::ENOMEM)?;
+        // SAFETY: phys::alloc_contiguous just returned this exclusive range.
+        unsafe {
+            core::ptr::write_bytes(frame.addr() as *mut u8, 0, pages * 0x1000);
+        }
+        return Ok(frame.addr() as i64);
+    }
+    let vm_cell = current_vm().ok_or(SyscallError::ENOMEM)?;
+
+    // Choose the address and reserve it in the record before touching the
+    // page table, so two callers cannot pick the same gap.
+    let start = vm_cell.with(|space| {
+        let fixed = flags & MAP_FIXED != 0;
+        let start = if fixed {
+            let end = addr.checked_add(len).ok_or(SyscallError::EINVAL)?;
+            if !vm::VmSpace::range_is_valid(addr, end) {
+                return Err(SyscallError::EINVAL);
+            }
+            if space.overlaps(addr, end) {
+                return Err(SyscallError::EEXIST);
+            }
             addr
         } else {
-            // Simple bump allocator for anonymous maps in user space.
-            // Use a region just below the user stack (well-separated).
-            static MMAP_BUMP: core::sync::atomic::AtomicU64 =
-                core::sync::atomic::AtomicU64::new(0x0000_7FF0_0000_0000);
-            let alloc_size = (pages * 0x1000) as u64;
-            let prev = MMAP_BUMP.fetch_sub(alloc_size, core::sync::atomic::Ordering::Relaxed);
-            let v = prev - alloc_size;
-            // Guard: prevent underflow into low memory / kernel space
-            if v < 0x0000_1000_0000_0000 || v > prev {
-                // Undo the bump
-                MMAP_BUMP.fetch_add(alloc_size, core::sync::atomic::Ordering::Relaxed);
-                // Free the allocated frames
-                for i in 0..pages {
-                    let _ = phys::free_frame(phys::PhysFrame::containing(
-                        phys_addr + (i * 0x1000) as u64,
-                    ));
-                }
-                return Err(SyscallError::ENOMEM);
+            let hinted = addr != 0
+                && matches!(addr.checked_add(len),
+                    Some(e) if vm::VmSpace::range_is_valid(addr, e) && !space.overlaps(addr, e));
+            if hinted {
+                addr
+            } else {
+                space
+                    .find_free_below(len, vm::MMAP_TOP)
+                    .ok_or(SyscallError::ENOMEM)?
             }
-            v
         };
+        space
+            .insert(VmArea {
+                start,
+                end: start + len,
+                prot,
+                kind: AreaKind::Anon,
+            })
+            .map_err(|_| SyscallError::ENOMEM)?;
+        Ok(start)
+    })?;
 
-        // SAFETY: pt is the current task's page-table root reported by
-        // scheduler::current_page_table_phys; virt_addr was either user-
-        // supplied (and then bumped only if 0) or carved out of the MMAP_BUMP
-        // region, both well below the kernel half.
-        if let Err(_) = unsafe {
-            virt::map_range(
-                pt,
-                virt_addr,
-                phys_addr,
-                (pages * 0x1000) as u64,
-                vf::USER_DATA,
-            )
-        } {
-            // Mapping failed — free frames and report error.
-            for i in 0..pages {
-                let _ =
-                    phys::free_frame(phys::PhysFrame::containing(phys_addr + (i * 0x1000) as u64));
+    // Map page by page; on any failure give back everything done so far.
+    let page_flags = page_flags_for_prot(prot);
+    let mut mapped = 0usize;
+    let mut failed = false;
+    while mapped < pages {
+        let frame = match phys::alloc_frame() {
+            Ok(f) => f,
+            Err(_) => {
+                failed = true;
+                break;
             }
-            return Err(SyscallError::ENOMEM);
+        };
+        // SAFETY: a frame just allocated for this mapping, identity-mapped,
+        // no other reference to it yet.
+        unsafe {
+            core::ptr::write_bytes(frame.addr() as *mut u8, 0, 0x1000);
         }
-        Ok(virt_addr as i64)
-    } else {
-        // Kernel task: return physical address (identity-mapped).
-        Ok(phys_addr as i64)
+        let virt_addr = start + (mapped as u64) * vm::PAGE_SIZE;
+        // SAFETY: pt is the current task's page table; virt_addr lies in the
+        // range just reserved in the task's address-space record, which is
+        // inside the user range and overlaps no other mapping.
+        let r = unsafe { virt::map_page(pt, virt::VirtAddr(virt_addr), frame, page_flags) };
+        if r.is_err() {
+            let _ = phys::free_frame(frame);
+            failed = true;
+            break;
+        }
+        mapped += 1;
     }
+    if failed {
+        for i in 0..mapped {
+            let virt_addr = start + (i as u64) * vm::PAGE_SIZE;
+            // SAFETY: undoing the pages this call mapped a moment ago.
+            if let Ok(frame) = unsafe { virt::unmap_page(pt, virt::VirtAddr(virt_addr)) } {
+                let _ = phys::free_frame(frame);
+            }
+        }
+        vm_cell.with(|space| space.remove_range(start, start + len));
+        return Err(SyscallError::ENOMEM);
+    }
+    Ok(start as i64)
 }
 
 // ─────────────────────────────────────────────────
@@ -987,11 +1057,25 @@ pub fn sys_mmap(
 // ─────────────────────────────────────────────────
 
 /// Unmap memory from the process address space.
+///
+/// Every page of `[addr, addr + length)` must belong to a mapping of the
+/// calling process (EINVAL otherwise - stricter than POSIX, which ignores
+/// unmapped pages; a wrong range is a bug worth reporting). Kernel pages
+/// are not in the record, so they cannot be unmapped or freed from here;
+/// until 2026-09 they could.
 pub fn sys_munmap(addr: u64, length: usize) -> SyscallResult {
-    if addr & 0xFFF != 0 {
+    use crate::mm::vm;
+    use crate::mm::{phys, virt};
+
+    if !addr.is_multiple_of(vm::PAGE_SIZE) || length == 0 {
         return Err(SyscallError::EINVAL);
     }
-    if length == 0 {
+    let len = (length as u64)
+        .checked_add(vm::PAGE_SIZE - 1)
+        .ok_or(SyscallError::EINVAL)?
+        & !(vm::PAGE_SIZE - 1);
+    let end = addr.checked_add(len).ok_or(SyscallError::EINVAL)?;
+    if !vm::VmSpace::range_is_valid(addr, end) {
         return Err(SyscallError::EINVAL);
     }
 
@@ -999,16 +1083,26 @@ pub fn sys_munmap(addr: u64, length: usize) -> SyscallResult {
     if pt == 0 {
         return Ok(0); // Kernel task: no-op
     }
+    let vm_cell = current_vm().ok_or(SyscallError::EINVAL)?;
 
-    let pages = (length + 0xFFF) / 0x1000;
-    for i in 0..pages {
-        let virt = addr + (i * 0x1000) as u64;
-        // SAFETY: pt is the validated page table of the current process.
-        unsafe {
-            if let Ok(frame) = crate::mm::virt::unmap_page(pt, crate::mm::virt::VirtAddr(virt)) {
-                let _ = crate::mm::phys::free_frame(frame);
-            }
+    // Take the range out of the record first, refusing if any page is not
+    // the process's; then release the pages.
+    vm_cell.with(|space| {
+        if !space.covers(addr, end) {
+            return Err(SyscallError::EINVAL);
         }
+        space.remove_range(addr, end);
+        Ok(())
+    })?;
+    let mut at = addr;
+    while at < end {
+        // SAFETY: pt is the current process's page table and [addr, end)
+        // was, until a moment ago, recorded as this process's own mapping
+        // of 4 KiB pages; unmap_page refuses huge leaves regardless.
+        if let Ok(frame) = unsafe { virt::unmap_page(pt, virt::VirtAddr(at)) } {
+            let _ = phys::free_frame(frame);
+        }
+        at += vm::PAGE_SIZE;
     }
     Ok(0)
 }
@@ -1913,7 +2007,7 @@ pub fn sys_fork() -> SyscallResult {
 
         // Gather parent state.
         let parent_pid = crate::task::scheduler::current_pid();
-        let (pgid, session_id, creds, umask, name, name_len, cwd, cwd_len, fd_table) =
+        let (pgid, session_id, creds, umask, name, name_len, cwd, cwd_len, fd_table, vm) =
             crate::task::scheduler::with_current_task(|t| {
                 (
                     t.pgid,
@@ -1925,6 +2019,8 @@ pub fn sys_fork() -> SyscallResult {
                     t.cwd,
                     t.cwd_len,
                     t.fd_table.clone_fds(),
+                    // The child's address space is a copy: its own record.
+                    t.vm.duplicate(),
                 )
             })
             .unwrap();
@@ -1955,6 +2051,7 @@ pub fn sys_fork() -> SyscallResult {
             name_len,
             cwd,
             cwd_len,
+            vm,
         };
 
         match crate::task::scheduler::spawn_forked(child_task) {
@@ -2102,7 +2199,7 @@ pub fn sys_clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8)
 
         // Gather parent state.
         let parent_pid = crate::task::scheduler::current_pid();
-        let (pgid, session_id, creds, umask, name, name_len, cwd, cwd_len, fd_table) =
+        let (pgid, session_id, creds, umask, name, name_len, cwd, cwd_len, fd_table, vm) =
             crate::task::scheduler::with_current_task(|t| {
                 (
                     t.pgid,
@@ -2117,6 +2214,13 @@ pub fn sys_clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8)
                         t.fd_table.clone_fds() // Share FDs for threads
                     } else {
                         t.fd_table.clone_fds() // For now, clone FDs
+                    },
+                    // CLONE_VM shares the page table, so it shares the record
+                    // of what is mapped; otherwise the child gets a copy.
+                    if flags & CLONE_VM != 0 {
+                        t.vm.clone()
+                    } else {
+                        t.vm.duplicate()
                     },
                 )
             })
@@ -2157,6 +2261,7 @@ pub fn sys_clone(flags: u32, stack: *mut u8, ptid: i32, tls: i32, ctid: *mut u8)
             name_len,
             cwd,
             cwd_len,
+            vm,
         };
 
         match crate::task::scheduler::spawn_forked(child_task) {
@@ -3427,8 +3532,50 @@ pub fn sys_sync() -> SyscallResult {
 // Syscall 68: sys_mprotect
 // ─────────────────────────────────────────────────
 
-pub fn sys_mprotect(_addr: u64, _len: usize, _prot: u32) -> SyscallResult {
-    // Stub: succeed silently
+/// Change the access of `[addr, addr + len)`: every page must belong to a
+/// mapping of the calling process (ENOMEM otherwise, as POSIX says), and
+/// each page's table entry is rewritten and its TLB entry flushed. Until
+/// 2026-09 this returned 0 without doing anything.
+pub fn sys_mprotect(addr: u64, length: usize, prot: u32) -> SyscallResult {
+    use crate::mm::virt;
+    use crate::mm::vm;
+
+    if !addr.is_multiple_of(vm::PAGE_SIZE) || prot & !vm::PROT_MASK != 0 {
+        return Err(SyscallError::EINVAL);
+    }
+    if length == 0 {
+        return Ok(0);
+    }
+    let len = (length as u64)
+        .checked_add(vm::PAGE_SIZE - 1)
+        .ok_or(SyscallError::ENOMEM)?
+        & !(vm::PAGE_SIZE - 1);
+    let end = addr.checked_add(len).ok_or(SyscallError::ENOMEM)?;
+    if !vm::VmSpace::range_is_valid(addr, end) {
+        return Err(SyscallError::ENOMEM);
+    }
+    let pt = crate::task::scheduler::current_page_table_phys();
+    if pt == 0 {
+        return Err(SyscallError::ENOMEM);
+    }
+    let vm_cell = current_vm().ok_or(SyscallError::ENOMEM)?;
+    vm_cell.with(|space| {
+        if !space.covers(addr, end) {
+            return Err(SyscallError::ENOMEM);
+        }
+        space.set_prot(addr, end, prot);
+        Ok(())
+    })?;
+    let page_flags = page_flags_for_prot(prot);
+    let mut at = addr;
+    while at < end {
+        // SAFETY: pt is the current process's page table and [addr, end) is
+        // recorded as this process's own mapping of 4 KiB pages; the frame
+        // is kept, only its flags change, and the TLB entry is flushed.
+        unsafe { virt::set_page_flags(pt, virt::VirtAddr(at), page_flags) }
+            .map_err(|_| SyscallError::ENOMEM)?;
+        at += vm::PAGE_SIZE;
+    }
     Ok(0)
 }
 

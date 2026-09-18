@@ -425,6 +425,39 @@ impl UserProcess {
         let mut cwd_buf = [0u8; 256];
         cwd_buf[0] = b'/';
 
+        // The address space as the process will be allowed to see it: every
+        // segment as mapped above (page-rounded), and the stack. mmap will
+        // place anonymous areas around these; munmap and mprotect refuse
+        // anything not listed here.
+        let mut space = crate::mm::vm::VmSpace::new();
+        for i in 0..loaded.segment_count {
+            let seg = &loaded.segments[i];
+            let pages = (seg.memsz + phys::FRAME_SIZE - 1) / phys::FRAME_SIZE;
+            let mut prot = crate::mm::vm::PROT_READ;
+            if seg.flags & 0x2 != 0 {
+                prot |= crate::mm::vm::PROT_WRITE;
+            }
+            if seg.flags & 0x1 != 0 {
+                prot |= crate::mm::vm::PROT_EXEC;
+            }
+            space
+                .insert_uncovered(crate::mm::vm::VmArea {
+                    start: seg.vaddr,
+                    end: seg.vaddr + (pages * phys::FRAME_SIZE) as u64,
+                    prot,
+                    kind: crate::mm::vm::AreaKind::Elf,
+                })
+                .map_err(|_| "ELF segment outside the user range")?;
+        }
+        space
+            .insert(crate::mm::vm::VmArea {
+                start: loaded.stack_virt_top - loaded.stack_size as u64,
+                end: loaded.stack_virt_top,
+                prot: crate::mm::vm::PROT_READ | crate::mm::vm::PROT_WRITE,
+                kind: crate::mm::vm::AreaKind::Stack,
+            })
+            .map_err(|_| "user stack overlaps a segment")?;
+
         Ok(UserProcess {
             task: Task {
                 pid,
@@ -444,6 +477,7 @@ impl UserProcess {
                 name_len: len,
                 cwd: cwd_buf,
                 cwd_len: 1,
+                vm: crate::mm::vm::VmSpaceCell::new(space),
             },
             user_entry: loaded.entry_point,
             user_stack_top: loaded.stack_virt_top,

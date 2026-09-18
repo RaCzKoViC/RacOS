@@ -6,6 +6,31 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+/// Run `f` with interrupts disabled, restoring IF afterwards.
+///
+/// Nesting-safe: callers that already hold interrupts off keep them off.
+/// This is the critical section of choice for per-task state that the
+/// timer-driven scheduler could otherwise interleave on this single CPU;
+/// a `SpinLock` taken with interrupts on can be preempted while held and
+/// then spun on forever by the next task.
+pub fn with_irqs_off<T>(f: impl FnOnce() -> T) -> T {
+    let rflags: u64;
+    // SAFETY: reading RFLAGS and clearing IF; IF is restored below from the
+    // saved copy. No memory is touched by these instructions.
+    unsafe {
+        core::arch::asm!("pushfq", "pop {}", out(reg) rflags, options(nomem));
+        core::arch::asm!("cli", options(nomem, nostack));
+    }
+    let result = f();
+    if rflags & (1 << 9) != 0 {
+        // SAFETY: IF was set on entry; restoring it re-enables what we took.
+        unsafe {
+            core::arch::asm!("sti", options(nomem, nostack));
+        }
+    }
+    result
+}
+
 /// Simple spinlock implementation using atomic operations.
 pub struct SpinLock<T> {
     lock: AtomicBool,

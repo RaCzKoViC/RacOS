@@ -11,6 +11,51 @@ the architectural sub-task IDs (T1.x, T2.x, …) that motivated it.
 
 ## [Unreleased]
 
+### Fixed — mmap, munmap and mprotect enforce what they promise
+
+- **`mmap` ignored `prot`, mapped any address, and `munmap` freed kernel
+  frames.** Every anonymous mapping was RW+NX whatever was asked, so a
+  read-only page was writable and an executable one was not; a
+  caller-supplied address was mapped without a look - over a live
+  mapping (its frames leaked) or over the identity-mapped kernel (the
+  kernel's own text replaced by zeroed user pages in that process's
+  table, which hangs the machine); addresses came from one global bump
+  cursor shared by every process and were never reused; `munmap` freed
+  the frames of any present page, kernel pages included, and read a
+  2 MiB huge leaf as a page table; `mprotect` returned 0 without doing
+  anything. Review item B (P0/P1).
+
+- **`kernel/src/mm/vm.rs`: a per-address-space record of what is
+  mapped where.** The ELF segments and the stack are recorded at exec,
+  every anonymous mapping as it is made; a fork gets a copy, a CLONE_VM
+  thread shares it; the record is read and changed only with interrupts
+  off (`sync::with_irqs_off`, now shared with usercopy). `mmap` honours
+  `prot` per page (PROT_NONE keeps the page present with USER clear, so
+  ring 3 and usercopy both refuse it), treats `addr` as a hint used only
+  when the range is free, places the rest at the highest free gap below
+  0x7FF0_0000_0000 walking the record top-down so unmapped space is
+  reused, and with MAP_FIXED refuses EINVAL outside the user range and
+  EEXIST over a live mapping (POSIX would replace silently; nothing
+  relies on that); frames are allocated per page and all returned on a
+  partial failure. `munmap` and `mprotect` require every page of the
+  range to be the process's (EINVAL / ENOMEM), split areas at the
+  boundaries, and flush the TLB per page; `virt::unmap_page` refuses
+  huge leaves. A software PTE bit, `USER_OWNED`, keeps a PROT_NONE page
+  the process's for the page-table clone and teardown, which read "no
+  USER bit" as "shared kernel page".
+
+- **Regression test first: `T40-VM-OK`, 20 assertions**, each fatal
+  case run in a forked child whose exit status 139 is the verdict. On
+  the old kernel: writes to PROT_READ and reads of PROT_NONE pages
+  succeed, `mprotect` changes nothing, a hint over a live mapping and
+  MAP_FIXED over one clobber it, and MAP_FIXED at the kernel address
+  hangs the guest - the red run stops there. Green: 269/0. Suite time
+  unchanged (164 s; the group's forks cost 9 s).
+
+- ROADMAP §0 now carries the review-driven plan (stages R1–R7, the PRs
+  in order with their status, acceptance criteria, follow-ups), so the
+  work can be resumed from the repository alone.
+
 ### Fixed — syscalls refuse pointers the process cannot touch (usercopy)
 
 - **A kernel address passed as a user pointer.** `validate_user_ptr`
