@@ -125,10 +125,10 @@ if ($SkipQemu) {
     Write-Host ""
     Write-Host "-SkipQemu set: stopping after the host-side gates." -ForegroundColor Yellow
 } else {
-    # Gates 6-8 boot a real image, so stage the ESP. build-image.ps1 packs the
-    # initramfs only; the kernel ELF has to be copied in separately.
+    # Gates 6-8 boot a real image, so stage the ESP. build-image.ps1 now stages
+    # both the initramfs and the plain static/no-pie kernel.
     #
-    # This has to be repeatable: run-ci-smoke.ps1 rebuilds the kernel with
+    # Re-staging also has to be repeatable: run-ci-smoke.ps1 rebuilds the kernel with
     # --features ci-smoke and leaves THAT binary in esp/racore.elf. A ci-smoke
     # kernel runs its assertions and exits through isa-debug-exit instead of
     # booting to racsh, so gates 7 and 8 must re-stage the normal kernel first
@@ -154,7 +154,6 @@ if ($SkipQemu) {
     $env:RUSTFLAGS = ""
     powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "build-image.ps1") 2>&1 |
         Select-String -Pattern "Done:|Build complete|^error" | ForEach-Object { Write-Host ("  " + $_) }
-    Stage-PlainKernel
 
     # ---- 6. kernel smoke ------------------------------------------------
     Write-Host ""

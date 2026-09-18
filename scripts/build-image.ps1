@@ -1,8 +1,8 @@
 # RacOS — Build kernel + userland + initramfs image
 #
 # Builds the kernel and all coreutils for x86_64-unknown-none,
-# assembles an initramfs image, and prepares the ESP directory
-# for QEMU boot testing.
+# assembles an initramfs image, and stages both it and the kernel
+# in the ESP directory for QEMU boot testing.
 #
 # Usage: powershell -File scripts/build-image.ps1 [-Release]
 
@@ -125,11 +125,17 @@ $ShareDir = Join-Path $InitramfsRoot "share"
 if (-not (Test-Path $ShareDir)) { New-Item -ItemType Directory -Force $ShareDir | Out-Null }
 python (Join-Path $Root "scripts\make-demo-rpk.py") (Join-Path $ShareDir "demo.rpk")
 
-# --- Step 4: Pack initramfs image ---
+# --- Step 4: Stage kernel and pack initramfs image ---
 Write-Host ""
-Write-Host "[4/4] Packing initramfs image..." -ForegroundColor Yellow
+Write-Host "[4/4] Staging kernel and packing initramfs image..." -ForegroundColor Yellow
 $EspDir = Join-Path $Root "esp"
 if (-not (Test-Path $EspDir)) { New-Item -ItemType Directory -Force $EspDir | Out-Null }
+
+# The bootloader jumps directly to the loaded ELF and does not apply dynamic
+# relocations. Stage the static/no-pie kernel built in step 1, replacing any
+# stale PIE or ci-smoke kernel left by an earlier command.
+$KernelDst = Join-Path $EspDir "racore.elf"
+Copy-Item (Join-Path $BinDir "racore") $KernelDst -Force
 
 & "$Root\scripts\pack-initramfs.ps1" -RootDir $InitramfsRoot -Output (Join-Path $EspDir "initramfs.img")
 
@@ -138,6 +144,6 @@ $env:RUSTFLAGS = $OldRustFlags
 
 Write-Host ""
 Write-Host "=== Build complete ===" -ForegroundColor Green
-Write-Host "Kernel:    $BinDir\racore"
+Write-Host "Kernel:    $KernelDst"
 $imgPath = Join-Path $EspDir "initramfs.img"
 Write-Host "Initramfs: $imgPath"

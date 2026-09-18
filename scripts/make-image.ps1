@@ -22,14 +22,27 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== RacOS Image Builder ===" -ForegroundColor Cyan
 
+$CargoProfileFlags = @()
+if ($Profile -eq "release") {
+    $CargoProfileFlags += "--release"
+} elseif ($Profile -ne "debug") {
+    throw "Profile must be 'debug' or 'release' (got '$Profile')"
+}
+
 # ── Step 1: Build kernel ──────────────────────────────────────────────────────
 Write-Host "[1/5] Building kernel (x86_64-unknown-none)..."
-cargo build --package racore --target x86_64-unknown-none
-if ($LASTEXITCODE -ne 0) { throw "Kernel build failed" }
+$OldRustFlags = $env:RUSTFLAGS
+# The bootloader jumps directly to the ELF entry point and does not apply
+# dynamic relocations, so the staged kernel must never be PIE.
+$env:RUSTFLAGS = "-C relocation-model=static -C link-arg=-no-pie"
+cargo build --package racore --target x86_64-unknown-none @CargoProfileFlags
+$KernelBuildExit = $LASTEXITCODE
+$env:RUSTFLAGS = $OldRustFlags
+if ($KernelBuildExit -ne 0) { throw "Kernel build failed" }
 
 # ── Step 2: Build UEFI bootloader ────────────────────────────────────────────
 Write-Host "[2/5] Building bootloader (x86_64-unknown-uefi)..."
-cargo build --package racos-boot --target x86_64-unknown-uefi
+cargo build --package racos-boot --target x86_64-unknown-uefi @CargoProfileFlags
 if ($LASTEXITCODE -ne 0) { throw "Bootloader build failed" }
 
 # ── Step 3: Create ESP directory structure ────────────────────────────────────

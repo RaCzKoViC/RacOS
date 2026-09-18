@@ -550,9 +550,9 @@ def run(args):
                if not os.path.isfile(os.path.join(esp_dir, p))]
     if missing:
         print("ERROR: ESP is not staged (missing under %s: %s)" % (esp_dir, ", ".join(missing)))
-        print("  Linux:   bash scripts/build-image.sh && cp target/x86_64-unknown-none/debug/racore esp/racore.elf")
+        print("  Linux:   bash scripts/build-image.sh")
         print("           && cp target/x86_64-unknown-uefi/debug/bootx64.efi esp/EFI/BOOT/BOOTX64.EFI")
-        print("  Windows: powershell -File scripts\\build-image.ps1 (with RUSTFLAGS empty), then copy the kernel")
+        print("  Windows: powershell -File scripts\\build-image.ps1 (with RUSTFLAGS empty), then copy bootx64.efi")
         return 2
 
     # A fresh zero-filled disk every run: the suite's racfs assertions expect

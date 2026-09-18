@@ -46,7 +46,10 @@ export CARGO_TARGET_DIR="$TARGET_DIR"
 
 # ── Step 1: Build kernel ──────────────────────────────────────────────────────
 echo "[1/5] Building kernel (x86_64-unknown-none)..."
-cargo build --package racore --target x86_64-unknown-none "${CARGO_PROFILE_FLAGS[@]}"
+# The bootloader jumps directly to the ELF entry point and does not apply
+# dynamic relocations, so the staged kernel must never be PIE.
+RUSTFLAGS="-C relocation-model=static -C link-arg=-no-pie" \
+    cargo build --package racore --target x86_64-unknown-none "${CARGO_PROFILE_FLAGS[@]}"
 
 # ── Step 2: Build UEFI bootloader ────────────────────────────────────────────
 echo "[2/5] Building bootloader (x86_64-unknown-uefi)..."

@@ -2,7 +2,7 @@
 # RacOS - Build kernel + userland + initramfs image
 #
 # Builds the kernel and all coreutils for x86_64-unknown-none, assembles the
-# initramfs-root staging tree, and packs it into esp/initramfs.img.
+# initramfs-root staging tree, and stages the kernel plus initramfs in esp/.
 #
 # This is the Linux/macOS counterpart to scripts/build-image.ps1 — keep them
 # in behavioural parity.
@@ -155,18 +155,22 @@ for bin in "${SBIN_LIST[@]}"; do
     echo "  sbin/$bin [$size bytes]"
 done
 
-# --- Step 4: Pack initramfs image ---------------------------------------------
+# --- Step 4: Stage kernel and pack initramfs image -----------------------------
 echo ""
-echo "[4/4] Packing initramfs image..."
+echo "[4/4] Staging kernel and packing initramfs image..."
 ESP_DIR="$ROOT_DIR/esp"
 mkdir -p "$ESP_DIR"
 
-# Mirrors build-image.ps1, which calls pack-initramfs.ps1 directly (not
-# make-image.ps1). The Linux build uses pack-initramfs.py for parity with
-# scripts/make-image.sh.
+# The bootloader jumps directly to the loaded ELF and does not apply dynamic
+# relocations. Stage the static/no-pie kernel built in step 1, replacing any
+# stale PIE or ci-smoke kernel left by an earlier command.
+cp -f "$BIN_DIR/racore" "$ESP_DIR/racore.elf"
+
+# Mirrors build-image.ps1, which calls pack-initramfs.ps1 directly. The Linux
+# build uses pack-initramfs.py.
 python3 "$ROOT_DIR/scripts/pack-initramfs.py" "$INITRAMFS_ROOT" "$ESP_DIR/initramfs.img"
 
 echo ""
 echo "=== Build complete ==="
-echo "Kernel:    $BIN_DIR/racore"
+echo "Kernel:    $ESP_DIR/racore.elf"
 echo "Initramfs: $ESP_DIR/initramfs.img"
