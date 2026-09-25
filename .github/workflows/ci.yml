@@ -226,11 +226,10 @@ jobs:
             local log_path="$2"
             local readiness_marker='racsh$ '
             local timeout_seconds=60
-            local started_ms deadline_ms now_ms elapsed_ms qemu_status
+            local started_us deadline_us now_us elapsed_ms qemu_status
 
-            : > "$log_path"
-            started_ms=$(date +%s%3N)
-            deadline_ms=$((started_ms + timeout_seconds * 1000))
+            started_us=${EPOCHREALTIME/./}
+            deadline_us=$((started_us + timeout_seconds * 1000000))
             qemu-system-x86_64 "${QEMU_ARGS[@]}" > "$log_path" 2>&1 &
             QEMU_PID=$!
 
@@ -244,9 +243,9 @@ jobs:
                 return 1
               fi
 
-              now_ms=$(date +%s%3N)
-              if [ "$now_ms" -ge "$deadline_ms" ]; then
-                elapsed_ms=$((now_ms - started_ms))
+              now_us=${EPOCHREALTIME/./}
+              if [ "$now_us" -ge "$deadline_us" ]; then
+                elapsed_ms=$(((now_us - started_us) / 1000))
                 printf 'FAIL: boot %s did not reach the racsh prompt within %d s (elapsed %d.%03d s)\n' \
                   "$boot_number" "$timeout_seconds" "$((elapsed_ms / 1000))" "$((elapsed_ms % 1000))"
                 stop_qemu
@@ -257,8 +256,8 @@ jobs:
               sleep 0.25
             done
 
-            now_ms=$(date +%s%3N)
-            elapsed_ms=$((now_ms - started_ms))
+            now_us=${EPOCHREALTIME/./}
+            elapsed_ms=$(((now_us - started_us) / 1000))
             printf 'Boot %s reached the racsh prompt after %d.%03d s\n' \
               "$boot_number" "$((elapsed_ms / 1000))" "$((elapsed_ms % 1000))"
             stop_qemu
