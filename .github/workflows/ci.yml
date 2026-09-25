@@ -210,9 +210,17 @@ jobs:
           # all_aps_started smoke marker.
 
           QEMU_PID=""
+          wait_for_process_exit() {
+            local pid="$1"
+            local timeout_seconds="$2"
+            timeout "$timeout_seconds" bash -c '
+              while kill -0 "$1" 2>/dev/null; do sleep 0.1; done
+            ' bash "$pid"
+          }
+
           stop_qemu() {
             local require_running="${1:-false}"
-            local term_deadline kill_deadline qemu_status
+            local qemu_status
 
             if [ -n "$QEMU_PID" ]; then
               if ! kill -TERM "$QEMU_PID" 2>/dev/null; then
@@ -225,18 +233,10 @@ jobs:
                 return 0
               fi
 
-              term_deadline=$((SECONDS + 10))
-              while kill -0 "$QEMU_PID" 2>/dev/null && [ "$SECONDS" -lt "$term_deadline" ]; do
-                sleep 0.1
-              done
-              if kill -0 "$QEMU_PID" 2>/dev/null; then
+              if ! wait_for_process_exit "$QEMU_PID" 10; then
                 echo "FAIL: QEMU did not stop within 10 s of SIGTERM; sending SIGKILL"
                 kill -KILL "$QEMU_PID" 2>/dev/null || true
-                kill_deadline=$((SECONDS + 2))
-                while kill -0 "$QEMU_PID" 2>/dev/null && [ "$SECONDS" -lt "$kill_deadline" ]; do
-                  sleep 0.1
-                done
-                if kill -0 "$QEMU_PID" 2>/dev/null; then
+                if ! wait_for_process_exit "$QEMU_PID" 2; then
                   QEMU_PID=""
                   return 1
                 fi
@@ -245,8 +245,14 @@ jobs:
                 return 1
               fi
 
-              wait "$QEMU_PID" 2>/dev/null || true
+              if wait "$QEMU_PID" 2>/dev/null; then qemu_status=0; else qemu_status=$?; fi
               QEMU_PID=""
+              if [ "$require_running" = true ] \
+                && [ "$qemu_status" -ne 0 ] \
+                && [ "$qemu_status" -ne 143 ]; then
+                echo "FAIL: QEMU returned unexpected status $qemu_status after SIGTERM"
+                return 1
+              fi
             fi
           }
           trap 'stop_qemu false || true' EXIT
@@ -256,38 +262,43 @@ jobs:
             local log_path="$2"
             local readiness_marker='racsh$ '
             local timeout_seconds=60
-            local started_us deadline_seconds now_us elapsed_ms qemu_status
+            local started_us now_us elapsed_ms qemu_status readiness_status
 
             started_us=${EPOCHREALTIME/./}
-            deadline_seconds=$((SECONDS + timeout_seconds))
             qemu-system-x86_64 "${QEMU_ARGS[@]}" > "$log_path" 2>&1 &
             QEMU_PID=$!
 
-            while ! grep -Fq "$readiness_marker" "$log_path"; do
-              if ! kill -0 "$QEMU_PID" 2>/dev/null; then
-                if wait "$QEMU_PID"; then qemu_status=0; else qemu_status=$?; fi
-                QEMU_PID=""
-                echo "FAIL: QEMU exited with status $qemu_status before boot $boot_number reached the racsh prompt"
-                echo "--- $log_path tail ---"
-                tail -n 30 "$log_path"
-                return 1
-              fi
-
-              now_us=${EPOCHREALTIME/./}
-              if [ "$SECONDS" -ge "$deadline_seconds" ]; then
-                elapsed_ms=$(((now_us - started_us) / 1000))
-                printf 'FAIL: boot %s did not reach the racsh prompt within %d s (elapsed %d.%03d s)\n' \
-                  "$boot_number" "$timeout_seconds" "$((elapsed_ms / 1000))" "$((elapsed_ms % 1000))"
-                stop_qemu false || true
-                echo "--- $log_path tail ---"
-                tail -n 30 "$log_path"
-                return 1
-              fi
-              sleep 0.25
-            done
+            if timeout "$timeout_seconds" bash -c '
+              while ! grep -Fq "$3" "$2"; do
+                kill -0 "$1" 2>/dev/null || exit 2
+                sleep 0.25
+              done
+            ' bash "$QEMU_PID" "$log_path" "$readiness_marker"; then
+              readiness_status=0
+            else
+              readiness_status=$?
+            fi
 
             now_us=${EPOCHREALTIME/./}
             elapsed_ms=$(((now_us - started_us) / 1000))
+            if [ "$readiness_status" -ne 0 ]; then
+              if [ "$readiness_status" -eq 2 ]; then
+                if wait "$QEMU_PID"; then qemu_status=0; else qemu_status=$?; fi
+                QEMU_PID=""
+                echo "FAIL: QEMU exited with status $qemu_status before boot $boot_number reached the racsh prompt"
+              elif [ "$readiness_status" -eq 124 ]; then
+                printf 'FAIL: boot %s did not reach the racsh prompt within %d s (elapsed %d.%03d s)\n' \
+                  "$boot_number" "$timeout_seconds" "$((elapsed_ms / 1000))" "$((elapsed_ms % 1000))"
+                stop_qemu false || true
+              else
+                echo "FAIL: readiness watcher exited with status $readiness_status on boot $boot_number"
+                stop_qemu false || true
+              fi
+              echo "--- $log_path tail ---"
+              tail -n 30 "$log_path"
+              return 1
+            fi
+
             printf 'Boot %s reached the racsh prompt after %d.%03d s\n' \
               "$boot_number" "$((elapsed_ms / 1000))" "$((elapsed_ms % 1000))"
             if ! stop_qemu true; then
