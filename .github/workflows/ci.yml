@@ -211,25 +211,55 @@ jobs:
 
           QEMU_PID=""
           stop_qemu() {
+            local require_running="${1:-false}"
+            local term_deadline kill_deadline qemu_status
+
             if [ -n "$QEMU_PID" ]; then
-              if kill -0 "$QEMU_PID" 2>/dev/null; then
-                kill -TERM "$QEMU_PID" 2>/dev/null || true
+              if ! kill -TERM "$QEMU_PID" 2>/dev/null; then
+                if wait "$QEMU_PID" 2>/dev/null; then qemu_status=0; else qemu_status=$?; fi
+                QEMU_PID=""
+                if [ "$require_running" = true ]; then
+                  echo "FAIL: QEMU exited with status $qemu_status before shutdown"
+                  return 1
+                fi
+                return 0
               fi
+
+              term_deadline=$((SECONDS + 10))
+              while kill -0 "$QEMU_PID" 2>/dev/null && [ "$SECONDS" -lt "$term_deadline" ]; do
+                sleep 0.1
+              done
+              if kill -0 "$QEMU_PID" 2>/dev/null; then
+                echo "FAIL: QEMU did not stop within 10 s of SIGTERM; sending SIGKILL"
+                kill -KILL "$QEMU_PID" 2>/dev/null || true
+                kill_deadline=$((SECONDS + 2))
+                while kill -0 "$QEMU_PID" 2>/dev/null && [ "$SECONDS" -lt "$kill_deadline" ]; do
+                  sleep 0.1
+                done
+                if kill -0 "$QEMU_PID" 2>/dev/null; then
+                  QEMU_PID=""
+                  return 1
+                fi
+                wait "$QEMU_PID" 2>/dev/null || true
+                QEMU_PID=""
+                return 1
+              fi
+
               wait "$QEMU_PID" 2>/dev/null || true
               QEMU_PID=""
             fi
           }
-          trap stop_qemu EXIT
+          trap 'stop_qemu false || true' EXIT
 
           run_boot() {
             local boot_number="$1"
             local log_path="$2"
             local readiness_marker='racsh$ '
             local timeout_seconds=60
-            local started_us deadline_us now_us elapsed_ms qemu_status
+            local started_us deadline_seconds now_us elapsed_ms qemu_status
 
             started_us=${EPOCHREALTIME/./}
-            deadline_us=$((started_us + timeout_seconds * 1000000))
+            deadline_seconds=$((SECONDS + timeout_seconds))
             qemu-system-x86_64 "${QEMU_ARGS[@]}" > "$log_path" 2>&1 &
             QEMU_PID=$!
 
@@ -244,11 +274,11 @@ jobs:
               fi
 
               now_us=${EPOCHREALTIME/./}
-              if [ "$now_us" -ge "$deadline_us" ]; then
+              if [ "$SECONDS" -ge "$deadline_seconds" ]; then
                 elapsed_ms=$(((now_us - started_us) / 1000))
                 printf 'FAIL: boot %s did not reach the racsh prompt within %d s (elapsed %d.%03d s)\n' \
                   "$boot_number" "$timeout_seconds" "$((elapsed_ms / 1000))" "$((elapsed_ms % 1000))"
-                stop_qemu
+                stop_qemu false || true
                 echo "--- $log_path tail ---"
                 tail -n 30 "$log_path"
                 return 1
@@ -260,7 +290,12 @@ jobs:
             elapsed_ms=$(((now_us - started_us) / 1000))
             printf 'Boot %s reached the racsh prompt after %d.%03d s\n' \
               "$boot_number" "$((elapsed_ms / 1000))" "$((elapsed_ms % 1000))"
-            stop_qemu
+            if ! stop_qemu true; then
+              echo "FAIL: boot $boot_number reached the prompt, but QEMU did not shut down cleanly"
+              echo "--- $log_path tail ---"
+              tail -n 30 "$log_path"
+              return 1
+            fi
             echo "--- $log_path tail ---"
             tail -n 30 "$log_path"
           }
