@@ -150,7 +150,7 @@ jobs:
           ls -la /usr/share/OVMF/ || true
           qemu-system-x86_64 --version | head -n 1
 
-      - name: Boot in QEMU twice (persistence smoke, 15s each)
+      - name: Boot in QEMU twice (persistence smoke, 60s readiness deadline each)
         run: |
           # Ubuntu 24.04 renamed the OVMF code blob to OVMF_CODE_4M.fd and
           # dropped the symlink; older releases still ship OVMF_CODE.fd. Pick
@@ -209,18 +209,71 @@ jobs:
           # enumeration line ("4 enabled CPU(s)") and the final
           # all_aps_started smoke marker.
 
+          QEMU_PID=""
+          stop_qemu() {
+            if [ -n "$QEMU_PID" ]; then
+              if kill -0 "$QEMU_PID" 2>/dev/null; then
+                kill -TERM "$QEMU_PID" 2>/dev/null || true
+              fi
+              wait "$QEMU_PID" 2>/dev/null || true
+              QEMU_PID=""
+            fi
+          }
+          trap stop_qemu EXIT
+
+          run_boot() {
+            local boot_number="$1"
+            local log_path="$2"
+            local readiness_marker='racsh$ '
+            local timeout_seconds=60
+            local started_ms deadline_ms now_ms elapsed_ms qemu_status
+
+            : > "$log_path"
+            started_ms=$(date +%s%3N)
+            deadline_ms=$((started_ms + timeout_seconds * 1000))
+            qemu-system-x86_64 "${QEMU_ARGS[@]}" > "$log_path" 2>&1 &
+            QEMU_PID=$!
+
+            while ! grep -Fq "$readiness_marker" "$log_path"; do
+              if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+                if wait "$QEMU_PID"; then qemu_status=0; else qemu_status=$?; fi
+                QEMU_PID=""
+                echo "FAIL: QEMU exited with status $qemu_status before boot $boot_number reached the racsh prompt"
+                echo "--- $log_path tail ---"
+                tail -n 30 "$log_path"
+                return 1
+              fi
+
+              now_ms=$(date +%s%3N)
+              if [ "$now_ms" -ge "$deadline_ms" ]; then
+                elapsed_ms=$((now_ms - started_ms))
+                printf 'FAIL: boot %s did not reach the racsh prompt within %d s (elapsed %d.%03d s)\n' \
+                  "$boot_number" "$timeout_seconds" "$((elapsed_ms / 1000))" "$((elapsed_ms % 1000))"
+                stop_qemu
+                echo "--- $log_path tail ---"
+                tail -n 30 "$log_path"
+                return 1
+              fi
+              sleep 0.25
+            done
+
+            now_ms=$(date +%s%3N)
+            elapsed_ms=$((now_ms - started_ms))
+            printf 'Boot %s reached the racsh prompt after %d.%03d s\n' \
+              "$boot_number" "$((elapsed_ms / 1000))" "$((elapsed_ms % 1000))"
+            stop_qemu
+            echo "--- $log_path tail ---"
+            tail -n 30 "$log_path"
+          }
+
           # Boot 1 — first time the disk is touched. racfs::open_or_format
           # formats it; persistence_test creates boot-counter=1.
-          timeout 15 qemu-system-x86_64 "${QEMU_ARGS[@]}" > boot1.log 2>&1 || true
-          echo "--- boot1.log tail ---"
-          tail -n 30 boot1.log
+          run_boot 1 boot1.log
 
           # Boot 2 — disk image unchanged on disk. racfs::open_or_format
           # finds existing FS; persistence_test reads boot-counter, bumps to 2,
           # logs "file survived reboot".
-          timeout 15 qemu-system-x86_64 "${QEMU_ARGS[@]}" > boot2.log 2>&1 || true
-          echo "--- boot2.log tail ---"
-          tail -n 30 boot2.log
+          run_boot 2 boot2.log
 
           # Keep boot.log as a compat alias for the existing artifact upload.
           cp boot2.log boot.log
