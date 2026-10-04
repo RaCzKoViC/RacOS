@@ -1,0 +1,44 @@
+name: Notify profile
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published, edited, deleted]
+  workflow_run:
+    workflows: ['**', '!Notify profile']
+    types: [in_progress, completed]
+    branches: [main]
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: notify-profile-${{ github.event_name }}-${{ github.event.workflow_run.id || github.ref }}
+  cancel-in-progress: false
+jobs:
+  notify:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.name != 'Notify profile' && github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Dispatch project change
+        env:
+          PROFILE_DISPATCH_TOKEN: ${{ secrets.PROFILE_DISPATCH_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          token = os.environ['PROFILE_DISPATCH_TOKEN']
+          if not token:
+              raise SystemExit('Setup required: add PROFILE_DISPATCH_TOKEN; see RaCzKoViC/RaCzKoViC SETUP.md')
+          with open(os.environ['GITHUB_EVENT_PATH']) as f:
+              event = json.load(f)
+          payload = {'event_type':'project_changed','client_payload':{
+              'repository':os.environ['GITHUB_REPOSITORY'],
+              'event':os.environ['GITHUB_EVENT_NAME'],
+              'sha':event.get('workflow_run',{}).get('head_sha',os.environ['GITHUB_SHA'])}}
+          request = urllib.request.Request(
+              'https://api.github.com/repos/RaCzKoViC/RaCzKoViC/dispatches',
+              data=json.dumps(payload).encode(), method='POST', headers={
+                  'Authorization':'Bearer '+token, 'Accept':'application/vnd.github+json',
+                  'X-GitHub-Api-Version':'2022-11-28','User-Agent':'profile-event-notifier'})
+          with urllib.request.urlopen(request, timeout=30) as response:
+              if response.status != 204: raise RuntimeError('Dispatch rejected')
+          PY
