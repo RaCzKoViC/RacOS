@@ -144,6 +144,7 @@ pub extern "C" fn main(_argc: i32, argv: *const *const u8) -> i32 {
     test_chown_sets_uid_gid();
     test_env_inherits_shell_vars();
     test_exec_loop_memory_cleanup();
+    test_preemption_survives_a_busy_process();
     test_tty_ioctl_state();
     test_tty_output_processing();
     test_chdir_getcwd();
@@ -3003,6 +3004,107 @@ fn parse_memfree_kb(buf: &[u8]) -> Option<u32> {
         i += 1;
     }
     None
+}
+
+/// How long the busy child spins. Big enough to outlast a scheduling
+/// quantum under TCG, small enough not to lengthen the suite noticeably.
+const BUSY_ITERATIONS: u64 = 12_000_000;
+
+/// A process that does not yield must not stop the machine.
+///
+/// Until 2026-09 it did. The timer IRQ handler sent the PIC its
+/// end-of-interrupt *after* calling the scheduler - and the scheduler
+/// switches tasks inside the handler, which therefore never returns. The
+/// preempted task owed the EOI and could only pay it when it was next
+/// scheduled; meanwhile the PIC, still holding IRQ0 in service, delivered
+/// no further timer interrupt. So the first tick that preempted anything
+/// left the system with no clock and no preemption, and the only thing
+/// keeping it alive was that every process happened to block or yield
+/// often enough to get the preempted one running again.
+///
+/// A process that never yields broke that. `/bin/sleep`, which busy-waits
+/// on clock_gettime, was the one in the tree: `sleep 2` from the shell
+/// stopped the guest dead - no prompt, no output, nothing but a CPU
+/// spinning on a deadline that could never arrive, because the clock it
+/// waited for had stopped with it.
+fn test_preemption_survives_a_busy_process() {
+    println("\n[test] a process that does not yield is preempted");
+
+    // 1. A userland loop with no syscalls in it: nothing here yields, so
+    //    only the timer can take the CPU away. This one is a guard rather
+    //    than a witness - the loop is finite, so it finishes even with the
+    //    clock stopped, and exits of its own accord. The witness is (2).
+    let before = match monotonic_ms() {
+        Some(t) => t,
+        None => {
+            check!("read the monotonic clock", false);
+            return;
+        }
+    };
+    let busy = match fork() {
+        Ok(0) => {
+            let mut acc: u64 = 0;
+            let mut i: u64 = 0;
+            while i < BUSY_ITERATIONS {
+                // read_volatile keeps the loop: the compiler may not fold
+                // away what it cannot see through.
+                // SAFETY: acc is a live local of this process.
+                acc = unsafe { core::ptr::read_volatile(&acc) }.wrapping_add(i);
+                i += 1;
+            }
+            // SAFETY: as above; the read is only here to keep `acc` alive.
+            exit(if unsafe { core::ptr::read_volatile(&acc) } == u64::MAX {
+                1
+            } else {
+                0
+            });
+        }
+        Ok(pid) => pid,
+        Err(_) => {
+            check!("fork the busy child", false);
+            return;
+        }
+    };
+    let mut status: i32 = -1;
+    let waited = waitpid(busy, &mut status, 0);
+    check!(
+        "a busy child runs to completion and is reaped",
+        waited.unwrap_or(-1) == busy && status == 0
+    );
+    let after = monotonic_ms().unwrap_or(before);
+    check!("the clock kept running while it spun", after > before);
+
+    // 2. /bin/sleep itself: it waits in the kernel now, and for as long as
+    //    it was asked to. Both halves were broken: it read the clock in a
+    //    loop, which never yields and therefore wedged the guest (the
+    //    kernel cannot preempt such a process - ROADMAP section 0), and it
+    //    compared whole seconds, so `sleep 1` started at 10.99 s returned
+    //    10 ms later.
+    //
+    //    A child that waits the old way would be the sharper test of the
+    //    kernel defect, but on today's kernel it does not fail - it stops
+    //    the machine, and the suite with it. That test belongs with the
+    //    fix for it.
+    let before = monotonic_ms().unwrap_or(0);
+    let path = b"/bin/sleep\0";
+    let arg0 = b"sleep\0";
+    let arg1 = b"1\0";
+    let argv: [*const u8; 3] = [arg0.as_ptr(), arg1.as_ptr(), core::ptr::null()];
+    match spawn_args(path, &argv) {
+        Ok(pid) => {
+            let mut st: i32 = -1;
+            let w = waitpid(pid, &mut st, 0);
+            check!(
+                "/bin/sleep 1 returns, with status 0",
+                w.unwrap_or(-1) == pid && st == 0
+            );
+            let elapsed = monotonic_ms().unwrap_or(before).saturating_sub(before);
+            check!("/bin/sleep 1 waited about a second", elapsed >= 900);
+        }
+        Err(_) => check!("spawn /bin/sleep", false),
+    }
+
+    println("T44-PREEMPT-OK");
 }
 
 fn test_tty_ioctl_state() {

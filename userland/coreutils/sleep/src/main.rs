@@ -4,7 +4,14 @@
 use libc_lite;
 
 /// sleep — delay for a specified number of seconds.
-/// Uses clock_gettime busy-wait (no nanosleep syscall yet).
+///
+/// Through `nanosleep`, which blocks in the kernel. The old version read
+/// the clock in a tight loop instead, and got two things wrong for it: it
+/// burned a core for the whole delay, and it compared whole seconds, so
+/// `sleep 1` started at 10.99 s returned 10 ms later. The first one also
+/// wedged the guest until 2026-09 - a process that never yields could not
+/// be preempted (see arch::idt::timer_handler) - which is how a busy-wait
+/// in the smallest tool in the tree came to stop the machine.
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     if argc < 2 {
@@ -19,25 +26,13 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         return 1;
     }
 
-    // Get start time
-    let mut start = libc_lite::Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let _ = libc_lite::clock_gettime(libc_lite::CLOCK_MONOTONIC, &mut start);
-
-    let target = start.tv_sec + secs;
-
-    // Busy-wait loop
-    loop {
-        let mut now = libc_lite::Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        let _ = libc_lite::clock_gettime(libc_lite::CLOCK_MONOTONIC, &mut now);
-        if now.tv_sec >= target {
-            break;
-        }
+    if libc_lite::nanosleep(secs, 0).is_err() {
+        let _ = libc_lite::write(
+            2,
+            b"sleep: interrupted
+",
+        );
+        return 1;
     }
 
     0
